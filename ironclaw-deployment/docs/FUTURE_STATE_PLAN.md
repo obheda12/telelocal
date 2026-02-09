@@ -21,102 +21,112 @@ This document outlines the evolutionary path from the current "Option A" deploym
 
 ### Why Current Risks Exist
 
-**1. Config-Level vs Architectural Blocking**
-```
-Current: sendMessage blocked by settings.toml
-         ↓
-Problem: Config can be misconfigured, IronClaw bug could bypass
+```mermaid
+flowchart TD
+    subgraph Problem1["Problem 1: Config-Level Blocking"]
+        P1A["Current: sendMessage blocked<br/>by settings.toml"]
+        P1B["Risk: Config can be<br/>misconfigured"]
+        P1C["Target: sendMessage not in<br/>WASM capabilities"]
+        P1D["Result: Architecturally<br/>impossible"]
 
-Target:  sendMessage not in WASM tool's compiled capabilities
-         ↓
-Result:  Architecturally impossible, not just blocked
-```
+        P1A -->|"Vulnerable to"| P1B
+        P1C -->|"Achieves"| P1D
+    end
 
-**2. Shared Process Space**
-```
-Current: Credentials and LLM reasoning in same IronClaw process
-         ↓
-Problem: Memory corruption or IronClaw vulnerability could leak
+    subgraph Problem2["Problem 2: Shared Process"]
+        P2A["Current: Credentials + LLM<br/>same process"]
+        P2B["Risk: Memory corruption<br/>could leak"]
+        P2C["Target: Credentials in<br/>separate process"]
+        P2D["Result: Full compromise<br/>can't access creds"]
 
-Target:  Credentials in separate process with no LLM
-         ↓
-Result:  Even full IronClaw compromise can't access credentials
-```
+        P2A -->|"Vulnerable to"| P2B
+        P2C -->|"Achieves"| P2D
+    end
 
-**3. LLM Susceptibility**
-```
-Current: LLM sees raw message content, can be manipulated
-         ↓
-Problem: Prompt injection affects reasoning quality
+    subgraph Problem3["Problem 3: LLM Susceptibility"]
+        P3A["Current: LLM sees<br/>raw messages"]
+        P3B["Risk: Prompt injection<br/>affects reasoning"]
+        P3C["Target: Multi-model<br/>cross-validation"]
+        P3D["Result: Single injection<br/>can't compromise all"]
 
-Target:  Multiple LLM calls with cross-validation
-         ↓
-Result:  Single injection can't compromise all reasoning paths
+        P3A -->|"Vulnerable to"| P3B
+        P3C -->|"Achieves"| P3D
+    end
+
+    style P1B fill:#ffcdd2
+    style P2B fill:#ffcdd2
+    style P3B fill:#ffcdd2
+    style P1D fill:#c8e6c9
+    style P2D fill:#c8e6c9
+    style P3D fill:#c8e6c9
 ```
 
 ---
 
-## Evolution Phases
+## Evolution Phases Overview
 
+```mermaid
+flowchart LR
+    subgraph P0["Phase 0 (Current)"]
+        direction TB
+        P0A["Option A:<br/>Config-based blocking"]
+        P0R["Risk: Low"]
+        P0D["sendMessage blocked<br/>in settings.toml"]
+    end
+
+    subgraph P1["Phase 1"]
+        direction TB
+        P1A["Option B:<br/>Custom WASM Tool"]
+        P1R["Risk: Very Low"]
+        P1D["No sendMessage<br/>in binary"]
+    end
+
+    subgraph P2["Phase 2"]
+        direction TB
+        P2A["Option B+:<br/>Network Firewall"]
+        P2R["Risk: Near Zero"]
+        P2D["Kernel-level<br/>traffic filtering"]
+    end
+
+    subgraph P3["Phase 3"]
+        direction TB
+        P3A["Option C:<br/>Air-Gapped"]
+        P3R["Cred Theft: Impossible"]
+        P3D["Separate processes:<br/>creds vs LLM"]
+    end
+
+    subgraph P4["Phase 4"]
+        direction TB
+        P4A["Option C+:<br/>HSM/TPM"]
+        P4R["Hardware Attack Required"]
+        P4D["Credentials in<br/>tamper-resistant chip"]
+    end
+
+    subgraph P5["Phase 5 (Ultimate)"]
+        direction TB
+        P5A["Formal<br/>Verification"]
+        P5R["Provably Impossible"]
+        P5D["Mathematical proof<br/>of security"]
+    end
+
+    P0 --> P1 --> P2 --> P3 --> P4 --> P5
+
+    style P0 fill:#ffcdd2
+    style P1 fill:#fff3e0
+    style P2 fill:#fff9c4
+    style P3 fill:#c8e6c9
+    style P4 fill:#b2dfdb
+    style P5 fill:#b3e5fc
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                          SECURITY EVOLUTION PATH                            │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                             │
-│  PHASE 0 (Current)          PHASE 1                PHASE 2                  │
-│  ─────────────────          ───────                ───────                  │
-│  Option A:                  Option B:              Option B+:               │
-│  Config-based blocking      Custom WASM Tool       + Network Firewall       │
-│                                                                             │
-│  ┌─────────────────┐       ┌─────────────────┐    ┌─────────────────┐      │
-│  │ IronClaw        │       │ IronClaw        │    │ IronClaw        │      │
-│  │ ┌─────────────┐ │       │ ┌─────────────┐ │    │ ┌─────────────┐ │      │
-│  │ │ Telegram    │ │       │ │ TG ReadOnly │ │    │ │ TG ReadOnly │ │      │
-│  │ │ Tool        │ │  ───► │ │ Tool        │ │───►│ │ Tool        │ │      │
-│  │ │ (blocked by │ │       │ │ (no send    │ │    │ │ (no send    │ │      │
-│  │ │  config)    │ │       │ │  capability)│ │    │ │  capability)│ │      │
-│  │ └─────────────┘ │       │ └─────────────┘ │    │ └─────────────┘ │      │
-│  └─────────────────┘       └─────────────────┘    └────────┬────────┘      │
-│                                                             │               │
-│  Risk: Config error         Risk: IronClaw bug    iptables/nftables        │
-│        could enable send          could bypass     blocks non-TG traffic   │
-│                                                             │               │
-│                                                    ┌────────▼────────┐      │
-│                                                    │ Kernel-level    │      │
-│                                                    │ network filter  │      │
-│                                                    └─────────────────┘      │
-│                                                                             │
-│                                                                             │
-│  PHASE 3                    PHASE 4                PHASE 5 (Ultimate)       │
-│  ───────                    ───────                ──────────────────       │
-│  Option C:                  Option C+:             Hardware Security        │
-│  Air-Gapped Architecture    + HSM/TPM              Module + Formal          │
-│                                                    Verification             │
-│                                                                             │
-│  ┌─────────────────┐       ┌─────────────────┐    ┌─────────────────┐      │
-│  │ Ingest Service  │       │ Ingest Service  │    │ Ingest Service  │      │
-│  │ (has creds,     │       │ (has creds in   │    │ (creds in HSM,  │      │
-│  │  no LLM)        │       │  TPM/HSM)       │    │  no LLM)        │      │
-│  └────────┬────────┘       └────────┬────────┘    └────────┬────────┘      │
-│           │ write                   │                      │               │
-│           ▼                         ▼                      ▼               │
-│  ┌─────────────────┐       ┌─────────────────┐    ┌─────────────────┐      │
-│  │   PostgreSQL    │       │   PostgreSQL    │    │   PostgreSQL    │      │
-│  │ (sanitized msgs)│       │ (sanitized msgs)│    │ (sanitized,     │      │
-│  └────────┬────────┘       └────────┬────────┘    │  schema-locked) │      │
-│           │ read-only               │             └────────┬────────┘      │
-│           ▼                         ▼                      │               │
-│  ┌─────────────────┐       ┌─────────────────┐            ▼               │
-│  │ IronClaw Agent  │       │ IronClaw Agent  │    ┌─────────────────┐      │
-│  │ (no creds,      │       │ (no creds,      │    │ IronClaw Agent  │      │
-│  │  no network)    │       │  no network,    │    │ (formally       │      │
-│  └─────────────────┘       │  verified WASM) │    │  verified, no   │      │
-│                            └─────────────────┘    │  creds/network) │      │
-│  Risk: DB compromise       Risk: HSM bypass      └─────────────────┘      │
-│        exposes messages           (very hard)                              │
-│                                                   Risk: Hardware fault     │
-│                                                         (very rare)        │
-└─────────────────────────────────────────────────────────────────────────────┘
+
+### Risk Reduction Summary
+
+```mermaid
+xychart-beta
+    title "Risk Level by Phase"
+    x-axis ["Phase 0", "Phase 1", "Phase 2", "Phase 3", "Phase 4", "Phase 5"]
+    y-axis "Risk Score" 0 --> 10
+    bar [6, 4, 2, 1, 0.5, 0.1]
 ```
 
 ---
@@ -128,6 +138,35 @@ Result:  Single injection can't compromise all reasoning paths
 **Timeline**: 1-2 days
 
 **Risk Reduction**: Message sending moves from "Low" to "Very Low"
+
+### Architecture Comparison
+
+```mermaid
+flowchart LR
+    subgraph Current["Current (Config Blocking)"]
+        direction TB
+        C1["Telegram Tool<br/>(full capabilities)"]
+        C2["settings.toml<br/>blocked_methods"]
+        C3["Runtime Check"]
+
+        C1 --> C2 --> C3
+        C3 -->|"Block"| C4["Denied"]
+        C3 -->|"Config Error"| C5["ALLOWED!"]
+    end
+
+    subgraph Phase1["Phase 1 (Architectural)"]
+        direction TB
+        P1["Telegram ReadOnly Tool<br/>(limited capabilities)"]
+        P2["WASM Runtime"]
+        P3["Capability Check"]
+
+        P1 --> P2 --> P3
+        P3 -->|"Not in binary"| P4["Cannot Execute"]
+    end
+
+    style C5 fill:#ffcdd2
+    style P4 fill:#c8e6c9
+```
 
 ### Implementation
 
@@ -165,7 +204,6 @@ impl TelegramReadOnly {
             .send()
             .await?;
 
-        // Parse and return messages
         let updates: TelegramUpdates = response.json().await?;
         Ok(updates.result.into_iter().map(|u| u.message).collect())
     }
@@ -270,10 +308,37 @@ ironclaw tools inspect telegram_readonly
 
 **Risk Reduction**: Exfiltration moves from "Very Low" to "Near Impossible"
 
-### Implementation
+### Defense Layers
+
+```mermaid
+flowchart TB
+    subgraph App["Application Layer"]
+        A1["IronClaw HTTP Allowlist"]
+    end
+
+    subgraph Kernel["Kernel Layer (NEW)"]
+        K1["nftables / iptables"]
+        K2["Network Namespace"]
+    end
+
+    subgraph Network["Network Layer"]
+        N1["Only Telegram IPs allowed"]
+    end
+
+    App --> Kernel --> Network
+
+    Attack["Malicious Request"] --> App
+    App -->|"IronClaw Bug"| Kernel
+    Kernel -->|"BLOCKED"| Drop["Dropped"]
+
+    style Kernel fill:#c8e6c9
+    style Drop fill:#c8e6c9
+```
+
+### Implementation - nftables
 
 ```bash
-# /etc/nftables.conf (or iptables equivalent)
+# /etc/nftables.conf
 
 #!/usr/sbin/nft -f
 
@@ -293,8 +358,7 @@ table inet ironclaw_isolation {
         udp dport 53 accept
         tcp dport 53 accept
 
-        # Allow ONLY Telegram API
-        # Telegram API IPs (update periodically)
+        # Allow ONLY Telegram API IP ranges
         ip daddr 149.154.160.0/20 tcp dport 443 accept
         ip daddr 91.108.4.0/22 tcp dport 443 accept
         ip daddr 91.108.8.0/22 tcp dport 443 accept
@@ -338,50 +402,67 @@ ip netns exec ironclaw_ns sudo -u ironclaw /home/pi/ironclaw/target/release/iron
 
 ### Architecture
 
+```mermaid
+flowchart TB
+    subgraph CredZone["CREDENTIAL ZONE (Has secrets, NO AI)"]
+        Ingest["Ingest Service<br/>(Rust daemon)"]
+        Creds["Telegram Credentials"]
+        TG["Telegram API"]
+
+        Ingest -->|"Poll"| TG
+        Creds -->|"Auth"| Ingest
+    end
+
+    subgraph DataZone["DATA ZONE (Shared)"]
+        DB[("PostgreSQL<br/>Sanitized messages<br/>Embeddings<br/>Audit logs")]
+    end
+
+    subgraph LLMZone["LLM ZONE (Has AI, NO secrets)"]
+        Agent["IronClaw Agent"]
+        User["User REPL"]
+
+        User -->|"Query"| Agent
+    end
+
+    Ingest -->|"Write (sanitized)"| DB
+    Agent -->|"Read ONLY"| DB
+
+    style CredZone fill:#ffcdd2
+    style LLMZone fill:#c8e6c9
+    style DataZone fill:#fff3e0
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                        AIR-GAPPED ARCHITECTURE                              │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                             │
-│  CREDENTIAL ZONE                    │           LLM ZONE                    │
-│  (Has secrets, no AI)               │           (Has AI, no secrets)        │
-│                                     │                                       │
-│  ┌─────────────────────┐            │                                       │
-│  │   INGEST SERVICE    │            │                                       │
-│  │                     │            │                                       │
-│  │ • Rust daemon       │            │                                       │
-│  │ • Telegram creds    │            │                                       │
-│  │ • NO LLM            │            │                                       │
-│  │ • NO prompt input   │            │                                       │
-│  │                     │            │                                       │
-│  │ Function:           │            │                                       │
-│  │ 1. Poll Telegram    │            │                                       │
-│  │ 2. Sanitize msgs    │            │            ┌─────────────────────┐    │
-│  │ 3. Write to DB      │───────────────────────► │   POSTGRESQL        │    │
-│  │                     │   (one-way write)       │                     │    │
-│  └─────────────────────┘            │            │ • Sanitized msgs    │    │
-│           │                         │            │ • Embeddings        │    │
-│           │                         │            │ • Audit logs        │    │
-│           │ Telegram                │            └──────────┬──────────┘    │
-│           │ API                     │                       │               │
-│           ▼                         │                       │ read-only     │
-│  ┌─────────────────────┐            │                       ▼               │
-│  │   TELEGRAM API      │            │            ┌─────────────────────┐    │
-│  │   (external)        │            │            │   IRONCLAW AGENT    │    │
-│  └─────────────────────┘            │            │                     │    │
-│                                     │            │ • LLM reasoning     │    │
-│                                     │            │ • NO credentials    │    │
-│                                     │            │ • NO network        │    │
-│                                     │            │ • DB read-only      │    │
-│                                     │            │                     │    │
-│                                     │            │ Even if fully       │    │
-│                                     │            │ compromised:        │    │
-│                                     │            │ • Can't send msgs   │    │
-│                                     │            │ • Can't exfiltrate  │    │
-│                                     │            │ • Can't get creds   │    │
-│                                     │            └─────────────────────┘    │
-│                                     │                                       │
-└─────────────────────────────────────────────────────────────────────────────┘
+
+### Component Detail
+
+```mermaid
+flowchart LR
+    subgraph Ingest["Ingest Service"]
+        I1["1. Poll Telegram API"]
+        I2["2. Sanitize content"]
+        I3["3. Detect injections"]
+        I4["4. Write to DB"]
+
+        I1 --> I2 --> I3 --> I4
+    end
+
+    subgraph Sanitize["Sanitization Steps"]
+        S1["Strip URLs"]
+        S2["Detect patterns"]
+        S3["Escape chars"]
+        S4["Truncate length"]
+        S5["Add metadata"]
+    end
+
+    I2 --> Sanitize
+
+    subgraph Agent["IronClaw Agent"]
+        A1["Read sanitized msgs"]
+        A2["NO credentials"]
+        A3["NO network access"]
+        A4["DB read-only"]
+    end
+
+    I4 -->|"Sanitized data"| A1
 ```
 
 ### Ingest Service Implementation
@@ -395,20 +476,17 @@ use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Load credentials from secure storage
     let token = std::env::var("TELEGRAM_BOT_TOKEN")?;
     let db_url = std::env::var("DATABASE_URL")?;
 
     let bot = Bot::new(token);
     let pool = PgPool::connect(&db_url).await?;
 
-    // Main polling loop
     loop {
         match fetch_and_store(&bot, &pool).await {
             Ok(count) => tracing::info!("Processed {} messages", count),
             Err(e) => tracing::error!("Error: {}", e),
         }
-
         tokio::time::sleep(Duration::from_secs(30)).await;
     }
 }
@@ -419,10 +497,8 @@ async fn fetch_and_store(bot: &Bot, pool: &PgPool) -> Result<usize, Error> {
 
     for update in updates {
         if let Some(msg) = update.message {
-            // Sanitize before storage
             let sanitized = sanitize_message(&msg);
 
-            // Store sanitized version only
             sqlx::query!(
                 r#"
                 INSERT INTO messages (telegram_id, chat_id, sender_name, content_sanitized, received_at)
@@ -448,15 +524,10 @@ async fn fetch_and_store(bot: &Bot, pool: &PgPool) -> Result<usize, Error> {
 fn sanitize_message(msg: &Message) -> SanitizedMessage {
     let mut content = msg.text().unwrap_or_default().to_string();
 
-    // 1. Detect and flag injection attempts
+    // Detect injection patterns
     let injection_patterns = [
-        "ignore previous",
-        "ignore all instructions",
-        "system prompt",
-        "you are now",
-        "new instructions",
-        "override",
-        "admin mode",
+        "ignore previous", "ignore all instructions", "system prompt",
+        "you are now", "new instructions", "override", "admin mode",
     ];
 
     let mut flags = Vec::new();
@@ -466,26 +537,19 @@ fn sanitize_message(msg: &Message) -> SanitizedMessage {
         }
     }
 
-    // 2. Encode/neutralize URLs
+    // Encode/neutralize URLs
     content = URL_REGEX.replace_all(&content, "[URL REMOVED]").to_string();
 
-    // 3. Truncate to prevent context stuffing
+    // Truncate to prevent context stuffing
     if content.len() > 4000 {
         content = format!("{}... [TRUNCATED]", &content[..4000]);
     }
 
-    // 4. Escape any remaining control sequences
-    content = content.replace('\x00', "");
-
-    SanitizedMessage {
-        content,
-        flags,
-        original_length: msg.text().map(|t| t.len()).unwrap_or(0),
-    }
+    SanitizedMessage { content, flags }
 }
 ```
 
-### Database Schema for Air-Gapped Mode
+### Database Schema
 
 ```sql
 -- Strict schema to prevent injection via DB
@@ -494,13 +558,12 @@ CREATE TABLE messages (
     id              BIGSERIAL PRIMARY KEY,
     telegram_id     BIGINT UNIQUE NOT NULL,
     chat_id         BIGINT NOT NULL,
-    sender_name     VARCHAR(255),  -- Limited length
+    sender_name     VARCHAR(255),
     content_sanitized TEXT NOT NULL,
     received_at     TIMESTAMPTZ NOT NULL,
     ingested_at     TIMESTAMPTZ DEFAULT NOW(),
-    flags           TEXT[],        -- Injection detection flags
+    flags           TEXT[],
 
-    -- Constraints prevent injection via field values
     CONSTRAINT valid_chat_id CHECK (chat_id > 0),
     CONSTRAINT content_not_empty CHECK (length(content_sanitized) > 0),
     CONSTRAINT content_max_length CHECK (length(content_sanitized) <= 10000)
@@ -510,13 +573,13 @@ CREATE TABLE messages (
 CREATE ROLE ironclaw_readonly;
 GRANT CONNECT ON DATABASE ironclaw TO ironclaw_readonly;
 GRANT SELECT ON messages TO ironclaw_readonly;
--- NO INSERT, UPDATE, DELETE granted
+-- NO INSERT, UPDATE, DELETE
 
 -- Ingest service has write access
 CREATE ROLE ingest_service;
 GRANT CONNECT ON DATABASE ironclaw TO ingest_service;
 GRANT INSERT ON messages TO ingest_service;
--- NO SELECT needed (write-only)
+-- NO SELECT (write-only)
 ```
 
 ---
@@ -529,6 +592,31 @@ GRANT INSERT ON messages TO ingest_service;
 
 **Risk Reduction**: Credential theft requires physical hardware attack
 
+### Architecture with HSM
+
+```mermaid
+flowchart TB
+    subgraph Hardware["Hardware Security"]
+        HSM["HSM/TPM<br/>Tamper-resistant"]
+        Token["Telegram Token<br/>(encrypted in silicon)"]
+    end
+
+    subgraph Software["Software Layer"]
+        Ingest["Ingest Service"]
+        Sign["Request Signing"]
+    end
+
+    HSM --> Token
+    Token -->|"Never leaves HSM"| Sign
+    Sign -->|"Signed request"| Ingest
+    Ingest -->|"API call"| TG["Telegram"]
+
+    Attack["Software Compromise"] -.->|"Cannot extract"| HSM
+
+    style HSM fill:#b3e5fc
+    style Attack fill:#ffcdd2
+```
+
 ### Raspberry Pi TPM Option
 
 ```bash
@@ -539,28 +627,16 @@ sudo apt install tpm2-tools tpm2-abrmd
 echo -n "$TELEGRAM_BOT_TOKEN" | tpm2_nvdefine -C o -s 64 -a "ownerread|ownerwrite" 0x1500001
 echo -n "$TELEGRAM_BOT_TOKEN" | tpm2_nvwrite -C o -i - 0x1500001
 
-# Ingest service reads from TPM at runtime
-# Token never touches filesystem
+# Token never touches filesystem - read directly from TPM at runtime
 ```
 
-### External HSM Option (Higher Security)
+### External HSM Options
 
-For maximum security, use a dedicated HSM like:
-- YubiHSM 2 (~$650)
-- Nitrokey HSM 2 (~$109)
-- AWS CloudHSM (cloud, but hardware-backed)
-
-```rust
-// Reading from YubiHSM
-use yubihsm::{Client, Credentials, HttpConfig};
-
-async fn get_telegram_token(hsm: &Client) -> Result<String, Error> {
-    // Token stored as opaque object in HSM
-    // Even if system is compromised, token can only be USED, not EXTRACTED
-    let token_bytes = hsm.get_opaque(TELEGRAM_TOKEN_ID)?;
-    Ok(String::from_utf8(token_bytes)?)
-}
-```
+| Device | Price | Security Level |
+|--------|-------|----------------|
+| YubiHSM 2 | ~$650 | FIPS 140-2 Level 3 |
+| Nitrokey HSM 2 | ~$109 | Common Criteria EAL4+ |
+| AWS CloudHSM | $/hr | FIPS 140-2 Level 3 |
 
 ---
 
@@ -572,26 +648,32 @@ async fn get_telegram_token(hsm: &Client) -> Result<String, Error> {
 
 **Risk Reduction**: Unauthorized actions become "Provably Impossible"
 
-### Approach
+### Verification Approach
 
-1. **Define Security Properties**
-   ```
-   Property 1: ∀ execution paths, no HTTP POST to telegram.org
-   Property 2: ∀ execution paths, TELEGRAM_BOT_TOKEN not in output
-   Property 3: ∀ execution paths, only allowlisted URLs accessed
-   ```
+```mermaid
+flowchart TD
+    subgraph Properties["Security Properties to Prove"]
+        P1["Property 1: No HTTP POST<br/>to telegram.org"]
+        P2["Property 2: Token never<br/>in output"]
+        P3["Property 3: Only allowlisted<br/>URLs accessed"]
+    end
 
-2. **Verify WASM Tool**
-   - Use tools like Kani (Rust model checker) or WASM symbolic execution
-   - Prove the compiled WASM cannot violate properties
+    subgraph Tools["Verification Tools"]
+        T1["Kani (Rust)"]
+        T2["WASM Symbolic Exec"]
+        T3["Network Verifiers"]
+    end
 
-3. **Verify Host Boundary**
-   - Prove IronClaw's allowlist implementation is correct
-   - Prove credential injection happens only after allowlist check
+    subgraph Targets["Verification Targets"]
+        V1["WASM Tool"]
+        V2["Host Boundary"]
+        V3["Network Rules"]
+    end
 
-4. **Verify Network Stack**
-   - Prove iptables/nftables rules enforce expected behavior
-   - Use network verification tools (Batfish, etc.)
+    P1 --> T1 --> V1
+    P2 --> T2 --> V2
+    P3 --> T3 --> V3
+```
 
 ### Example Kani Verification
 
@@ -605,7 +687,6 @@ mod verification {
         let tool = TelegramReadOnly;
         let caps = tool.capabilities();
 
-        // Prove: no capability allows sendMessage
         for cap in caps {
             if let Capability::Http { url_pattern, methods } = cap {
                 kani::assert!(
@@ -614,7 +695,7 @@ mod verification {
                 );
                 kani::assert!(
                     !methods.contains(&HttpMethod::Post),
-                    "Tool must not have POST capability to Telegram"
+                    "Tool must not have POST capability"
                 );
             }
         }
@@ -625,12 +706,11 @@ mod verification {
         let ctx = kani::any::<ToolContext>();
         let result = TelegramReadOnly.get_updates(&ctx, Some(10), None);
 
-        // Prove: output never contains token pattern
         if let Ok(messages) = result {
             for msg in messages {
                 kani::assert!(
                     !msg.content.contains("bot") || !msg.content.contains(":"),
-                    "Output must not contain token-like patterns"
+                    "Output must not contain token patterns"
                 );
             }
         }
@@ -642,61 +722,79 @@ mod verification {
 
 ## Summary: Risk Reduction by Phase
 
-| Threat | Phase 0 | Phase 1 | Phase 2 | Phase 3 | Phase 4 | Phase 5 |
-|--------|---------|---------|---------|---------|---------|---------|
-| Credential theft | Very Low | Very Low | Very Low | **Impossible** | **Impossible** | **Proven** |
-| Send message | Low | **Very Low** | **Very Low** | **Impossible** | **Impossible** | **Proven** |
-| Exfiltration | Very Low | Very Low | **Near Impossible** | **Impossible** | **Impossible** | **Proven** |
-| Bad reasoning | Medium | Medium | Medium | Medium | Medium | Low |
-| Info disclosure | Medium | Medium | Medium | Low | Low | Low |
-| WASM escape | Very Low | Very Low | Very Low | Very Low | Very Low | **Proven** |
-| Supply chain | Low | Low | Low | Very Low | Very Low | Low |
-| Config error | Low | **Very Low** | **Very Low** | **Very Low** | **Very Low** | N/A |
+```mermaid
+flowchart LR
+    subgraph Threats["Threat Types"]
+        T1["Credential Theft"]
+        T2["Send Message"]
+        T3["Exfiltration"]
+        T4["Bad Reasoning"]
+    end
+
+    subgraph P0["Phase 0"]
+        T1_0["Very Low"]
+        T2_0["Low"]
+        T3_0["Very Low"]
+        T4_0["Medium"]
+    end
+
+    subgraph P3["Phase 3"]
+        T1_3["Impossible"]
+        T2_3["Impossible"]
+        T3_3["Impossible"]
+        T4_3["Medium"]
+    end
+
+    subgraph P5["Phase 5"]
+        T1_5["Proven"]
+        T2_5["Proven"]
+        T3_5["Proven"]
+        T4_5["Low"]
+    end
+
+    T1 --> T1_0 --> T1_3 --> T1_5
+    T2 --> T2_0 --> T2_3 --> T2_5
+    T3 --> T3_0 --> T3_3 --> T3_5
+    T4 --> T4_0 --> T4_3 --> T4_5
+
+    style T1_0 fill:#fff3e0
+    style T2_0 fill:#ffcdd2
+    style T1_3 fill:#c8e6c9
+    style T2_3 fill:#c8e6c9
+    style T3_3 fill:#c8e6c9
+    style T1_5 fill:#b3e5fc
+    style T2_5 fill:#b3e5fc
+    style T3_5 fill:#b3e5fc
+```
 
 ### Recommended Implementation Order
 
-1. **Phase 1** (Custom WASM) - Do immediately, high ROI
-2. **Phase 2** (Firewall) - Do immediately, low effort
-3. **Phase 3** (Air-gap) - Do if handling sensitive data
-4. **Phase 4** (HSM) - Do if compliance requires or high-value target
-5. **Phase 5** (Formal) - Research project, aspirational
+| Phase | Effort | Priority | Reason |
+|-------|--------|----------|--------|
+| **1** | 1-2 days | **HIGH** | Architectural blocking is strictly better |
+| **2** | 2-4 hours | **HIGH** | Low effort, high defense-in-depth value |
+| 3 | 1-2 weeks | MEDIUM | Only if handling sensitive data |
+| 4 | 1 week + $ | LOW | Only for compliance requirements |
+| 5 | 3-6 months | RESEARCH | Academic/critical systems only |
 
 ---
 
 ## Appendix: Residual Risks That Cannot Be Fully Mitigated
 
-Some risks are inherent to the use case and cannot be eliminated:
+Some risks are inherent to the use case:
 
 ### 1. LLM Reasoning Manipulation
-**Why it persists**: The LLM must process message content to be useful. Adversarial content can influence reasoning.
-
-**Mitigation strategies** (reduce, not eliminate):
-- Multi-model verification (use different LLMs, compare outputs)
-- Confidence scoring (flag low-confidence responses)
-- Human review for sensitive queries
+- **Why it persists**: LLM must process message content to be useful
+- **Mitigation**: Multi-model verification, confidence scoring, human review
 
 ### 2. Information Already in Context
-**Why it persists**: If the agent has read sensitive messages, it "knows" them. Prompt injection might extract this.
-
-**Mitigation strategies**:
-- Minimize context window (don't load all messages)
-- Separate sensitive chats (different databases)
-- Time-based expiry (forget old messages)
+- **Why it persists**: Agent "knows" messages it has processed
+- **Mitigation**: Minimize context window, time-based expiry
 
 ### 3. Physical Device Compromise
-**Why it persists**: Someone with physical access can extract data.
+- **Why it persists**: Physical access enables extraction
+- **Mitigation**: Full disk encryption, TPM-sealed keys, physical security
 
-**Mitigation strategies**:
-- Full disk encryption (LUKS)
-- TPM-sealed encryption keys
-- Physical security (locked room)
-- Tamper-evident enclosures
-
-### 4. Upstream Dependency Vulnerabilities
-**Why it persists**: We depend on Rust, wasmtime, IronClaw, PostgreSQL, Linux kernel.
-
-**Mitigation strategies**:
-- Keep dependencies updated
-- Monitor CVE databases
-- Use minimal dependency set
-- Consider reproducible builds
+### 4. Upstream Dependencies
+- **Why it persists**: We depend on Rust, wasmtime, PostgreSQL, Linux
+- **Mitigation**: Keep updated, monitor CVEs, minimal dependencies
