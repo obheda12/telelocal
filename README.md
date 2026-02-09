@@ -553,7 +553,8 @@ ironclaw-deployment/
 │       └── Indirect injection
 │
 └── docs/
-    └── README.md               # Deployment documentation
+    ├── QUICKSTART.md           # Condensed deployment checklist
+    └── FUTURE_STATE_PLAN.md    # Security hardening roadmap
 ```
 
 ### Telegram Method Classification
