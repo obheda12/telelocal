@@ -24,7 +24,7 @@ IronClaw (Rust WASM runtime) was the core of the previous architecture. It doesn
 | Credential Injection | System keychain + env injection via systemd | Telethon session != bot token; different credential model |
 | HTTP Allowlist | nftables kernel firewall | More robust than application-level allowlist |
 
-What carries over: the defense-in-depth *philosophy*, threat modeling approach, systemd hardening patterns, and documentation standards. The previous IronClaw deployment is preserved in `archive/ironclaw-v2/`.
+What carries over: the defense-in-depth *philosophy*, threat modeling approach, systemd hardening patterns, and documentation standards.
 
 ---
 

@@ -836,7 +836,7 @@ The following risks are explicitly acknowledged and accepted by the operator as 
 
 ## 15. Comparison with Previous Architecture (IronClaw v2)
 
-The previous architecture used IronClaw (Rust WASM runtime) with the Bot API. The new architecture uses process-isolated Python services with Telethon MTProto. Previous deployment preserved in `archive/ironclaw-v2/`.
+The previous architecture used IronClaw (Rust WASM runtime) with the Bot API. The new architecture uses process-isolated Python services with Telethon MTProto.
 
 ### What Improved
 
