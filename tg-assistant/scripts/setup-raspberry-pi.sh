@@ -4,6 +4,13 @@
 # Installs and configures: Python 3.11+, PostgreSQL + pgvector,
 # dedicated system users, systemd services, nftables firewall rules.
 #
+# NOTE: For a complete guided setup (including credentials, session
+# creation, and service activation), use setup.sh instead:
+#   sudo ./scripts/setup.sh
+#
+# This script handles only infrastructure. Use it for granular control
+# or when re-running system setup independently.
+#
 # Prerequisites:
 # - Raspberry Pi 4 (4GB+) or Pi 5
 # - Raspberry Pi OS (64-bit) or Ubuntu 22.04+ ARM64
@@ -645,27 +652,11 @@ print_summary() {
     echo ""
     echo "----------------------------------------------"
     echo ""
-    echo -e "${BOLD}Next Steps:${NC}"
+    echo -e "${BOLD}Next:${NC}"
+    echo "  For a complete guided setup (credentials, session, services):"
+    echo "    sudo ${PROJECT_ROOT}/scripts/setup.sh"
     echo ""
-    echo "  1. Create your Telethon session (interactive -- requires your phone + 2FA):"
-    echo "     ${PROJECT_ROOT}/scripts/setup-telethon-session.sh"
-    echo ""
-    echo "  2. Create a Telegram bot via @BotFather and save the token:"
-    echo "     - Message @BotFather on Telegram"
-    echo "     - Send /newbot and follow prompts"
-    echo "     - Store token: secret-tool store --label='tg-querybot-token' service tg-assistant key bot_token"
-    echo ""
-    echo "  3. Add your Anthropic API key:"
-    echo "     secret-tool store --label='tg-claude-key' service tg-assistant key anthropic_api_key"
-    echo ""
-    echo "  4. Set your Telegram user ID (owner_id) in ${CONFIG_DIR}/settings.toml"
-    echo ""
-    echo "  5. Run security verification:"
-    echo "     ${PROJECT_ROOT}/tests/security-verification.sh"
-    echo ""
-    echo "  6. Start services:"
-    echo "     sudo systemctl enable tg-syncer tg-querybot"
-    echo "     sudo systemctl start tg-syncer tg-querybot"
+    echo "  Or continue manually -- see docs/QUICKSTART.md for steps."
     echo ""
 
     # Save database passwords to a temporary secure file

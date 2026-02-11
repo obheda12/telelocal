@@ -89,15 +89,12 @@ allowed_methods = [
 
     # Entity resolution (needed to map IDs to names)
     "get_entity",
-    "get_input_entity",
 
     # Participant info (for group context)
     "get_participants",
-    "iter_participants",
 
     # Self-identification
     "get_me",
-    "get_peer_id",
 
     # Profile photo download (for UI, optional)
     "download_profile_photo",
@@ -106,11 +103,6 @@ allowed_methods = [
     "connect",
     "disconnect",
     "is_connected",
-    "start",
-
-    # Session management
-    "session",
-    "loop",
 ]
 
 # =============================================================================
@@ -124,7 +116,7 @@ bot_token_keychain_key = "tg-assistant-bot-token"
 # SECURITY: Only respond to this Telegram user ID. All other messages are
 # silently dropped (not even an error response, to avoid information leakage).
 # Find your ID: message @userinfobot on Telegram.
-owner_telegram_id = 0  # CHANGE_ME: Replace with your numeric Telegram user ID
+owner_telegram_id = OWNER_ID_PLACEHOLDER  # Replaced by setup.sh with your Telegram user ID
 
 # Rate limiting to prevent API cost runaway and abuse.
 # 20 queries/minute is generous for personal use; adjust down if concerned

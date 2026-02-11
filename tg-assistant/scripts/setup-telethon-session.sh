@@ -3,6 +3,12 @@
 # Telegram Personal Assistant - Telethon Session Setup
 # Creates an encrypted Telethon session file for the TG Syncer service.
 #
+# NOTE: For initial setup, use the unified setup.sh instead:
+#   sudo ./scripts/setup.sh
+#
+# Use this script to re-create or replace an existing Telethon session
+# independently (e.g., after session expiry or compromise).
+#
 # This is interactive: you will be prompted for your phone number,
 # verification code, and 2FA password (if enabled).
 #
