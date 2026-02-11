@@ -631,6 +631,190 @@ flowchart TD
 
 **Summary**: Network exfiltration is blocked by nftables. API-based exfiltration is blocked by the read-only wrapper (Telegram) or infeasible (Anthropic -- attacker cannot retrieve data from Anthropic's servers). Physical access to an unencrypted SD card is the primary residual risk.
 
+### Attack Tree 4: Supply Chain Compromise
+
+```mermaid
+flowchart TD
+    Root["Compromise via<br/>Malicious Dependency"]
+
+    Root --> A["Python Package<br/>(PyPI)"]
+    Root --> B["System Package<br/>(apt/dnf)"]
+    Root --> C["Compromise Timing"]
+
+    A --> A1["Compromised Telethon"]
+    A1 --> A1a{"Access in-memory<br/>session?"}
+    A1a -->|"Yes"| A1b["Full account access<br/>(CRITICAL)"]
+    A1a -->|"Blocked by nftables"| A1c["Cannot exfiltrate<br/>session"]
+
+    A --> A2["Compromised asyncpg"]
+    A2 --> A2a["DB credential access"]
+    A2a --> A2b{"DNS tunneling?"}
+    A2b -->|"Possible"| A2c["Message exfiltration<br/>via DNS"]
+    A2b -->|"Monitored"| A2d["DETECTED"]
+
+    A --> A3["Compromised cryptography"]
+    A3 --> A3a["Fernet key in memory"]
+    A3a --> A3b{"nftables allows<br/>exfiltration?"}
+    A3b -->|"No"| STOP1["STOPPED"]
+
+    B --> B1["Compromised Python<br/>interpreter"]
+    B1 --> B2["All services affected"]
+    B2 --> B3{"systemd sandbox?"}
+    B3 -->|"Still enforced"| B4["Limited blast radius"]
+
+    C --> C1["Install-time attack"]
+    C1 --> C2{"Pinned versions?"}
+    C2 -->|"Yes (requirements.txt)"| STOP2["STOPPED"]
+
+    C --> C3["Update-time attack"]
+    C3 --> C4["Operator must<br/>manually update"]
+    C4 --> C5{"Code review?"}
+    C5 -->|"Yes"| STOP3["STOPPED"]
+
+    style STOP1 fill:#c8e6c9
+    style STOP2 fill:#c8e6c9
+    style STOP3 fill:#c8e6c9
+    style A2d fill:#c8e6c9
+    style B4 fill:#fff3e0
+    style A1b fill:#ffcdd2
+    style A2c fill:#ffcdd2
+```
+
+**Summary**: Compromised dependencies running within a service have access to that service's in-memory credentials. nftables prevents exfiltration to non-allowed destinations (all except DNS). systemd hardening limits blast radius. Pinned versions and code review prevent automatic supply chain attacks.
+
+### Attack Tree 5: Physical Access & Hardware Attacks
+
+```mermaid
+flowchart TD
+    Root["Extract Data via<br/>Physical Access"]
+
+    Root --> A["Powered-off Attack"]
+    Root --> B["Powered-on Attack"]
+    Root --> C["Evil Maid Attack"]
+
+    A --> A1["SD card removal"]
+    A1 --> A2{"Database encrypted?"}
+    A2 -->|"No (plaintext)"| A3["Messages readable<br/>(ACCEPTED RISK)"]
+    A2 -->|"Future: pgcrypto"| A4["DB key required"]
+
+    A1 --> A5["Encrypted session file"]
+    A5 --> A6{"Keychain key<br/>available?"}
+    A6 -->|"No (needs<br/>running system)"| STOP1["STOPPED"]
+
+    A1 --> A7["Offline brute force"]
+    A7 --> A8{"Fernet AES-128<br/>+ HMAC-SHA256"}
+    A8 -->|"Computationally<br/>infeasible"| STOP2["STOPPED"]
+
+    B --> B1["JTAG/UART access"]
+    B1 --> B2{"Requires hardware<br/>modification?"}
+    B2 -->|"Yes (soldering)"| B3["Memory dump possible"]
+    B3 --> B4["In-memory session<br/>extracted (CRITICAL)"]
+
+    B --> B5["Cold boot attack"]
+    B5 --> B6{"RAM retention<br/>after power loss?"}
+    B6 -->|"~60 seconds"| B7["RAM extraction window"]
+    B7 --> B8["Session in RAM"]
+
+    B --> B9["Screen/keyboard<br/>access"]
+    B9 --> B10{"Auto-lock enabled?"}
+    B10 -->|"Yes"| STOP3["STOPPED"]
+    B10 -->|"No"| B11["Terminal hijack"]
+
+    C --> C1["Replace session file<br/>with backdoor"]
+    C1 --> C2{"ProtectSystem=strict?"}
+    C2 -->|"Yes (read-only FS)"| STOP4["STOPPED"]
+
+    C --> C3["Hardware keylogger"]
+    C3 --> C4["Captures credentials<br/>on next login"]
+
+    style STOP1 fill:#c8e6c9
+    style STOP2 fill:#c8e6c9
+    style STOP3 fill:#c8e6c9
+    style STOP4 fill:#c8e6c9
+    style A3 fill:#ffcdd2
+    style B4 fill:#ffcdd2
+    style B8 fill:#ffcdd2
+    style C4 fill:#ffcdd2
+```
+
+**Summary**: Physical access bypasses most software controls. Powered-off: SD card theft exposes plaintext DB (accepted risk). Encrypted session requires keychain key from running system. Powered-on: JTAG/cold boot can extract in-memory session. Evil maid attacks blocked by read-only filesystem. Mitigation: Secure physical location, full-disk encryption consideration.
+
+### Attack Tree 6: Lateral Movement & Privilege Escalation
+
+```mermaid
+flowchart TD
+    Root["Pivot from Service A<br/>to Service B"]
+
+    Root --> A["Querybot → Syncer"]
+    Root --> B["Syncer → Querybot"]
+    Root --> C["Any → PostgreSQL"]
+    Root --> D["Kernel Exploit"]
+
+    A --> A1["Via PostgreSQL"]
+    A1 --> A2{"Querybot DB role?"}
+    A2 -->|"SELECT-only"| A3["Cannot poison data"]
+    A3 --> STOP1["STOPPED"]
+
+    A --> A4["Via filesystem"]
+    A4 --> A5{"/home/tg-syncer<br/>readable?"}
+    A5 -->|"No (ProtectHome=true)"| STOP2["STOPPED"]
+
+    A --> A6["Via process memory"]
+    A6 --> A7{"Same user?"}
+    A7 -->|"No (separate users)"| STOP3["STOPPED"]
+
+    B --> B1["Via PostgreSQL"]
+    B1 --> B2["Syncer can INSERT"]
+    B2 --> B3["Prompt injection<br/>via poisoned messages"]
+    B3 --> B4["Already covered<br/>in T2/Attack Tree 2"]
+
+    B --> B5["Via filesystem"]
+    B5 --> B6{"/home/tg-querybot<br/>readable?"}
+    B6 -->|"No (separate users)"| STOP4["STOPPED"]
+
+    C --> C1["SQL injection"]
+    C1 --> C2{"Role permissions?"}
+    C2 -->|"Syncer: No UPDATE/DELETE"| C3["Cannot modify data"]
+    C2 -->|"Querybot: SELECT-only"| C4["Cannot write at all"]
+
+    C1 --> C5{"Access credentials?"}
+    C5 -->|"No (not in DB)"| STOP5["STOPPED"]
+
+    D --> D1["Bypass process<br/>isolation"]
+    D1 --> D2["Cross-user memory<br/>access"]
+    D2 --> D3{"Kernel patched?"}
+    D3 -->|"Yes"| STOP6["STOPPED"]
+    D3 -->|"Exploitable CVE"| D4["Full system<br/>compromise (CRITICAL)"]
+
+    D1 --> D5["Bypass nftables"]
+    D5 --> D6{"Netfilter at<br/>kernel level"}
+    D6 -->|"Kernel exploit needed"| D4
+
+    style STOP1 fill:#c8e6c9
+    style STOP2 fill:#c8e6c9
+    style STOP3 fill:#c8e6c9
+    style STOP4 fill:#c8e6c9
+    style STOP5 fill:#c8e6c9
+    style STOP6 fill:#c8e6c9
+    style B3 fill:#fff3e0
+    style D4 fill:#ffcdd2
+```
+
+**Summary**: Process isolation (separate users, systemd hardening) blocks lateral movement at the userspace level. PostgreSQL role separation prevents privilege escalation through the database. Only a kernel exploit can bypass these controls. Mitigation: Regular OS patching, systemd hardening reduces kernel attack surface.
+
+## Attack Tree Summary
+
+Six attack trees above cover the primary attack vectors:
+
+1. **Telethon Session Theft**: File system, memory dump, network intercept — all blocked except kernel exploit
+2. **Prompt Injection Impact**: LLM manipulation constrained by read-only architecture
+3. **Data Exfiltration**: Network blocked by nftables; API abuse blocked by read-only wrapper; physical access is residual risk
+4. **Supply Chain Compromise**: Pinned versions block automatic attacks; nftables limits exfiltration even if package is compromised
+5. **Physical Access**: SD card theft exposes plaintext DB (accepted risk); powered-on attacks require hardware modification
+6. **Lateral Movement**: Process isolation and role separation block cross-service compromise; only kernel exploit succeeds
+
+Defense-in-depth layers interact: compromising one layer still leaves others active. A successful attack typically requires chaining multiple exploits (e.g., supply chain → kernel CVE → memory dump).
+
 ---
 
 ## 11. Data Flow Security

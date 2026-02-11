@@ -163,15 +163,37 @@ Details: [`tg-assistant/docs/TELETHON_HARDENING.md`](tg-assistant/docs/TELETHON_
 
 ## Why Raspberry Pi
 
-| Factor | Raspberry Pi | Cloud VPS | Winner |
-|--------|-------------|-----------|--------|
-| **Physical access** | Only you | Provider employees, law enforcement | Pi |
-| **Memory inspection** | Requires physical presence | Provider can snapshot at will | Pi |
-| **Side-channel attacks** | None (dedicated hardware) | Spectre, Meltdown, L1TF | Pi |
-| **Legal jurisdiction** | Your home jurisdiction only | Provider's + data center location | Pi |
-| **Cost** | ~$80 one-time | $5-20/month ongoing | Pi |
-| **Uptime** | Depends on your power/internet | 99.9%+ SLA | Cloud |
-| **Maintenance** | You handle everything | Managed options available | Cloud |
+| Factor | Raspberry Pi | Cloud VPS | Security Consideration |
+|--------|-------------|-----------|------------------------|
+| **Physical access** | Only you (requires home intrusion) | Provider employees, law enforcement, datacenter staff | Pi: No third-party physical access. VPS: Trust provider's access controls and legal jurisdiction |
+| **Memory inspection** | Requires physical device access + powered on | Provider can snapshot VM memory anytime | Pi: Memory inaccessible without physical presence. VPS: Hypervisor has full memory access |
+| **Side-channel attacks** | Dedicated hardware (no shared CPU) | Spectre, Meltdown, L1TF, cross-VM cache timing | Pi: No cross-tenant attacks possible. VPS: Mitigations rely on hypervisor patches |
+| **Legal jurisdiction** | Your home jurisdiction only | Provider's ToS + datacenter location + user location | Pi: Single legal framework. VPS: Multiple jurisdictions may apply |
+| **Network isolation** | Your home network perimeter | Shared datacenter network with provider visibility | Pi: Network traffic only visible to your ISP. VPS: Provider can inspect all traffic |
+| **Cost** | ~$80 one-time + electricity (~$10/year) | $5-20/month ($60-240/year ongoing) | Pi: Higher upfront, lower long-term. VPS: Predictable monthly billing |
+| **Uptime** | Depends on home power/internet (typically 99%+) | 99.9%+ SLA with redundancy | Pi: Single point of failure (your internet). VPS: Enterprise-grade redundancy |
+| **Maintenance** | You handle OS updates, backups, hardware | Managed options available; automated updates | Pi: Full control, full responsibility. VPS: Can outsource maintenance burden |
+| **Disaster recovery** | Manual backup required; hardware failure = downtime | Snapshots, automated backups, instant restore | Pi: Requires SD card backups. VPS: Provider-managed backup options |
+| **Attack surface** | Only services you run | Shared kernel, hypervisor, management plane | Pi: Minimal attack surface. VPS: Depends on provider's infrastructure security |
+
+### Choosing Your Deployment Model
+
+The table above presents objective security and operational differences. The right choice depends on your specific threat model:
+
+**Choose Raspberry Pi if**:
+- Your primary threats are state-level surveillance, cloud provider data access, or legal subpoenas to cloud infrastructure
+- You can physically secure the device (locked home/office)
+- You have reliable home internet and can tolerate occasional downtime
+- You want to minimize long-term costs
+
+**Choose Cloud VPS if**:
+- Your primary threats are physical theft, home intrusion, or local law enforcement
+- You need guaranteed uptime (99.9%+ SLA)
+- You value professional disaster recovery and automated backups
+- You cannot physically secure a device or lack stable internet
+
+**Hybrid Option**:
+Some operators run the syncer on a Raspberry Pi (to keep the Telethon session physically isolated) and the querybot on a VPS (for high availability). This requires exposing PostgreSQL over an encrypted link or syncing data periodically.
 
 ---
 
@@ -216,6 +238,8 @@ Full comparison: [`tg-assistant/docs/TELETHON_HARDENING.md`](tg-assistant/docs/T
 **Prompt injection** — Malicious messages in synced chats could contain adversarial instructions that Claude sees as context. The architecture constrains the blast radius: the system prompt treats message content as untrusted, only top-K messages go to Claude (not the full DB), and there is no write path — even a manipulated Claude cannot send messages, access files, or modify the database. Worst outcome: a misleading summary shown to the owner.
 
 ### Attack Path Analysis
+
+The diagram below shows the three primary attack vectors and how defense-in-depth layers block them. For comprehensive attack trees covering supply chain, physical access, and lateral movement, see [SECURITY_MODEL.md](tg-assistant/docs/SECURITY_MODEL.md#10-attack-trees).
 
 ```mermaid
 flowchart TD
