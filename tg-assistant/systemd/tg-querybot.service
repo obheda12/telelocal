@@ -1,0 +1,167 @@
+# =============================================================================
+# tg-querybot.service -- Telegram Query Bot (Bot API + Claude)
+# =============================================================================
+#
+# Private Telegram bot that responds to the owner's queries by searching
+# the synced message database and generating answers via Claude API.
+#
+# Install:
+#   sudo cp tg-querybot.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable tg-querybot
+#   sudo systemctl start tg-querybot
+#
+# Logs:
+#   journalctl -u tg-querybot -f
+#
+# Prerequisites:
+#   - System user 'tg-querybot' exists (created by setup-raspberry-pi.sh)
+#   - PostgreSQL running with querybot_role configured (SELECT only)
+#   - Bot created via @BotFather, token stored in credstore
+#   - Claude API key stored in credstore
+
+[Unit]
+Description=Telegram Personal Assistant - Query Bot (Bot API + Claude)
+Documentation=file:///opt/tg-assistant/docs/QUICKSTART.md
+After=network-online.target postgresql.service tg-syncer.service
+Requires=postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# -----------------------------------------------------------------------------
+# Process identity
+# -----------------------------------------------------------------------------
+# Dedicated unprivileged user, separate from tg-syncer.
+# Process isolation: even if the querybot is compromised, it cannot access
+# the Telethon session (owned by tg-syncer user) or write to the database
+# (querybot_role has SELECT only).
+User=tg-querybot
+Group=tg-querybot
+
+# -----------------------------------------------------------------------------
+# Execution
+# -----------------------------------------------------------------------------
+WorkingDirectory=/opt/tg-assistant
+ExecStart=/usr/bin/python3 -m querybot.main
+ExecReload=/bin/kill -HUP $MAINPID
+
+# -----------------------------------------------------------------------------
+# Environment
+# -----------------------------------------------------------------------------
+Environment=TG_ASSISTANT_CONFIG=/etc/tg-assistant/settings.toml
+Environment=PYTHONPATH=/opt/tg-assistant/src
+Environment=PYTHONDONTWRITEBYTECODE=1
+
+# -----------------------------------------------------------------------------
+# Credential injection via systemd LoadCredential
+# -----------------------------------------------------------------------------
+# Same mechanism as tg-syncer: credentials loaded from /etc/credstore/
+# and exposed under $CREDENTIALS_DIRECTORY. The querybot needs:
+# - Bot token: to receive and respond to Telegram bot messages
+# - Claude API key: to generate answers via the Anthropic API
+# - DB password: to connect to PostgreSQL with querybot_role
+#
+# NOTE: The querybot does NOT have access to the Telethon session key.
+# It cannot impersonate the user's Telegram account.
+LoadCredential=bot-token:/etc/credstore/tg-querybot-bot-token
+LoadCredential=claude-api-key:/etc/credstore/claude-api-key
+LoadCredential=db-password:/etc/credstore/tg-querybot-db-password
+
+# -----------------------------------------------------------------------------
+# Restart policy
+# -----------------------------------------------------------------------------
+Restart=on-failure
+RestartSec=10
+StartLimitBurst=5
+StartLimitIntervalSec=300
+
+# -----------------------------------------------------------------------------
+# SECURITY HARDENING
+# -----------------------------------------------------------------------------
+
+# -- Privilege escalation prevention --
+NoNewPrivileges=true
+
+# -- Filesystem restrictions --
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+# The querybot only needs:
+# - Log directory: writable (audit log, application log)
+# - Config: read-only
+# - System prompt: read-only (loaded from config directory)
+# It does NOT need write access to /var/lib (no session file to manage).
+ReadWritePaths=/var/log/tg-assistant
+ReadOnlyPaths=/etc/tg-assistant
+
+# -- Device access --
+PrivateDevices=true
+
+# -- Kernel protection --
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+
+# -- Memory protection --
+# NOTE: If using sentence-transformers for local embedding fallback,
+# this may need to be set to false (PyTorch uses JIT compilation).
+# Test with your specific model before enabling in production.
+MemoryDenyWriteExecute=true
+
+# -- Scheduling restrictions --
+RestrictRealtime=true
+
+# -- Network restrictions --
+# AF_INET/AF_INET6: needed for Bot API (api.telegram.org) and Claude API
+# AF_UNIX: needed for PostgreSQL connection via Unix socket
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+# -- System call filtering --
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+
+# -- Capability restrictions --
+# Drop ALL capabilities. The querybot is a pure network client.
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# -- Process visibility --
+ProtectProc=invisible
+ProcSubset=pid
+
+# -- Namespace restrictions --
+RestrictNamespaces=true
+
+# -----------------------------------------------------------------------------
+# RESOURCE LIMITS (Raspberry Pi optimized)
+# -----------------------------------------------------------------------------
+# The querybot needs more memory than the syncer because:
+# 1. Claude API responses can be large (up to max_tokens=4096)
+# 2. Search results are held in memory during context assembly
+# 3. If local embedding fallback is active, the model is loaded in-process
+# 512M accommodates all of this with headroom.
+MemoryMax=512M
+MemoryHigh=400M
+
+# Slightly more CPU than syncer. Claude API calls are I/O bound (waiting
+# for network response), but search queries involve CPU-intensive pgvector
+# similarity calculations and result ranking.
+CPUQuota=60%
+
+# Limit open file descriptors
+LimitNOFILE=1024
+
+# -----------------------------------------------------------------------------
+# Logging
+# -----------------------------------------------------------------------------
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tg-querybot
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,184 @@
+# =============================================================================
+# tg-syncer.service -- Telegram Message Syncer (Telethon / MTProto)
+# =============================================================================
+#
+# Syncs messages from all user's Telegram chats to local PostgreSQL.
+# Uses Telethon (MTProto User API) in read-only mode.
+#
+# Install:
+#   sudo cp tg-syncer.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable tg-syncer
+#   sudo systemctl start tg-syncer
+#
+# Logs:
+#   journalctl -u tg-syncer -f
+#
+# Prerequisites:
+#   - System user 'tg-syncer' exists (created by setup-raspberry-pi.sh)
+#   - PostgreSQL running with syncer_role configured
+#   - Telethon session created and encrypted (setup-telethon-session.sh)
+#   - Credential files in /etc/credstore/ (managed by systemd-creds)
+
+[Unit]
+Description=Telegram Personal Assistant - Message Syncer (Telethon MTProto)
+Documentation=file:///opt/tg-assistant/docs/QUICKSTART.md
+After=network-online.target postgresql.service
+Requires=postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# -----------------------------------------------------------------------------
+# Process identity
+# -----------------------------------------------------------------------------
+# Dedicated unprivileged user with no login shell, no home directory access.
+# This user owns the Telethon session file and nothing else.
+User=tg-syncer
+Group=tg-syncer
+
+# -----------------------------------------------------------------------------
+# Execution
+# -----------------------------------------------------------------------------
+WorkingDirectory=/opt/tg-assistant
+ExecStart=/usr/bin/python3 -m syncer.main
+ExecReload=/bin/kill -HUP $MAINPID
+
+# -----------------------------------------------------------------------------
+# Environment
+# -----------------------------------------------------------------------------
+# Point to the config file (read-only mount, no secrets in it)
+Environment=TG_ASSISTANT_CONFIG=/etc/tg-assistant/settings.toml
+Environment=PYTHONPATH=/opt/tg-assistant/src
+Environment=PYTHONDONTWRITEBYTECODE=1
+
+# -----------------------------------------------------------------------------
+# Credential injection via systemd LoadCredential
+# -----------------------------------------------------------------------------
+# Credentials are loaded from /etc/credstore/ at service start and exposed
+# to the process as files under $CREDENTIALS_DIRECTORY (typically
+# /run/credentials/tg-syncer.service/). The application reads them from
+# there -- they never touch environment variables or the config file.
+#
+# SECURITY: /etc/credstore/ files are root:root 0600. The service can only
+# read the specific credentials listed here, nothing else.
+LoadCredential=telethon-session-key:/etc/credstore/telethon-session-key
+LoadCredential=db-password:/etc/credstore/tg-syncer-db-password
+LoadCredential=voyage-api-key:/etc/credstore/voyage-api-key
+
+# -----------------------------------------------------------------------------
+# Restart policy
+# -----------------------------------------------------------------------------
+Restart=on-failure
+RestartSec=10
+# After 5 failures within 5 minutes, stop trying (likely a config issue)
+StartLimitBurst=5
+StartLimitIntervalSec=300
+
+# -----------------------------------------------------------------------------
+# SECURITY HARDENING
+# -----------------------------------------------------------------------------
+
+# -- Privilege escalation prevention --
+# Once started, the process cannot gain new privileges via execve(),
+# setuid binaries, or filesystem capabilities. This is the single most
+# important hardening directive.
+NoNewPrivileges=true
+
+# -- Filesystem restrictions --
+# strict = entire filesystem is read-only except explicit ReadWritePaths
+ProtectSystem=strict
+# true = /home, /root, /run/user are completely inaccessible
+ProtectHome=true
+# Private /tmp that is not shared with other services
+PrivateTmp=true
+
+# Explicit filesystem permissions:
+# - Logs: writable (audit log, application log)
+# - Telethon session: writable (session updates during sync)
+ReadWritePaths=/var/log/tg-assistant
+ReadWritePaths=/var/lib/tg-syncer
+# - Config: read-only access
+ReadOnlyPaths=/etc/tg-assistant
+
+# -- Device access --
+# No access to physical devices (/dev). The syncer only needs network + files.
+PrivateDevices=true
+
+# -- Kernel protection --
+# Prevent reading/modifying kernel tunables (/proc/sys, /sys)
+ProtectKernelTunables=true
+# Prevent loading kernel modules
+ProtectKernelModules=true
+# Prevent access to kernel log buffer (dmesg)
+ProtectKernelLogs=true
+# Prevent modifying control groups
+ProtectControlGroups=true
+
+# -- Memory protection --
+# Prevent creating memory mappings that are both writable and executable.
+# Blocks most code injection attacks. Safe because Python uses an interpreter,
+# not JIT compilation (note: numpy may need this disabled if used).
+MemoryDenyWriteExecute=true
+
+# -- Scheduling restrictions --
+# Prevent acquiring realtime scheduling priority (could DoS the Pi)
+RestrictRealtime=true
+
+# -- Network restrictions --
+# Only allow IPv4, IPv6, and Unix domain sockets. Block Netlink, packet
+# sockets, and everything else. The syncer only needs TCP (MTProto) and
+# Unix sockets (PostgreSQL).
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+# -- System call filtering --
+# Only allow system calls needed for a network service.
+# @system-service = common service syscalls (read, write, open, socket, etc.)
+# ~@privileged = block privilege escalation syscalls
+# ~@resources = block resource management syscalls (setrlimit, etc.)
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+
+# -- Capability restrictions --
+# Drop ALL Linux capabilities. The syncer needs none -- it's an unprivileged
+# network client that connects to Telegram and PostgreSQL.
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# -- Process visibility --
+# Hide other users' processes from this service. It can only see its own PIDs.
+ProtectProc=invisible
+ProcSubset=pid
+
+# -- Namespace restrictions --
+# Prevent creating new namespaces (user, pid, network, etc.)
+# The service should run in its existing namespace only.
+RestrictNamespaces=true
+
+# -----------------------------------------------------------------------------
+# RESOURCE LIMITS (Raspberry Pi optimized)
+# -----------------------------------------------------------------------------
+# Hard memory ceiling. The syncer processes messages in batches (batch_size=100)
+# so memory usage should be stable. 256M is generous for Python + Telethon.
+MemoryMax=256M
+# Soft memory limit (systemd sends SIGTERM at this threshold on memory pressure)
+MemoryHigh=200M
+
+# CPU quota. The syncer runs every 30s and should finish quickly.
+# 50% prevents it from starving the querybot or other services.
+CPUQuota=50%
+
+# Limit open file descriptors
+LimitNOFILE=1024
+
+# -----------------------------------------------------------------------------
+# Logging
+# -----------------------------------------------------------------------------
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tg-syncer
+
+[Install]
+WantedBy=multi-user.target

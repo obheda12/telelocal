@@ -1,0 +1,27 @@
+# Telegram Personal Assistant — Python dependencies
+# Pin major.minor to avoid breaking changes; allow patch updates.
+
+# --- Telegram ---
+telethon==1.36.0                  # MTProto client (User API, used by syncer)
+python-telegram-bot==21.6         # Bot API (used by querybot)
+
+# --- AI / LLM ---
+anthropic==0.39.0                 # Claude API SDK
+voyageai==0.3.2                   # Voyage AI embeddings (optional)
+
+# --- Database ---
+asyncpg==0.30.0                   # Async PostgreSQL driver
+pgvector==0.3.6                   # pgvector Python utilities
+
+# --- Cryptography ---
+cryptography==44.0.0              # Fernet symmetric encryption for session files
+
+# --- Configuration ---
+toml==0.10.2                      # TOML config file parser
+
+# --- Embeddings (optional — only needed for local fallback) ---
+sentence-transformers==3.3.1      # Local embedding model (all-MiniLM-L6-v2)
+torch==2.5.1                      # PyTorch (CPU-only recommended for RPi)
+
+# --- Utilities ---
+httpx==0.28.1                     # Async HTTP client (for Voyage API calls)
