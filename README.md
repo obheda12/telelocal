@@ -31,58 +31,63 @@ The architecture uses Telethon (MTProto User API) to sync messages from ALL your
 
 ## How It Works
 
-This diagram shows the complete flow from your question to the answer — across trust boundaries, processes, and external services.
+Two independent processes run on your Raspberry Pi:
+
+1. **Background sync** — `tg-syncer` continuously pulls messages from all your Telegram chats and stores them locally. You never interact with it.
+2. **On-demand query** — When you message the bot, `tg-querybot` searches the local database, sends the relevant messages to Claude, and returns the answer.
+
+### Background: Message Sync
 
 ```mermaid
-flowchart LR
-    subgraph You["You (Telegram App)"]
-        Q["Send question to bot"]
-        R["Receive answer"]
+sequenceDiagram
+    box rgb(255,243,224) Internet
+        participant TG as Telegram Servers
+    end
+    box rgb(232,245,233) Raspberry Pi
+        participant Syncer as tg-syncer (read-only)
+        participant DB as PostgreSQL
     end
 
-    subgraph Internet["Untrusted Zone"]
-        TG["Telegram Servers"]
-        Claude["Claude API<br/>(Anthropic)"]
+    loop Every 5 minutes
+        Syncer->>TG: Fetch new messages (MTProto)
+        TG-->>Syncer: Messages from all chats
+        Syncer->>DB: Store messages + embeddings
     end
-
-    subgraph Pi["Trusted Zone: Raspberry Pi"]
-        direction TB
-
-        subgraph Sync["Background Process: tg-syncer"]
-            S1["Read messages via MTProto<br/>(read-only wrapper)"]
-            S2["Store in PostgreSQL"]
-        end
-
-        subgraph Query["Query Process: tg-querybot"]
-            Q1["Receive question via Bot API"]
-            Q2["Verify sender == owner_id"]
-            Q3["Search DB (FTS + vector)"]
-            Q4["Send top-K messages + question<br/>to Claude"]
-            Q5["Return answer to owner"]
-        end
-
-        DB[("PostgreSQL<br/>+ pgvector")]
-    end
-
-    TG -->|"messages from<br/>all your chats"| S1
-    S1 --> S2 --> DB
-
-    Q -->|"Bot API"| TG --> Q1
-    Q1 --> Q2 --> Q3
-    Q3 -->|"SELECT"| DB
-    DB -->|"relevant messages"| Q3
-    Q3 --> Q4
-    Q4 -->|"HTTPS (nftables-restricted)"| Claude
-    Claude -->|"analysis"| Q4
-    Q4 --> Q5
-    Q5 -->|"Bot API"| TG -->|"response"| R
 ```
 
-**Key points**:
-- The **syncer** continuously pulls messages from Telegram in the background — you never interact with it directly
-- When you ask a question, the **query bot** searches the local database, sends only the relevant messages to Claude, and returns the answer
-- All communication with external services is restricted by kernel-level nftables rules — each process can only reach its specific allowed destinations
-- Only messages from the verified `owner_id` are processed; everyone else is silently ignored
+The syncer uses a **read-only wrapper** around Telethon — only 15 explicitly allowed read methods work. All write methods (`send_message`, `delete_messages`, etc.) raise `PermissionError`.
+
+### Your Query Flow
+
+```mermaid
+sequenceDiagram
+    autonumber
+    box rgb(230,245,255) Your Device
+        participant You as You (Telegram App)
+    end
+    box rgb(255,243,224) Internet
+        participant TG as Telegram Servers
+    end
+    box rgb(232,245,233) Raspberry Pi (Trusted Zone)
+        participant Bot as tg-querybot
+        participant DB as PostgreSQL
+    end
+    box rgb(255,235,238) Cloud
+        participant Claude as Claude API
+    end
+
+    You->>TG: "What did Alice say about the launch?"
+    TG->>Bot: Deliver message (Bot API)
+    Bot->>Bot: Verify sender == owner_id
+    Bot->>DB: Full-text + vector search
+    DB-->>Bot: Top-K relevant messages
+    Bot->>Claude: Top-K context + your question
+    Claude-->>Bot: Analysis / summary
+    Bot->>TG: Send response
+    TG->>You: "Alice said X about Y..."
+```
+
+**Trust boundaries**: Your Raspberry Pi (green) is the only trusted zone. Telegram (orange) relays messages but has no access to your database or credentials. The Claude API (red) receives only the top-K relevant messages per query — not the full database. Each process is restricted by kernel-level nftables rules to only its specific allowed network destinations.
 
 ---
 
