@@ -1,0 +1,184 @@
+#!/bin/bash
+#
+# telenad — CLI for Telegram Personal Assistant
+#
+# Install: sudo ln -sf /opt/tg-assistant/scripts/telenad /usr/local/bin/telenad
+#
+# Usage:
+#   telenad setup          Full guided deployment
+#   telenad session        Create/recreate Telethon session
+#   telenad wipe           Destroy all credentials and state
+#   telenad status         Check service health
+#   telenad logs [service] Tail service logs (syncer|querybot|both)
+#   telenad restart        Restart both services
+#   telenad stop           Stop both services
+#   telenad start          Start both services
+#
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+BOLD='\033[1m'
+NC='\033[0m'
+
+usage() {
+    echo ""
+    echo -e "${BOLD}telenad${NC} — Telegram Personal Assistant CLI"
+    echo ""
+    echo "Usage: telenad <command>"
+    echo ""
+    echo "Setup & teardown:"
+    echo "  setup          Full guided deployment (requires sudo)"
+    echo "  session        Create or recreate Telethon session (requires sudo)"
+    echo "  wipe           Destroy all credentials, sessions, and state (requires sudo)"
+    echo ""
+    echo "Operations:"
+    echo "  status         Show service health and key info"
+    echo "  logs           Tail both service logs (Ctrl+C to stop)"
+    echo "  logs syncer    Tail syncer logs only"
+    echo "  logs querybot  Tail querybot logs only"
+    echo "  restart        Restart both services"
+    echo "  stop           Stop both services"
+    echo "  start          Start both services"
+    echo ""
+}
+
+require_sudo() {
+    if [[ $EUID -ne 0 ]]; then
+        echo "This command requires sudo. Run: sudo telenad $1"
+        exit 1
+    fi
+}
+
+cmd_setup() {
+    require_sudo "setup"
+    exec "${SCRIPT_DIR}/setup.sh"
+}
+
+cmd_session() {
+    require_sudo "session"
+    exec "${SCRIPT_DIR}/setup-telethon-session.sh"
+}
+
+cmd_wipe() {
+    require_sudo "wipe"
+    exec "${SCRIPT_DIR}/wipe-credentials.sh"
+}
+
+cmd_status() {
+    echo ""
+    echo -e "${BOLD}Services${NC}"
+    echo ""
+
+    for SVC in tg-syncer tg-querybot; do
+        if systemctl is-active --quiet "${SVC}" 2>/dev/null; then
+            UPTIME=$(systemctl show "${SVC}" --property=ActiveEnterTimestamp --value 2>/dev/null)
+            echo "  ${SVC}: running (since ${UPTIME})"
+        elif systemctl is-enabled --quiet "${SVC}" 2>/dev/null; then
+            echo "  ${SVC}: stopped (enabled)"
+        else
+            echo "  ${SVC}: not installed"
+        fi
+    done
+
+    echo ""
+    echo -e "${BOLD}Credentials${NC}"
+    echo ""
+
+    if [[ -d /etc/credstore.encrypted ]]; then
+        COUNT=$(find /etc/credstore.encrypted -type f 2>/dev/null | wc -l)
+        echo "  Credstore: ${COUNT} encrypted credential(s)"
+    else
+        echo "  Credstore: not configured"
+    fi
+
+    SESSION="/var/lib/tg-syncer/tg_syncer_session.session.enc"
+    if [[ -f "${SESSION}" ]]; then
+        echo "  Telethon session: present (encrypted)"
+    else
+        echo "  Telethon session: not found"
+    fi
+
+    echo ""
+    echo -e "${BOLD}Database${NC}"
+    echo ""
+
+    if command -v psql &>/dev/null && systemctl is-active --quiet postgresql 2>/dev/null; then
+        if sudo -u postgres psql -lqt 2>/dev/null | cut -d \| -f 1 | grep -qw tg_assistant; then
+            MSG_COUNT=$(sudo -u postgres psql -d tg_assistant -tAc "SELECT COUNT(*) FROM messages;" 2>/dev/null || echo "?")
+            CHAT_COUNT=$(sudo -u postgres psql -d tg_assistant -tAc "SELECT COUNT(*) FROM chats;" 2>/dev/null || echo "?")
+            echo "  Database: tg_assistant (${MSG_COUNT} messages, ${CHAT_COUNT} chats)"
+        else
+            echo "  Database: not created"
+        fi
+    else
+        echo "  Database: PostgreSQL not running"
+    fi
+
+    echo ""
+}
+
+cmd_logs() {
+    local target="${1:-both}"
+
+    case "${target}" in
+        syncer)
+            journalctl -u tg-syncer -f
+            ;;
+        querybot)
+            journalctl -u tg-querybot -f
+            ;;
+        both|"")
+            journalctl -u tg-syncer -u tg-querybot -f
+            ;;
+        *)
+            echo "Unknown service: ${target}"
+            echo "Usage: telenad logs [syncer|querybot]"
+            exit 1
+            ;;
+    esac
+}
+
+cmd_restart() {
+    require_sudo "restart"
+    systemctl restart tg-syncer tg-querybot
+    echo "Restarted tg-syncer and tg-querybot"
+    sleep 2
+    cmd_status
+}
+
+cmd_stop() {
+    require_sudo "stop"
+    systemctl stop tg-syncer tg-querybot
+    echo "Stopped tg-syncer and tg-querybot"
+}
+
+cmd_start() {
+    require_sudo "start"
+    systemctl start tg-syncer tg-querybot
+    echo "Started tg-syncer and tg-querybot"
+    sleep 2
+    cmd_status
+}
+
+# ---------------------------------------------------------------------------
+# Dispatch
+# ---------------------------------------------------------------------------
+COMMAND="${1:-}"
+
+case "${COMMAND}" in
+    setup)      cmd_setup ;;
+    session)    cmd_session ;;
+    wipe)       cmd_wipe ;;
+    status)     cmd_status ;;
+    logs)       cmd_logs "${2:-both}" ;;
+    restart)    cmd_restart ;;
+    stop)       cmd_stop ;;
+    start)      cmd_start ;;
+    -h|--help|help|"")  usage ;;
+    *)
+        echo "Unknown command: ${COMMAND}"
+        usage
+        exit 1
+        ;;
+esac

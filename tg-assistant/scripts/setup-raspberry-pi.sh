@@ -630,6 +630,14 @@ deploy_application() {
     else
         log_warn "Source directory not found at ${PROJECT_ROOT}/src -- deploy manually later"
     fi
+
+    # Deploy scripts and install CLI
+    if [[ -d "${PROJECT_ROOT}/scripts" ]]; then
+        cp -r "${PROJECT_ROOT}/scripts" "${INSTALL_DIR}/scripts"
+        chmod +x "${INSTALL_DIR}/scripts/"*.sh "${INSTALL_DIR}/scripts/telenad" 2>/dev/null || true
+        ln -sf "${INSTALL_DIR}/scripts/telenad" /usr/local/bin/telenad
+        log_success "CLI installed: telenad"
+    fi
 }
 
 # ---------------------------------------------------------------------------
