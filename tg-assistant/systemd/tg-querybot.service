@@ -44,7 +44,7 @@ Group=tg-querybot
 # Execution
 # -----------------------------------------------------------------------------
 WorkingDirectory=/opt/tg-assistant
-ExecStart=/usr/bin/python3 -m querybot.main
+ExecStart=/opt/tg-assistant/venv/bin/python3 -m querybot.main
 ExecReload=/bin/kill -HUP $MAINPID
 
 # -----------------------------------------------------------------------------

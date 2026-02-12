@@ -235,6 +235,7 @@ setup_directories() {
     mkdir -p "${INSTALL_DIR}"
     mkdir -p "${CONFIG_DIR}"
     mkdir -p "${LOG_DIR}"
+    mkdir -p /var/lib/tg-syncer
     mkdir -p "${LOG_DIR}/syncer"
     mkdir -p "${LOG_DIR}/querybot"
 
@@ -245,6 +246,10 @@ setup_directories() {
     chmod 750 "${LOG_DIR}/syncer"
     chown "${QUERYBOT_USER}:${QUERYBOT_USER}" "${LOG_DIR}/querybot"
     chmod 750 "${LOG_DIR}/querybot"
+
+    # Syncer state directory (session updates during sync)
+    chown "${SYNCER_USER}:${SYNCER_USER}" /var/lib/tg-syncer
+    chmod 700 /var/lib/tg-syncer
 
     log_success "Directories created:"
     log_info "  Application: ${INSTALL_DIR}"

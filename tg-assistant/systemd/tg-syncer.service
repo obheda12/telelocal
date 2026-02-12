@@ -42,7 +42,7 @@ Group=tg-syncer
 # Execution
 # -----------------------------------------------------------------------------
 WorkingDirectory=/opt/tg-assistant
-ExecStart=/usr/bin/python3 -m syncer.main
+ExecStart=/opt/tg-assistant/venv/bin/python3 -m syncer.main
 ExecReload=/bin/kill -HUP $MAINPID
 
 # -----------------------------------------------------------------------------

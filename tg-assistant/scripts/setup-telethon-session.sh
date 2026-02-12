@@ -229,11 +229,13 @@ async def main():
         decrypted_data = cipher.decrypt(enc_data)
 
         # Write to a temporary file for verification
-        verify_path = os.path.join(session_dir, "_verify_session")
-        with open(verify_path, "wb") as f:
+        # Telethon appends ".session" to the path, so we must match that.
+        verify_base = os.path.join(session_dir, "_verify_session")
+        verify_file = verify_base + ".session"
+        with open(verify_file, "wb") as f:
             f.write(decrypted_data)
 
-        verify_client = TelegramClient(verify_path, api_id, api_hash)
+        verify_client = TelegramClient(verify_base, api_id, api_hash)
         await verify_client.connect()
         verify_me = await verify_client.get_me()
 
@@ -245,11 +247,10 @@ async def main():
 
         await verify_client.disconnect()
 
-        # Clean up verification file
-        if os.path.exists(verify_path + ".session"):
-            os.remove(verify_path + ".session")
-        if os.path.exists(verify_path):
-            os.remove(verify_path)
+        # Clean up verification files
+        for p in (verify_file, verify_base):
+            if os.path.exists(p):
+                os.remove(p)
 
     except Exception as e:
         print(f"  Verification FAILED: {e}")

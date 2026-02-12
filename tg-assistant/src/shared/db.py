@@ -98,59 +98,67 @@ async def init_database(pool: asyncpg.Pool) -> None:
     Security note:
         This function should be run by a privileged role (e.g. postgres
         or a migration role), NOT by syncer_role or querybot_role.
+        When called by an unprivileged role, it logs a debug message
+        and returns — the tables must already exist from setup.
     """
     async with pool.acquire() as conn:
-        await conn.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+        try:
+            await conn.execute("CREATE EXTENSION IF NOT EXISTS vector;")
 
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS messages (
-                message_id         BIGINT NOT NULL,
-                chat_id            BIGINT NOT NULL,
-                sender_id          BIGINT,
-                sender_name        TEXT,
-                timestamp          TIMESTAMPTZ NOT NULL,
-                text               TEXT,
-                raw_json           JSONB,
-                embedding          vector(1024),
-                text_search_vector TSVECTOR
-                    GENERATED ALWAYS AS (
-                        to_tsvector('english', COALESCE(text, ''))
-                    ) STORED,
-                PRIMARY KEY (message_id, chat_id)
-            );
-        """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS messages (
+                    message_id         BIGINT NOT NULL,
+                    chat_id            BIGINT NOT NULL,
+                    sender_id          BIGINT,
+                    sender_name        TEXT,
+                    timestamp          TIMESTAMPTZ NOT NULL,
+                    text               TEXT,
+                    raw_json           JSONB,
+                    embedding          vector(1024),
+                    text_search_vector TSVECTOR
+                        GENERATED ALWAYS AS (
+                            to_tsvector('english', COALESCE(text, ''))
+                        ) STORED,
+                    PRIMARY KEY (message_id, chat_id)
+                );
+            """)
 
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS chats (
-                chat_id           BIGINT PRIMARY KEY,
-                title             TEXT,
-                chat_type         TEXT,
-                participant_count INTEGER,
-                updated_at        TIMESTAMPTZ DEFAULT NOW()
-            );
-        """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS chats (
+                    chat_id           BIGINT PRIMARY KEY,
+                    title             TEXT,
+                    chat_type         TEXT,
+                    participant_count INTEGER,
+                    updated_at        TIMESTAMPTZ DEFAULT NOW()
+                );
+            """)
 
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS audit_log (
-                id        BIGSERIAL PRIMARY KEY,
-                timestamp TIMESTAMPTZ DEFAULT NOW(),
-                service   TEXT NOT NULL,
-                action    TEXT NOT NULL,
-                details   JSONB,
-                success   BOOLEAN NOT NULL
-            );
-        """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS audit_log (
+                    id        BIGSERIAL PRIMARY KEY,
+                    timestamp TIMESTAMPTZ DEFAULT NOW(),
+                    service   TEXT NOT NULL,
+                    action    TEXT NOT NULL,
+                    details   JSONB,
+                    success   BOOLEAN NOT NULL
+                );
+            """)
 
-        await conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_messages_fts
-            ON messages USING GIN (text_search_vector);
-        """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_messages_fts
+                ON messages USING GIN (text_search_vector);
+            """)
 
-        await conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_messages_embedding
-            ON messages USING ivfflat (embedding vector_cosine_ops)
-            WITH (lists = 100);
-        """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_messages_embedding
+                ON messages USING ivfflat (embedding vector_cosine_ops)
+                WITH (lists = 100);
+            """)
+        except asyncpg.exceptions.InsufficientPrivilegeError:
+            logger.debug(
+                "Skipping schema init (unprivileged role) — "
+                "tables must already exist from setup"
+            )
 
         # Indexes for filtered search (chat + time, time-only)
         # Note: idx_messages_chat_timestamp covers chat_id-only queries too
