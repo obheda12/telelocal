@@ -22,7 +22,7 @@ The architecture uses Telethon (MTProto User API) to sync messages from ALL your
 - [Telethon vs Bot API](#telethon-vs-bot-api)
 - [Threat Analysis](#threat-analysis)
 - [Pi vs VPS](#pi-vs-vps)
-- [Implementation Details](#implementation-details)
+- [Implementation Details](#implementation-details) (includes [Codebase Size](#codebase-size))
 - [Deployment Guide](#deployment-guide)
 - [Verification Procedures](#verification-procedures)
 - [Incident Response](#incident-response)
@@ -301,41 +301,58 @@ tg-assistant/
 │   └── system_prompt.md           # Claude API system prompt
 ├── src/
 │   ├── syncer/
-│   │   ├── __init__.py
-│   │   ├── main.py                # Syncer entry point
+│   │   ├── main.py                # Sync loop + dialog processing
 │   │   ├── readonly_client.py     # Read-only Telethon wrapper
 │   │   ├── message_store.py       # PostgreSQL message storage
-│   │   └── embeddings.py          # Embedding generation
+│   │   └── embeddings.py          # Local embedding generation
 │   ├── querybot/
-│   │   ├── __init__.py
-│   │   ├── main.py                # Bot entry point
-│   │   ├── search.py              # Filtered FTS + vector search
+│   │   ├── main.py                # Bot entry point + wiring
+│   │   ├── search.py              # Filtered FTS + vector search + RRF
 │   │   ├── llm.py                 # Claude integration (intent + synthesis)
 │   │   └── handlers.py            # Bot command/message handlers
 │   └── shared/
-│       ├── __init__.py
 │       ├── db.py                  # Database connection helpers
 │       ├── secrets.py             # Keychain integration
-│       └── audit.py               # Audit logging
+│       ├── audit.py               # Audit logging
+│       └── safety.py              # Input validation + injection detection
+├── tests/
+│   ├── test_querybot.py           # Handler, LLM, and pipeline tests
+│   ├── test_readonly_client.py    # Read-only wrapper tests
+│   ├── test_search.py             # Search + RRF merge tests
+│   ├── test_safety.py             # Sanitizer + validator tests
+│   ├── test_shared.py             # DB, secrets, audit tests
+│   ├── test_syncer.py             # Sync loop + embedding tests
+│   └── prompt-injection-tests.md  # Manual injection test cases
+├── docs/
+│   ├── QUICKSTART.md              # Deployment checklist
+│   ├── SECURITY_MODEL.md          # Full threat model + attack trees
+│   └── TELETHON_HARDENING.md      # Telethon-specific security guide
 ├── scripts/
-│   ├── setup-raspberry-pi.sh      # Installation script
-│   ├── setup-telethon-session.sh  # Guided session creation
+│   ├── setup.sh                   # Single-command deployment
 │   └── monitor-network.sh         # Traffic verification
 ├── systemd/
 │   ├── tg-syncer.service          # Syncer service (hardened)
 │   └── tg-querybot.service        # Query bot service (hardened)
 ├── nftables/
 │   └── tg-assistant-firewall.conf # Per-process network rules
-├── tests/
-│   ├── security-verification.sh   # Automated security tests
-│   ├── test_readonly_client.py    # Unit tests for read-only wrapper
-│   └── prompt-injection-tests.md  # Manual test cases
-├── docs/
-│   ├── QUICKSTART.md              # Deployment checklist
-│   ├── SECURITY_MODEL.md          # Detailed security documentation
-│   └── TELETHON_HARDENING.md      # Telethon-specific security guide
-└── requirements.txt               # Python dependencies
+└── requirements.txt               # Python dependencies (pinned)
 ```
+
+### Codebase Size
+
+<!-- UPDATE THIS TABLE WHEN PUSHING CHANGES -->
+<!-- Run: find src tests docs config -name '*.py' -o -name '*.md' -o -name '*.toml' | xargs wc -l -->
+
+| Component | Source | Tests | Docs/Config | Notes |
+|-----------|--------|-------|-------------|-------|
+| **querybot** | 1,137 | 509 | — | Largest: `llm.py` handles intent + formatting + synthesis |
+| **syncer** | 796 | 550 | — | `main.py` (sync loop) + `readonly_client.py` (allowlist wrapper) |
+| **shared** | 543 | 353 | — | DB, secrets, audit, safety — all cross-cutting concerns |
+| **docs** | — | — | 1,745 | `SECURITY_MODEL.md` is 1,173 lines (threat model + attack trees) |
+| **config** | — | — | 405 | `settings.toml` + `system_prompt.md` |
+| **Total** | **2,509** | **1,588** | **2,150** | **6,247 lines** across 8 files, 6 test files, 5 docs |
+
+Test-to-source ratio: 0.63:1 (134 tests). No external dependencies beyond stdlib for safety/validation layer.
 
 ### Database Schema
 
