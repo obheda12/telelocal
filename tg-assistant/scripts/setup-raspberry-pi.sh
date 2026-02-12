@@ -305,22 +305,26 @@ deploy_config() {
 
     if [[ -f "${CONFIG_SOURCE}/settings.toml" ]]; then
         cp "${CONFIG_SOURCE}/settings.toml" "${CONFIG_DIR}/settings.toml"
+        log_success "settings.toml deployed"
+    elif [[ -f "${CONFIG_DIR}/settings.toml" ]]; then
+        log_info "settings.toml already present at ${CONFIG_DIR}"
+    else
+        log_warn "settings.toml not found -- you will need to create it"
+    fi
 
-        # settings.toml contains no secrets (credentials are in /etc/credstore/).
-        # Readable by service users so they can load non-secret config at startup.
+    # settings.toml contains no secrets (credentials are in /etc/credstore/).
+    # Readable by service users so they can load non-secret config at startup.
+    if [[ -f "${CONFIG_DIR}/settings.toml" ]]; then
         chmod 644 "${CONFIG_DIR}/settings.toml"
         chown root:root "${CONFIG_DIR}/settings.toml"
-        log_success "settings.toml deployed"
-    else
-        log_warn "settings.toml not found in ${CONFIG_SOURCE} -- you will need to create it"
     fi
 
     if [[ -f "${CONFIG_SOURCE}/system_prompt.md" ]]; then
         cp "${CONFIG_SOURCE}/system_prompt.md" "${CONFIG_DIR}/system_prompt.md"
         chmod 644 "${CONFIG_DIR}/system_prompt.md"
         log_success "system_prompt.md deployed"
-    else
-        log_warn "system_prompt.md not found in ${CONFIG_SOURCE}"
+    elif [[ -f "${CONFIG_DIR}/system_prompt.md" ]]; then
+        log_info "system_prompt.md already present"
     fi
 
     log_success "Configuration deployed to ${CONFIG_DIR}"
@@ -338,6 +342,8 @@ deploy_systemd_services() {
         if [[ -f "${SYSTEMD_SOURCE}/${SVC_FILE}" ]]; then
             cp "${SYSTEMD_SOURCE}/${SVC_FILE}" "/etc/systemd/system/${SVC_FILE}"
             log_success "Deployed ${SVC_FILE}"
+        elif [[ -f "/etc/systemd/system/${SVC_FILE}" ]]; then
+            log_info "${SVC_FILE} already present in /etc/systemd/system/"
         else
             log_warn "${SVC_FILE} not found in ${SYSTEMD_SOURCE} -- skipping"
         fi
@@ -630,7 +636,20 @@ EOF
 deploy_application() {
     log_step "Deploying application source"
 
-    if [[ -d "${PROJECT_ROOT}/src" ]]; then
+    # Detect self-deploy: when running from the installed location
+    # (e.g., via 'telenad setup'), PROJECT_ROOT == INSTALL_DIR.
+    # In that case, source is already in place — just fix permissions.
+    REAL_PROJECT=$(realpath "${PROJECT_ROOT}" 2>/dev/null || echo "${PROJECT_ROOT}")
+    REAL_INSTALL=$(realpath "${INSTALL_DIR}" 2>/dev/null || echo "${INSTALL_DIR}")
+
+    if [[ "${REAL_PROJECT}" == "${REAL_INSTALL}" ]]; then
+        log_info "Running from installed location — source already in place"
+        if [[ -d "${INSTALL_DIR}/src" ]]; then
+            chown -R root:root "${INSTALL_DIR}/src"
+            chmod -R 755 "${INSTALL_DIR}/src"
+            log_success "Permissions verified on ${INSTALL_DIR}/src"
+        fi
+    elif [[ -d "${PROJECT_ROOT}/src" ]]; then
         cp -r "${PROJECT_ROOT}/src" "${INSTALL_DIR}/src"
         chown -R root:root "${INSTALL_DIR}/src"
         chmod -R 755 "${INSTALL_DIR}/src"
@@ -640,8 +659,10 @@ deploy_application() {
     fi
 
     # Deploy scripts and install CLI
-    if [[ -d "${PROJECT_ROOT}/scripts" ]]; then
+    if [[ "${REAL_PROJECT}" != "${REAL_INSTALL}" && -d "${PROJECT_ROOT}/scripts" ]]; then
         cp -r "${PROJECT_ROOT}/scripts" "${INSTALL_DIR}/scripts"
+    fi
+    if [[ -d "${INSTALL_DIR}/scripts" ]]; then
         chmod +x "${INSTALL_DIR}/scripts/"*.sh "${INSTALL_DIR}/scripts/telenad" 2>/dev/null || true
         ln -sf "${INSTALL_DIR}/scripts/telenad" /usr/local/bin/telenad
         log_success "CLI installed: telenad"
