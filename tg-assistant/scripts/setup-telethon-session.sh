@@ -112,7 +112,8 @@ echo "  4. Copy the api_id (number) and api_hash (hex string)"
 echo ""
 
 read -rp "  Enter your API ID: " API_ID
-read -rp "  Enter your API hash: " API_HASH
+read -rsp "  Enter your API hash: " API_HASH
+echo ""  # newline after silent input
 
 if [[ -z "${API_ID}" || -z "${API_HASH}" ]]; then
     log_error "API ID and API hash are required."

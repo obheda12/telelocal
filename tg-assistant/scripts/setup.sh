@@ -150,8 +150,8 @@ phase_collect_credentials() {
     echo "  Get these from https://my.telegram.org > API development tools"
     echo ""
     read -rp "  API ID (numeric): " COLLECT_API_ID
-    read -rp "  API hash (hex string): " COLLECT_API_HASH
-    echo ""
+    read -rsp "  API hash (hex string): " COLLECT_API_HASH
+    echo ""  # newline after silent input
 
     if [[ -z "${COLLECT_API_ID}" || -z "${COLLECT_API_HASH}" ]]; then
         log_error "API ID and API hash are required."
@@ -172,8 +172,8 @@ phase_collect_credentials() {
     echo -e "${BOLD}Bot token${NC}"
     echo "  Get this from @BotFather on Telegram (send /newbot)"
     echo ""
-    read -rp "  Bot token: " COLLECT_BOT_TOKEN
-    echo ""
+    read -rsp "  Bot token: " COLLECT_BOT_TOKEN
+    echo ""  # newline after silent input
 
     if [[ -z "${COLLECT_BOT_TOKEN}" ]]; then
         log_error "Bot token is required."
@@ -184,8 +184,8 @@ phase_collect_credentials() {
     echo -e "${BOLD}Anthropic API key${NC}"
     echo "  Get this from https://console.anthropic.com/settings/keys"
     echo ""
-    read -rp "  Anthropic API key: " COLLECT_ANTHROPIC_KEY
-    echo ""
+    read -rsp "  Anthropic API key: " COLLECT_ANTHROPIC_KEY
+    echo ""  # newline after silent input
 
     if [[ -z "${COLLECT_ANTHROPIC_KEY}" ]]; then
         log_error "Anthropic API key is required."
