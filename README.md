@@ -74,21 +74,59 @@ sequenceDiagram
         participant DB as PostgreSQL
     end
     box rgb(255,235,238) Cloud
-        participant Claude as Claude API
+        participant Haiku as Claude Haiku
+        participant Sonnet as Claude Sonnet
     end
 
     You->>TG: "What did Alice say about the launch?"
     TG->>Bot: Deliver message (Bot API)
     Bot->>Bot: Verify sender == owner_id
-    Bot->>DB: Full-text + vector search
+    Bot->>DB: Fetch chat list (cached)
+    Bot->>Haiku: Question + chat list → extract intent
+    Haiku-->>Bot: {chat_ids, sender, time_range, keywords}
+    Bot->>DB: Filtered FTS (scoped to matched chats)
     DB-->>Bot: Top-K relevant messages
-    Bot->>Claude: Top-K context + your question
-    Claude-->>Bot: Analysis / summary
+    Bot->>Sonnet: Top-K context + your question
+    Sonnet-->>Bot: Analysis / summary
     Bot->>TG: Send response
     TG->>You: "Alice said X about Y..."
 ```
 
-**Trust boundaries**: Your Raspberry Pi (green) is the only trusted zone. Telegram (orange) relays messages but has no access to your database or credentials. The Claude API (red) receives only the top-K relevant messages per query — not the full database. Each process is restricted by kernel-level nftables rules to only its specific allowed network destinations.
+**Trust boundaries**: Your Raspberry Pi (green) is the only trusted zone. Telegram (orange) relays messages but has no access to your database or credentials. The Claude API (red) receives only the top-K relevant messages per query — not the full database. Intent extraction uses Haiku (fast/cheap) with just your question and chat names; the main synthesis uses Sonnet with message context. Each process is restricted by kernel-level nftables rules to only its specific allowed network destinations.
+
+### Query Intent Extraction
+
+When you have 100+ group chats (often named like `TeamName <> YourCompany`), searching the entire database for every query would return noisy, irrelevant results. The querybot solves this with a two-stage pipeline:
+
+```mermaid
+flowchart LR
+    Q["Your question"]
+    Q --> IE["**Intent Extraction**<br/>(Haiku — fast/cheap)"]
+
+    CL["Chat list<br/>from DB (cached)"]
+    CL --> IE
+
+    IE --> F{"Structured filters"}
+    F --> |"chat_ids"| FS
+    F --> |"sender_name"| FS
+    F --> |"days_back"| FS
+    F --> |"search_terms"| FS
+
+    FS["**Filtered FTS**<br/>(PostgreSQL)"] --> R["Scoped results<br/>grouped by chat"]
+    R --> S["**Synthesis**<br/>(Sonnet)"]
+    S --> A["Your answer"]
+```
+
+| You ask | Intent extracted | What gets searched |
+|---------|----------------|--------------------|
+| "What did the Acme team say about pricing?" | `chat_ids=[Acme <>...]`, `search_terms="pricing"` | Only the Acme chat, FTS for "pricing" |
+| "Summarize yesterday's engineering chat" | `chat_ids=[Engineering <>...]`, `days_back=2` | Last 2 days in Engineering, no keyword filter (browse mode) |
+| "What did Alice say about deployment?" | `sender_name="Alice"`, `search_terms="deployment"` | All chats, filtered to Alice's messages about deployment |
+| "Find messages about the budget deadline" | `search_terms="budget deadline"` | All chats, keyword search only |
+
+The intent extraction runs on **Haiku** (~$0.002/query) and only sees your question + chat names — never message content. The main synthesis runs on **Sonnet** with the filtered results.
+
+If the filtered search returns nothing (e.g., Haiku misidentified the chat), the system falls back to unfiltered full-text search across all chats.
 
 ---
 
@@ -271,8 +309,8 @@ tg-assistant/
 │   ├── querybot/
 │   │   ├── __init__.py
 │   │   ├── main.py                # Bot entry point
-│   │   ├── search.py              # FTS + vector search
-│   │   ├── llm.py                 # Claude API integration
+│   │   ├── search.py              # Filtered FTS + vector search
+│   │   ├── llm.py                 # Claude integration (intent + synthesis)
 │   │   └── handlers.py            # Bot command/message handlers
 │   └── shared/
 │       ├── __init__.py

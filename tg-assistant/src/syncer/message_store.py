@@ -11,13 +11,36 @@ only; it cannot UPDATE or DELETE message rows.
 
 from __future__ import annotations
 
+import json
 import logging
-from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import asyncpg
 
 logger = logging.getLogger("syncer.message_store")
+
+_INSERT_SQL = """
+    INSERT INTO messages (message_id, chat_id, sender_id, sender_name,
+                          timestamp, text, raw_json, embedding)
+    VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)
+    ON CONFLICT (message_id, chat_id) DO NOTHING
+"""
+
+_INSERT_RETURNING_SQL = """
+    INSERT INTO messages (message_id, chat_id, sender_id, sender_name,
+                          timestamp, text, raw_json, embedding)
+    VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)
+    ON CONFLICT (message_id, chat_id) DO NOTHING
+    RETURNING message_id
+"""
+
+_UPSERT_CHAT_SQL = """
+    INSERT INTO chats (chat_id, title, chat_type, participant_count, updated_at)
+    VALUES ($1, $2, $3, $4, NOW())
+    ON CONFLICT (chat_id)
+    DO UPDATE SET title = $2, chat_type = $3, participant_count = $4,
+                  updated_at = NOW()
+"""
 
 
 class MessageStore:
@@ -35,6 +58,26 @@ class MessageStore:
     # Write operations (syncer_role needs INSERT on messages table)
     # ------------------------------------------------------------------
 
+    def _msg_params(self, msg: Dict[str, Any]) -> tuple:
+        """Extract ordered parameters from a message dict."""
+        embedding = msg.get("embedding")
+        # Store NULL for embeddings that don't match the 1024-dim column
+        if embedding is not None and len(embedding) != 1024:
+            embedding = None
+        raw_json = msg.get("raw_json")
+        if raw_json is not None and not isinstance(raw_json, str):
+            raw_json = json.dumps(raw_json)
+        return (
+            msg["message_id"],
+            msg["chat_id"],
+            msg.get("sender_id"),
+            msg.get("sender_name"),
+            msg["timestamp"],
+            msg.get("text"),
+            raw_json,
+            embedding,
+        )
+
     async def store_message(self, msg: Dict[str, Any]) -> None:
         """Insert a single Telegram message into the database.
 
@@ -43,35 +86,30 @@ class MessageStore:
                  ``message_id``, ``chat_id``, ``sender_id``,
                  ``timestamp`` (datetime), ``text`` (str | None),
                  ``raw_json`` (dict).
-
-        All values are passed through parameterized queries::
-
-            INSERT INTO messages (message_id, chat_id, ...)
-            VALUES ($1, $2, ...)
-            ON CONFLICT (message_id, chat_id) DO NOTHING;
-
-        Raises:
-            asyncpg.PostgresError: On database errors.
         """
-        # TODO: implement
-        #   - Use self._pool.execute() with parameterized query
-        #   - ON CONFLICT DO NOTHING for idempotent re-syncs
-        #   - Log the stored message_id at DEBUG level
-        raise NotImplementedError
+        params = self._msg_params(msg)
+        await self._pool.execute(_INSERT_SQL, *params)
+        logger.debug("Stored message_id=%d chat_id=%d", msg["message_id"], msg["chat_id"])
 
-    async def store_messages_batch(self, messages: list[Dict[str, Any]]) -> int:
+    async def store_messages_batch(self, messages: List[Dict[str, Any]]) -> int:
         """Insert a batch of messages efficiently.
-
-        Args:
-            messages: List of message dicts (same schema as store_message).
 
         Returns:
             Number of rows actually inserted (excluding conflicts).
         """
-        # TODO: implement
-        #   - Use self._pool.executemany() or COPY for bulk inserts
-        #   - Return count of newly inserted rows
-        raise NotImplementedError
+        if not messages:
+            return 0
+
+        inserted = 0
+        async with self._pool.acquire() as conn:
+            for msg in messages:
+                params = self._msg_params(msg)
+                row = await conn.fetchrow(_INSERT_RETURNING_SQL, *params)
+                if row is not None:
+                    inserted += 1
+
+        logger.debug("Batch insert: %d/%d new rows", inserted, len(messages))
+        return inserted
 
     # ------------------------------------------------------------------
     # Read operations (syncer_role needs SELECT on messages table)
@@ -80,21 +118,14 @@ class MessageStore:
     async def get_last_synced_id(self, chat_id: int) -> Optional[int]:
         """Return the highest ``message_id`` stored for a given chat.
 
-        Args:
-            chat_id: Telegram chat/dialog ID.
-
         Returns:
             The maximum message_id, or ``None`` if the chat has never
             been synced.
-
-        Security note:
-            Uses parameterized query — ``chat_id`` is never interpolated::
-
-                SELECT MAX(message_id) FROM messages WHERE chat_id = $1;
         """
-        # TODO: implement
-        #   - Use self._pool.fetchval() with parameterized query
-        raise NotImplementedError
+        return await self._pool.fetchval(
+            "SELECT MAX(message_id) FROM messages WHERE chat_id = $1",
+            chat_id,
+        )
 
     # ------------------------------------------------------------------
     # Metadata operations
@@ -107,33 +138,30 @@ class MessageStore:
         chat_type: str,
         participant_count: Optional[int] = None,
     ) -> None:
-        """Upsert chat/dialog metadata.
-
-        Args:
-            chat_id: Telegram chat ID.
-            title: Display name / title of the chat.
-            chat_type: One of ``"user"``, ``"group"``, ``"supergroup"``,
-                       ``"channel"``.
-            participant_count: Number of participants (if available).
-
-        Uses::
-
-            INSERT INTO chats (chat_id, title, chat_type, participant_count, updated_at)
-            VALUES ($1, $2, $3, $4, NOW())
-            ON CONFLICT (chat_id)
-            DO UPDATE SET title = $2, chat_type = $3, participant_count = $4,
-                          updated_at = NOW();
-        """
-        # TODO: implement
-        #   - Use self._pool.execute() with parameterized query
-        raise NotImplementedError
+        """Upsert chat/dialog metadata."""
+        await self._pool.execute(
+            _UPSERT_CHAT_SQL,
+            chat_id,
+            title,
+            chat_type,
+            participant_count,
+        )
 
     async def get_sync_stats(self) -> Dict[str, Any]:
-        """Return summary statistics for monitoring.
+        """Return summary statistics for monitoring."""
+        async with self._pool.acquire() as conn:
+            total_messages = await conn.fetchval("SELECT COUNT(*) FROM messages")
+            total_chats = await conn.fetchval("SELECT COUNT(*) FROM chats")
+            last_sync_time = await conn.fetchval(
+                "SELECT MAX(timestamp) FROM messages"
+            )
+            oldest_message = await conn.fetchval(
+                "SELECT MIN(timestamp) FROM messages"
+            )
 
-        Returns:
-            Dict with keys like ``total_messages``, ``total_chats``,
-            ``last_sync_time``, ``oldest_message``.
-        """
-        # TODO: implement
-        raise NotImplementedError
+        return {
+            "total_messages": total_messages or 0,
+            "total_chats": total_chats or 0,
+            "last_sync_time": last_sync_time.isoformat() if last_sync_time else None,
+            "oldest_message": oldest_message.isoformat() if oldest_message else None,
+        }

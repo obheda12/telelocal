@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 from functools import wraps
-from typing import Any, Callable, Coroutine
+from typing import Any, Callable, Coroutine, List
 
 from telegram import Update
 from telegram.ext import ContextTypes
@@ -26,6 +26,9 @@ HandlerFunc = Callable[
     [Update, ContextTypes.DEFAULT_TYPE],
     Coroutine[Any, Any, None],
 ]
+
+# Telegram message length limit
+_TG_MAX_LEN = 4096
 
 
 # ---------------------------------------------------------------------------
@@ -75,6 +78,36 @@ def owner_only(func: HandlerFunc) -> HandlerFunc:
 
 
 # ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _split_message(text: str) -> List[str]:
+    """Split a long message into Telegram-safe chunks (<= 4096 chars).
+
+    Prefers splitting at newlines for readability.
+    """
+    if len(text) <= _TG_MAX_LEN:
+        return [text]
+
+    chunks: List[str] = []
+    while text:
+        if len(text) <= _TG_MAX_LEN:
+            chunks.append(text)
+            break
+
+        # Try to split at last newline within limit
+        split_pos = text.rfind("\n", 0, _TG_MAX_LEN)
+        if split_pos == -1 or split_pos < _TG_MAX_LEN // 2:
+            split_pos = _TG_MAX_LEN
+
+        chunks.append(text[:split_pos])
+        text = text[split_pos:].lstrip("\n")
+
+    return chunks
+
+
+# ---------------------------------------------------------------------------
 # Command handlers
 # ---------------------------------------------------------------------------
 
@@ -83,51 +116,64 @@ def owner_only(func: HandlerFunc) -> HandlerFunc:
 async def handle_start(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Handle the ``/start`` command.
-
-    Sends a welcome message explaining what the bot can do.
-    """
-    # TODO: implement
-    #   - await update.message.reply_text("Welcome! ...")
-    #   - Log to audit
-    raise NotImplementedError
+    """Handle the ``/start`` command."""
+    await update.message.reply_text(
+        "Welcome! I'm your personal Telegram assistant.\n\n"
+        "Ask me anything about your synced messages and I'll search "
+        "through them and provide answers using Claude.\n\n"
+        "Use /help to see available commands."
+    )
+    audit: AuditLogger | None = context.bot_data.get("audit")
+    if audit:
+        await audit.log("querybot", "command_start", success=True)
 
 
 @owner_only
 async def handle_help(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Handle the ``/help`` command.
-
-    Sends usage instructions:
-        - How to ask questions
-        - Available commands (/start, /help, /stats)
-        - Tips for effective queries
-    """
-    # TODO: implement
-    #   - Build help text
-    #   - await update.message.reply_text(help_text)
-    raise NotImplementedError
+    """Handle the ``/help`` command."""
+    help_text = (
+        "Available commands:\n"
+        "  /start - Welcome message\n"
+        "  /help  - This help text\n"
+        "  /stats - Sync and usage statistics\n\n"
+        "How to use:\n"
+        "  Just send me a question in plain text! I'll search your "
+        "synced Telegram messages and answer using Claude.\n\n"
+        "Tips for effective queries:\n"
+        '  - Be specific: "What did Alice say about the project deadline?"\n'
+        '  - Ask for summaries: "Summarise the discussion in DevChat yesterday"\n'
+        '  - Search by topic: "Find messages about Python deployment"'
+    )
+    await update.message.reply_text(help_text)
 
 
 @owner_only
 async def handle_stats(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Handle the ``/stats`` command.
+    """Handle the ``/stats`` command."""
+    search: MessageSearch = context.bot_data["search"]
+    llm: ClaudeAssistant = context.bot_data["llm"]
 
-    Shows:
-        - Total synced messages / chats
-        - Last sync timestamp
-        - LLM token usage / estimated cost
-        - Bot uptime
-    """
-    # TODO: implement
-    #   1. Get search module and LLM from context.bot_data
-    #   2. Query sync stats from database
-    #   3. Get LLM usage stats
-    #   4. Format and send reply
-    raise NotImplementedError
+    sync_stats = await search._pool.fetchval("SELECT COUNT(*) FROM messages")
+    chat_count = await search._pool.fetchval("SELECT COUNT(*) FROM chats")
+    last_sync = await search._pool.fetchval("SELECT MAX(timestamp) FROM messages")
+
+    usage = llm.get_usage_stats()
+
+    stats_text = (
+        f"Sync statistics:\n"
+        f"  Messages: {sync_stats or 0}\n"
+        f"  Chats: {chat_count or 0}\n"
+        f"  Last sync: {last_sync.isoformat() if last_sync else 'Never'}\n\n"
+        f"LLM usage (this session):\n"
+        f"  Input tokens: {usage['input_tokens']}\n"
+        f"  Output tokens: {usage['output_tokens']}\n"
+        f"  Estimated cost: ${usage['estimated_cost_usd']}"
+    )
+    await update.message.reply_text(stats_text)
 
 
 # ---------------------------------------------------------------------------
@@ -142,42 +188,67 @@ async def handle_message(
     """Handle a free-text message — the main query-answer pipeline.
 
     Flow:
-        1. Extract the user's question from the message.
-        2. Run hybrid search to find relevant messages.
-        3. Send question + context to Claude.
-        4. Reply with Claude's answer.
-        5. Log the interaction to the audit log.
-
-    If search returns no results, replies with a "no results" message
-    instead of calling Claude (saves tokens / cost).
+        1. Fetch chat list (cached) for intent extraction context.
+        2. Use Haiku to parse the question into structured filters.
+        3. Run filtered search using extracted intent.
+        4. Fall back to unfiltered FTS if filtered search returns nothing.
+        5. Send results + question to Sonnet for synthesis.
     """
-    # TODO: implement
-    #   question = update.message.text
-    #
-    #   search: MessageSearch = context.bot_data["search"]
-    #   llm: ClaudeAssistant = context.bot_data["llm"]
-    #   audit: AuditLogger = context.bot_data["audit"]
-    #
-    #   # 1. Search
-    #   results = await search.hybrid_search(question)
-    #
-    #   if not results:
-    #       await update.message.reply_text("No relevant messages found.")
-    #       return
-    #
-    #   # 2. Ask Claude
-    #   answer = await llm.query(question, results)
-    #
-    #   # 3. Reply (split if > 4096 chars — Telegram message limit)
-    #   await update.message.reply_text(answer)
-    #
-    #   # 4. Audit
-    #   await audit.log("querybot", "query", {
-    #       "question_length": len(question),
-    #       "results_count": len(results),
-    #       "answer_length": len(answer),
-    #   }, success=True)
-    raise NotImplementedError
+    question = update.message.text
+
+    search: MessageSearch = context.bot_data["search"]
+    llm: ClaudeAssistant = context.bot_data["llm"]
+    audit: AuditLogger = context.bot_data["audit"]
+
+    # 1. Get chat list + extract intent
+    chat_list = await search.get_chat_list()
+    intent = await llm.extract_query_intent(question, chat_list)
+
+    # 2. Filtered search using extracted intent
+    # Use higher limit for browse queries (no search terms = summarize)
+    browse_limit = 50 if not intent.search_terms else 20
+    results = await search.filtered_search(
+        search_terms=intent.search_terms,
+        chat_ids=intent.chat_ids,
+        sender_name=intent.sender_name,
+        days_back=intent.days_back,
+        limit=browse_limit,
+    )
+
+    # 3. Fallback: if filtered search found nothing but had filters,
+    #    try unfiltered FTS with the original question
+    if not results and (intent.chat_ids or intent.sender_name or intent.days_back):
+        logger.info("Filtered search empty, falling back to unfiltered FTS")
+        results = await search.full_text_search(question)
+
+    if not results:
+        await update.message.reply_text(
+            "No relevant messages found. Try broadening your search "
+            "or check that the chat has been synced."
+        )
+        return
+
+    # 4. Ask Claude
+    answer = await llm.query(question, results)
+
+    # 5. Reply (split if > 4096 chars — Telegram message limit)
+    for chunk in _split_message(answer):
+        await update.message.reply_text(chunk)
+
+    # 6. Audit (metadata only — never log message content)
+    await audit.log(
+        "querybot",
+        "query",
+        {
+            "question_length": len(question),
+            "results_count": len(results),
+            "answer_length": len(answer),
+            "intent_chat_ids": intent.chat_ids,
+            "intent_has_search_terms": intent.search_terms is not None,
+            "intent_days_back": intent.days_back,
+        },
+        success=True,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -188,14 +259,25 @@ async def handle_message(
 async def error_handler(
     update: object, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Global error handler for unhandled exceptions in handlers.
+    """Global error handler for unhandled exceptions in handlers."""
+    logger.exception("Unhandled error", exc_info=context.error)
 
-    Logs the error, notifies the owner if possible, and records an
-    audit event.  Does NOT expose stack traces to the user.
-    """
-    # TODO: implement
-    #   - logger.exception("Unhandled error", exc_info=context.error)
-    #   - If update is an Update with effective_chat, send a generic
-    #     error message: "An error occurred. Please try again."
-    #   - Log to audit
-    raise NotImplementedError
+    # Notify the user with a generic message if possible
+    if isinstance(update, Update) and update.effective_chat:
+        try:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text="An error occurred. Please try again.",
+            )
+        except Exception:
+            logger.exception("Failed to send error message to user")
+
+    # Audit log
+    audit: AuditLogger | None = context.bot_data.get("audit")
+    if audit:
+        await audit.log(
+            "querybot",
+            "unhandled_error",
+            {"error": str(context.error)},
+            success=False,
+        )

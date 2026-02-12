@@ -63,6 +63,12 @@ rate_limit_seconds = 2
 # and excessive memory use on the Pi.
 batch_size = 100
 
+# How far back to fetch messages on the FIRST sync of a chat (days).
+# Once a chat has been synced, subsequent passes use the last synced
+# message ID and this limit no longer applies.
+# Set to 0 to disable the limit and fetch all history.
+max_history_days = 365
+
 # Encrypt the Telethon session file at rest using Fernet (AES-128-CBC + HMAC).
 # The encryption key is stored in the system keychain, never on disk.
 # Even if the session file is stolen, it's useless without the key.

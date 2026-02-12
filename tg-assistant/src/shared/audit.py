@@ -60,41 +60,32 @@ class AuditLogger:
                     ``"blocked_method"``, ``"unauthorized_access"``).
             details: Arbitrary JSON-serialisable metadata.
             success: Whether the action succeeded.
-
-        Event format (JSON Lines)::
-
-            {
-                "timestamp": "2024-01-15T14:30:00.000Z",
-                "service": "syncer",
-                "action": "sync_pass",
-                "details": {"new_messages": 42},
-                "success": true
-            }
         """
-        # TODO: implement
-        #   event = {
-        #       "timestamp": datetime.now(timezone.utc).isoformat(),
-        #       "service": service,
-        #       "action": action,
-        #       "details": details or {},
-        #       "success": success,
-        #   }
-        #
-        #   # 1. Write to file (append, one JSON object per line)
-        #   try:
-        #       with open(self._log_path, "a") as f:
-        #           f.write(json.dumps(event) + "\n")
-        #   except OSError:
-        #       logger.exception("Failed to write audit log file")
-        #
-        #   # 2. Write to database (parameterized query)
-        #   try:
-        #       async with self._pool.acquire() as conn:
-        #           await conn.execute(
-        #               "INSERT INTO audit_log (service, action, details, success) "
-        #               "VALUES ($1, $2, $3::jsonb, $4)",
-        #               service, action, json.dumps(details or {}), success,
-        #           )
-        #   except Exception:
-        #       logger.exception("Failed to write audit log to database")
-        raise NotImplementedError
+        event = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "service": service,
+            "action": action,
+            "details": details or {},
+            "success": success,
+        }
+
+        # 1. Write to file (append, one JSON object per line)
+        try:
+            with open(self._log_path, "a") as f:
+                f.write(json.dumps(event) + "\n")
+        except OSError:
+            logger.exception("Failed to write audit log file")
+
+        # 2. Write to database (parameterized query)
+        try:
+            async with self._pool.acquire() as conn:
+                await conn.execute(
+                    "INSERT INTO audit_log (service, action, details, success) "
+                    "VALUES ($1, $2, $3::jsonb, $4)",
+                    service,
+                    action,
+                    json.dumps(details or {}),
+                    success,
+                )
+        except Exception:
+            logger.exception("Failed to write audit log to database")

@@ -14,6 +14,7 @@ Key behaviours:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import Any, Dict
@@ -34,9 +35,12 @@ from querybot.handlers import (
     handle_stats,
     error_handler,
 )
+from querybot.llm import ClaudeAssistant
+from querybot.search import MessageSearch
 from shared.audit import AuditLogger
-from shared.db import get_connection_pool
+from shared.db import get_connection_pool, init_database
 from shared.secrets import get_secret
+from syncer.embeddings import create_embedding_provider
 
 logger = logging.getLogger("querybot.main")
 
@@ -56,11 +60,25 @@ def load_config(path: Path = _DEFAULT_CONFIG_PATH) -> Dict[str, Any]:
 
     Raises:
         FileNotFoundError: If the config file does not exist.
-        KeyError: If required keys are missing (e.g. ``bot.owner_id``).
+        KeyError: If required keys are missing.
     """
-    # TODO: implement — load TOML, validate required keys
-    #   (bot.token via keychain, bot.owner_id, database.*, claude.*)
-    raise NotImplementedError
+    config = toml.load(path)
+
+    # Validate required keys
+    required = [
+        ("querybot", "owner_telegram_id"),
+        ("querybot", "bot_token_keychain_key"),
+        ("database",),
+        ("querybot", "claude"),
+    ]
+    for keys in required:
+        obj = config
+        for k in keys:
+            if k not in obj:
+                raise KeyError(f"Missing required config key: {'.'.join(keys)}")
+            obj = obj[k]
+
+    return config
 
 
 # ---------------------------------------------------------------------------
@@ -73,13 +91,8 @@ def build_owner_filter(owner_id: int) -> filters.BaseFilter:
 
     Messages from any other user are silently dropped — no error reply
     is sent (to avoid revealing the bot's existence to strangers).
-
-    Args:
-        owner_id: Telegram user ID of the bot owner.
     """
-    # TODO: implement
-    #   - Return filters.User(user_id=owner_id)
-    raise NotImplementedError
+    return filters.User(user_id=owner_id)
 
 
 # ---------------------------------------------------------------------------
@@ -98,29 +111,56 @@ async def build_application(config: Dict[str, Any]) -> Application:
         - Command handlers (``/start``, ``/help``, ``/stats``).
         - Free-text message handler (owner-only).
         - Global error handler.
-
-    Args:
-        config: Parsed configuration dictionary.
-
-    Returns:
-        A fully configured ``Application`` instance (not yet running).
     """
-    # TODO: implement
-    #   1. Retrieve bot token from keychain:  get_secret("bot_token")
-    #   2. Create Application via Application.builder().token(token).build()
-    #   3. Initialise DB pool, audit, search, LLM — store in bot_data
-    #   4. Register handlers:
-    #        app.add_handler(CommandHandler("start", handle_start))
-    #        app.add_handler(CommandHandler("help", handle_help))
-    #        app.add_handler(CommandHandler("stats", handle_stats))
-    #        owner_filter = build_owner_filter(config["bot"]["owner_id"])
-    #        app.add_handler(MessageHandler(
-    #            filters.TEXT & ~filters.COMMAND & owner_filter,
-    #            handle_message,
-    #        ))
-    #        app.add_error_handler(error_handler)
-    #   5. Return app
-    raise NotImplementedError
+    # 1. Retrieve bot token from keychain
+    bot_token = get_secret(config["querybot"]["bot_token_keychain_key"])
+
+    # 2. Create Application
+    app = Application.builder().token(bot_token).build()
+
+    # 3. Initialise infrastructure
+    pool = await get_connection_pool(config["database"])
+    await init_database(pool)
+
+    audit_log_path = Path(
+        config.get("security", {}).get("log_file", "/var/log/tg-assistant/audit.log")
+    )
+    audit = AuditLogger(pool, log_path=audit_log_path)
+
+    embedder = create_embedding_provider(config.get("embeddings", {}))
+    search = MessageSearch(pool, embedder)
+
+    claude_config = config["querybot"]["claude"]
+    claude_api_key = get_secret(claude_config["api_key_keychain_key"])
+    llm = ClaudeAssistant(
+        api_key=claude_api_key,
+        model=claude_config.get("model", "claude-sonnet-4-5-20250929"),
+        max_queries_per_minute=config["querybot"].get("max_queries_per_minute", 20),
+    )
+
+    owner_id = config["querybot"]["owner_telegram_id"]
+
+    # 4. Store in bot_data for handler access
+    app.bot_data["owner_id"] = owner_id
+    app.bot_data["search"] = search
+    app.bot_data["llm"] = llm
+    app.bot_data["audit"] = audit
+    app.bot_data["pool"] = pool
+
+    # 5. Register handlers with owner filter
+    owner_filter = build_owner_filter(owner_id)
+    app.add_handler(CommandHandler("start", handle_start, filters=owner_filter))
+    app.add_handler(CommandHandler("help", handle_help, filters=owner_filter))
+    app.add_handler(CommandHandler("stats", handle_stats, filters=owner_filter))
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND & owner_filter,
+            handle_message,
+        )
+    )
+    app.add_error_handler(error_handler)
+
+    return app
 
 
 # ---------------------------------------------------------------------------
@@ -138,10 +178,8 @@ def run() -> None:
     config = load_config()
 
     # python-telegram-bot manages its own event loop via run_polling()
-    # TODO: implement
-    #   app = asyncio.run(build_application(config))
-    #   app.run_polling(allowed_updates=Update.ALL_TYPES)
-    raise NotImplementedError
+    app = asyncio.run(build_application(config))
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":

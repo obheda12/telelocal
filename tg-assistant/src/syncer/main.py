@@ -15,9 +15,12 @@ Key behaviours:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import random
 import signal
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict
 
@@ -26,8 +29,9 @@ from telethon import TelegramClient as TelethonClient
 
 from syncer.readonly_client import ReadOnlyTelegramClient
 from syncer.message_store import MessageStore
+from syncer.embeddings import EmbeddingProvider, create_embedding_provider
 from shared.audit import AuditLogger
-from shared.db import get_connection_pool
+from shared.db import get_connection_pool, init_database
 from shared.secrets import get_secret, decrypt_session_file
 
 logger = logging.getLogger("syncer.main")
@@ -50,9 +54,23 @@ def load_config(path: Path = _DEFAULT_CONFIG_PATH) -> Dict[str, Any]:
         FileNotFoundError: If the config file does not exist.
         KeyError: If required keys are missing.
     """
-    # TODO: implement — load TOML, validate required keys
-    #   (telegram.api_id, telegram.api_hash, database.*, syncer.*)
-    raise NotImplementedError
+    config = toml.load(path)
+
+    # Validate required keys
+    required = [
+        ("syncer", "api_id"),
+        ("syncer", "api_hash"),
+        ("syncer", "session_path"),
+        ("database",),
+    ]
+    for keys in required:
+        obj = config
+        for k in keys:
+            if k not in obj:
+                raise KeyError(f"Missing required config key: {'.'.join(keys)}")
+            obj = obj[k]
+
+    return config
 
 
 # ---------------------------------------------------------------------------
@@ -66,8 +84,7 @@ async def rate_limit_delay(seconds: float = 1.0) -> None:
     Args:
         seconds: Minimum delay between consecutive API calls.
     """
-    # TODO: implement — consider adaptive back-off on FloodWaitError
-    await asyncio.sleep(seconds)
+    await asyncio.sleep(seconds + random.uniform(0.1, 1.5))
 
 
 # ---------------------------------------------------------------------------
@@ -78,6 +95,7 @@ async def rate_limit_delay(seconds: float = 1.0) -> None:
 async def sync_once(
     client: ReadOnlyTelegramClient,
     store: MessageStore,
+    embedder: EmbeddingProvider,
     audit: AuditLogger,
     config: Dict[str, Any],
 ) -> int:
@@ -86,21 +104,122 @@ async def sync_once(
     Args:
         client: The read-only Telegram client.
         store: Message storage backend.
+        embedder: Embedding provider for generating vectors.
         audit: Audit logger instance.
         config: Parsed configuration.
 
     Returns:
         Total number of new messages stored in this pass.
     """
-    # TODO: implement
-    #   1. Iterate dialogs via client.iter_dialogs()
-    #   2. For each dialog, get last_synced_id from store
-    #   3. Fetch messages since last_synced_id via client.iter_messages()
-    #   4. Call store.store_message() for each new message
-    #   5. Update chat metadata via store.update_chat_metadata()
-    #   6. Rate-limit between API calls
-    #   7. Log progress to audit
-    raise NotImplementedError
+    syncer_config = config.get("syncer", {})
+    batch_size = syncer_config.get("batch_size", 100)
+    rate_seconds = syncer_config.get("rate_limit_seconds", 2)
+    max_history_days = syncer_config.get("max_history_days", 365)
+    use_vectors = embedder.dimension == 1024
+
+    total_new = 0
+
+    dialogs = await client.get_dialogs()
+    for dialog in dialogs:
+        chat_id = dialog.id
+        chat_title = getattr(dialog, "title", None) or getattr(dialog, "name", str(chat_id))
+
+        last_id = await store.get_last_synced_id(chat_id)
+
+        # Build get_messages kwargs
+        fetch_kwargs: Dict[str, Any] = {"limit": batch_size}
+        if last_id:
+            # Incremental sync — only fetch newer messages
+            fetch_kwargs["min_id"] = last_id
+        elif max_history_days > 0:
+            # Initial sync — limit how far back we go
+            cutoff = datetime.now(timezone.utc) - timedelta(days=max_history_days)
+            fetch_kwargs["offset_date"] = cutoff
+            logger.info(
+                "Initial sync for chat %s (%s): fetching messages since %s",
+                chat_id, chat_title, cutoff.date(),
+            )
+
+        messages = await client.get_messages(dialog, **fetch_kwargs)
+
+        if not messages:
+            continue
+
+        # Build message dicts
+        batch = []
+        texts_for_embedding = []
+        for msg in messages:
+            text = getattr(msg, "text", None) or getattr(msg, "message", None)
+            sender = getattr(msg, "sender", None)
+            sender_id = getattr(sender, "id", None) if sender else None
+            sender_name = None
+            if sender:
+                first = getattr(sender, "first_name", "") or ""
+                last = getattr(sender, "last_name", "") or ""
+                sender_name = f"{first} {last}".strip() or str(sender_id)
+
+            try:
+                raw = msg.to_dict() if hasattr(msg, "to_dict") else {}
+            except Exception:
+                raw = {}
+
+            msg_dict = {
+                "message_id": msg.id,
+                "chat_id": chat_id,
+                "sender_id": sender_id,
+                "sender_name": sender_name,
+                "timestamp": msg.date,
+                "text": text,
+                "raw_json": json.dumps(raw, default=str),
+                "embedding": None,
+            }
+            batch.append(msg_dict)
+            if text and use_vectors:
+                texts_for_embedding.append(text)
+
+        # Generate embeddings for texts (if provider produces 1024-dim)
+        if texts_for_embedding and use_vectors:
+            try:
+                embeddings = await embedder.batch_generate(texts_for_embedding)
+                emb_idx = 0
+                for msg_dict in batch:
+                    if msg_dict["text"] and emb_idx < len(embeddings):
+                        msg_dict["embedding"] = embeddings[emb_idx]
+                        emb_idx += 1
+            except Exception:
+                logger.warning("Failed to generate embeddings for batch", exc_info=True)
+
+        new_count = await store.store_messages_batch(batch)
+        total_new += new_count
+
+        # Determine chat type
+        chat_type = "user"
+        if hasattr(dialog, "is_group") and dialog.is_group:
+            chat_type = "group"
+        elif hasattr(dialog, "is_channel") and dialog.is_channel:
+            chat_type = "channel"
+
+        await store.update_chat_metadata(
+            chat_id=chat_id,
+            title=chat_title,
+            chat_type=chat_type,
+        )
+
+        await audit.log(
+            "syncer",
+            "sync_chat",
+            {
+                "chat_id": chat_id,
+                "chat_title": chat_title,
+                "new_messages": new_count,
+                "batch_size": len(batch),
+            },
+            success=True,
+        )
+
+        await rate_limit_delay(rate_seconds)
+
+    return total_new
 
 
 # ---------------------------------------------------------------------------
@@ -125,18 +244,22 @@ async def main() -> None:
     """Top-level async entry point for the syncer service."""
     # --- config & secrets ---
     config = load_config()
-    api_id: int = config["telegram"]["api_id"]
-    api_hash: str = config["telegram"]["api_hash"]
+    api_id: int = int(config["syncer"]["api_id"])
+    api_hash: str = config["syncer"]["api_hash"]
 
     # Session file is encrypted at rest; decrypt into memory only
-    session_path = Path(config["telegram"]["session_path"])
+    session_path = Path(config["syncer"]["session_path"])
     session_key = get_secret("session_encryption_key")
     session = decrypt_session_file(session_path, session_key)
 
     # --- database ---
     pool = await get_connection_pool(config["database"])
+    await init_database(pool)
     store = MessageStore(pool)
     audit = AuditLogger(pool)
+
+    # --- embeddings ---
+    embedder = create_embedding_provider(config.get("embeddings", {}))
 
     # --- Telegram (read-only) ---
     raw_client = TelethonClient(session, api_id, api_hash)
@@ -152,7 +275,7 @@ async def main() -> None:
         # --- main loop ---
         while not _shutdown_event.is_set():
             try:
-                count = await sync_once(client, store, audit, config)
+                count = await sync_once(client, store, embedder, audit, config)
                 logger.info("Sync pass complete: %d new messages", count)
                 await audit.log(
                     "syncer",

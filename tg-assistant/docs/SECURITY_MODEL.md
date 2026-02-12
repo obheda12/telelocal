@@ -830,7 +830,8 @@ sequenceDiagram
     participant Syncer as tg-syncer
     participant DB as PostgreSQL
     participant Bot as tg-querybot
-    participant Claude as Claude API
+    participant Haiku as Claude Haiku
+    participant Sonnet as Claude Sonnet
     participant Owner as Owner
 
     Note over TG,Syncer: MTProto encrypted (AES-256-IGE)
@@ -846,13 +847,19 @@ sequenceDiagram
     Bot->>Bot: Verify sender == owner_id
     Note right of Bot: THREAT: Unauthorized access<br/>attempt (T3) - silently ignored
 
-    Bot->>DB: SELECT top-K relevant messages
-    Note right of Bot: THREAT: Query could surface<br/>sensitive cross-chat data
+    Bot->>DB: Fetch chat list (cached)
+    Bot->>Haiku: Question + chat names → extract intent
+    Note right of Haiku: Only question + chat titles sent<br/>(no message content)
+    Haiku-->>Bot: {chat_ids, sender, time, keywords}
 
-    Bot->>Claude: System prompt + top-K context + question
-    Note right of Claude: THREAT: Message content leaves<br/>trusted zone to cloud (T4, T11)
+    Bot->>DB: Filtered FTS (scoped to intent)
+    DB-->>Bot: Top-K relevant messages
+    Note right of Bot: Filters reduce cross-chat<br/>data exposure
 
-    Claude-->>Bot: Analysis / summary
+    Bot->>Sonnet: System prompt + top-K context + question
+    Note right of Sonnet: THREAT: Message content leaves<br/>trusted zone to cloud (T4, T11)
+
+    Sonnet-->>Bot: Analysis / summary
     Note right of Bot: THREAT: Response may be<br/>influenced by injected content (T2)
 
     Bot->>Owner: Response (owner-only)
@@ -866,16 +873,18 @@ sequenceDiagram
 | 1-2 | Telegram to Syncer | Untrusted message content enters system | Content sanitization, read-only wrapper |
 | 3 | Syncer to DB | Plaintext messages stored on disk | File permissions, localhost-only DB; future: pgcrypto |
 | 4-5 | Owner to Bot | Unauthorized user tries to query | Owner-only check (hardcoded user ID) |
-| 6 | Bot to DB | Query may surface sensitive data | Data minimization (top-K only) |
-| 7 | Bot to Claude API | Message content sent to cloud | Top-K limit, Anthropic data policies |
-| 8 | Claude to Bot | Response influenced by injection | System prompt hardening, human review |
+| 6-7 | Bot to Haiku | Question + chat titles sent to cloud for intent extraction | No message content sent; only metadata (chat names/IDs) |
+| 8 | Bot to DB | Filtered query scoped by intent | Chat/sender/time filters reduce data surface vs. unfiltered search |
+| 9 | Bot to Sonnet | Message content sent to cloud | Top-K limit, scoped by intent filters, Anthropic data policies |
+| 10 | Sonnet to Bot | Response influenced by injection | System prompt hardening, human review |
 
 ### Data Exposure Summary
 
 | Data | Where It Goes | Why | Residual Risk |
 |------|--------------|-----|---------------|
 | All user's Telegram messages | Local PostgreSQL (on Pi) | Core functionality -- message storage | Physical device theft (mitigated by encryption-at-rest hardening path) |
-| Top-K relevant messages (per query) | Anthropic's Claude API (cloud) | LLM reasoning requires message context | Anthropic sees message content. Mitigated by: data minimization (top-K only), Anthropic's data retention policies, future local LLM option. |
+| User's question + chat titles | Anthropic Claude Haiku (cloud) | Intent extraction: parse question into structured search filters | Anthropic sees chat names (metadata) but NOT message content. Low sensitivity. |
+| Top-K relevant messages (per query) | Anthropic Claude Sonnet (cloud) | LLM reasoning requires message context | Anthropic sees message content. Mitigated by: data minimization (top-K only, scoped by intent filters), Anthropic's data retention policies, future local LLM option. |
 | User's query text | Anthropic's Claude API (cloud) | Required for LLM to understand the question | Same as above |
 | Message embeddings | Local PostgreSQL (on Pi) | Semantic search | Embeddings are lossy -- original text cannot be reconstructed from them, but they may reveal topics |
 | Audit logs | Local PostgreSQL + log files (on Pi) | Tamper-evident record of all operations | Contains metadata about queries and API calls; does not contain message content |
