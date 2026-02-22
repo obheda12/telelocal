@@ -160,6 +160,7 @@ journalctl -u tg-syncer --since "1 hour ago" | grep -i flood
 - Keep `syncer.enable_prescan_progress = false` unless you need detailed ETA logs.
 - Keep `syncer.store_raw_json = false` unless you explicitly need full raw payloads.
 - For faster catch-up on many chats, keep a small `syncer.idle_chat_delay_seconds` (default `0.1`).
+- The syncer now batches per-chat high-water-mark lookups into one DB query per pass for lower latency on large chat counts.
 
 ---
 

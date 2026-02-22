@@ -26,14 +26,6 @@ _INSERT_SQL = """
     ON CONFLICT (message_id, chat_id) DO NOTHING
 """
 
-_INSERT_RETURNING_SQL = """
-    INSERT INTO messages (message_id, chat_id, sender_id, sender_name,
-                          timestamp, text, raw_json, embedding)
-    VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)
-    ON CONFLICT (message_id, chat_id) DO NOTHING
-    RETURNING message_id
-"""
-
 _UPSERT_CHAT_SQL = """
     INSERT INTO chats (chat_id, title, chat_type, participant_count, updated_at)
     VALUES ($1, $2, $3, $4, NOW())
@@ -55,6 +47,7 @@ class MessageStore:
     def __init__(self, pool: asyncpg.Pool, embedding_dim: Optional[int] = None) -> None:
         self._pool = pool
         self._embedding_dim = embedding_dim
+        self._batch_insert_sql_cache: Dict[int, str] = {}
 
     # ------------------------------------------------------------------
     # Write operations (syncer_role needs INSERT on messages table)
@@ -108,25 +101,39 @@ class MessageStore:
         if not messages:
             return 0
 
-        async with self._pool.acquire() as conn:
-            params: List[Any] = []
+        row_count = len(messages)
+        sql = self._batch_insert_sql_cache.get(row_count)
+        if sql is None:
+            row_width = 8  # message_id, chat_id, sender_id, sender_name, timestamp, text, raw_json, embedding
             values_sql: List[str] = []
-            for idx, msg in enumerate(messages):
-                row_params = self._msg_params(msg)
-                params.extend(row_params)
-                base = idx * len(row_params)
-                placeholders = ", ".join(f"${base + i}" for i in range(1, len(row_params) + 1))
+            for idx in range(row_count):
+                base = idx * row_width
+                placeholders = ", ".join(
+                    f"${base + i}" for i in range(1, row_width + 1)
+                )
                 values_sql.append(f"({placeholders})")
-
             sql = (
                 "INSERT INTO messages (message_id, chat_id, sender_id, sender_name, "
                 "timestamp, text, raw_json, embedding) VALUES "
                 + ", ".join(values_sql)
-                + " ON CONFLICT (message_id, chat_id) DO NOTHING RETURNING 1"
+                + " ON CONFLICT (message_id, chat_id) DO NOTHING"
             )
-            rows = await conn.fetch(sql, *params)
+            self._batch_insert_sql_cache[row_count] = sql
 
-        inserted = len(rows)
+        async with self._pool.acquire() as conn:
+            params: List[Any] = []
+            for msg in messages:
+                row_params = self._msg_params(msg)
+                params.extend(row_params)
+
+            status = await conn.execute(sql, *params)
+
+        # asyncpg command status format: "INSERT 0 <rowcount>"
+        try:
+            inserted = int(status.rsplit(" ", 1)[-1])
+        except (ValueError, IndexError):
+            logger.debug("Unexpected INSERT status string: %s", status)
+            inserted = 0
         logger.debug("Batch insert: %d/%d new rows", inserted, len(messages))
         return inserted
 
@@ -145,6 +152,25 @@ class MessageStore:
             "SELECT MAX(message_id) FROM messages WHERE chat_id = $1",
             chat_id,
         )
+
+    async def get_last_synced_ids(self, chat_ids: List[int]) -> Dict[int, int]:
+        """Return highest message_id for multiple chats in one query."""
+        if not chat_ids:
+            return {}
+        rows = await self._pool.fetch(
+            """
+            SELECT chat_id, MAX(message_id) AS last_message_id
+            FROM messages
+            WHERE chat_id = ANY($1::bigint[])
+            GROUP BY chat_id
+            """,
+            chat_ids,
+        )
+        return {
+            int(row["chat_id"]): int(row["last_message_id"])
+            for row in rows
+            if row["last_message_id"] is not None
+        }
 
     # ------------------------------------------------------------------
     # Metadata operations

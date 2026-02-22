@@ -373,6 +373,42 @@ class TestSyncOnce:
         mock_store.store_messages_batch.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_sync_once_uses_prefetched_last_ids(self):
+        """sync_once should use batched last-id lookup when available."""
+        from syncer.main import sync_once
+
+        mock_dialog = MagicMock()
+        mock_dialog.id = 12345
+        mock_dialog.title = "Existing Chat"
+        mock_dialog.date = datetime.now(timezone.utc)
+
+        mock_client = MagicMock()
+        mock_client.get_dialogs = AsyncMock(return_value=[mock_dialog])
+        mock_client.iter_messages = MagicMock(return_value=self._iter_messages([]))
+
+        mock_store = AsyncMock()
+        mock_store.get_last_synced_ids = AsyncMock(return_value={12345: 999})
+        mock_store.get_last_synced_id = AsyncMock()
+
+        mock_embedder = MagicMock()
+        mock_embedder.dimension = 384
+        mock_audit = AsyncMock()
+
+        config = {"syncer": {"batch_size": 100, "rate_limit_seconds": 0}}
+
+        with patch("syncer.main.rate_limit_delay", new_callable=AsyncMock):
+            count = await sync_once(
+                mock_client, mock_store, mock_embedder, mock_audit, config
+            )
+
+        assert count == 0
+        mock_store.get_last_synced_ids.assert_called_once_with([12345])
+        mock_store.get_last_synced_id.assert_not_called()
+        mock_client.iter_messages.assert_called_once_with(
+            mock_dialog, min_id=999, reverse=True
+        )
+
+    @pytest.mark.asyncio
     async def test_sync_once_no_dialogs(self):
         """sync_once should handle empty dialog list gracefully."""
         from syncer.main import sync_once

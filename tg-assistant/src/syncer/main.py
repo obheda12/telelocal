@@ -15,7 +15,6 @@ Key behaviours:
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import random
 import signal
@@ -255,6 +254,18 @@ async def sync_once(
         estimated_total=grand_total, total_chats=active_count
     )
 
+    # Reduce DB round-trips: fetch per-chat high-water marks in one query.
+    last_synced_map: Dict[int, int] = {}
+    prefetched_last_ids = False
+    try:
+        maybe_map = await store.get_last_synced_ids([d.id for d in active_dialogs])
+        if isinstance(maybe_map, dict):
+            last_synced_map = maybe_map
+            prefetched_last_ids = True
+    except AttributeError:
+        # Backward-compatible fallback for older store implementations.
+        logger.debug("MessageStore.get_last_synced_ids unavailable; using per-chat lookup")
+
     for chat_idx, dialog in enumerate(active_dialogs):
         chat_id = dialog.id
         chat_title = getattr(dialog, "title", None) or getattr(dialog, "name", str(chat_id))
@@ -275,7 +286,10 @@ async def sync_once(
             estimated_total=estimated,
         )
 
-        last_id = await store.get_last_synced_id(chat_id)
+        if prefetched_last_ids:
+            last_id = last_synced_map.get(chat_id)
+        else:
+            last_id = await store.get_last_synced_id(chat_id)
 
         # Iterator for messages (paginated)
         cutoff: datetime | None = None
@@ -323,7 +337,7 @@ async def sync_once(
                 "sender_name": sender_name,
                 "timestamp": msg.date,
                 "text": text,
-                "raw_json": json.dumps(raw, default=str),
+                "raw_json": raw,
                 "embedding": None,
             }
             batch.append(msg_dict)

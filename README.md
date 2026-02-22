@@ -64,6 +64,7 @@ Performance defaults:
 - No per-pass pre-scan by default (`enable_prescan_progress = false`) to avoid one extra API call per chat.
 - `store_raw_json = false` by default to reduce ingest CPU and database bloat.
 - Active dialogs are synced in most-recent-first order so fresh chats become queryable first.
+- Last-synced message IDs are prefetched in one DB query per pass (instead of one query per chat).
 
 ### Your Query Flow
 
