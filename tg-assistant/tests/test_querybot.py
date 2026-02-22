@@ -6,7 +6,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from querybot.handlers import _split_message, handle_message, handle_start, owner_only
+from querybot.handlers import (
+    _get_sync_status_context,
+    _split_message,
+    handle_message,
+    handle_start,
+    owner_only,
+)
 from querybot.llm import ClaudeAssistant
 from querybot.search import QueryIntent, SearchResult
 from shared.safety import InputValidationResult, SanitizeResult
@@ -202,6 +208,8 @@ class TestHandleMessage:
             search_results=[],
             intent=QueryIntent(search_terms="something"),
         )
+        # Simulate a fully-synced DB (enough data → standard no-results message)
+        mock_search._pool.fetchval = AsyncMock(side_effect=[5000, 20])
 
         await handle_message(update, context)
 
@@ -510,3 +518,56 @@ class TestQueryIntent:
         assert intent.chat_ids == [1, 2]
         assert intent.sender_name == "Alice"
         assert intent.days_back == 7
+
+
+# ---------------------------------------------------------------------------
+# Sync-awareness (_get_sync_status_context)
+# ---------------------------------------------------------------------------
+
+
+class TestSyncStatusContext:
+    @pytest.mark.asyncio
+    async def test_zero_messages_shows_initial_sync(self):
+        """When no messages exist, should indicate initial sync in progress."""
+        pool = AsyncMock()
+        pool.fetchval = AsyncMock(side_effect=[0, 0])  # msg_count=0, chat_count=0
+
+        result = await _get_sync_status_context(pool)
+        assert "initial sync is still in progress" in result
+        assert "telenad sync-status" in result
+
+    @pytest.mark.asyncio
+    async def test_few_chats_shows_partial_sync(self):
+        """With some messages but few chats, should indicate sync may still be running."""
+        pool = AsyncMock()
+        pool.fetchval = AsyncMock(side_effect=[500, 2])  # msg_count=500, chat_count=2
+
+        result = await _get_sync_status_context(pool)
+        assert "initial sync may still be in progress" in result
+        assert "500" in result
+        assert "2" in result
+
+    @pytest.mark.asyncio
+    async def test_normal_no_match_shows_standard_message(self):
+        """With enough data, should show the standard no-results message."""
+        pool = AsyncMock()
+        pool.fetchval = AsyncMock(side_effect=[5000, 15])  # msg_count=5000, chat_count=15
+
+        result = await _get_sync_status_context(pool)
+        assert "No relevant messages found" in result
+
+    @pytest.mark.asyncio
+    async def test_handle_message_uses_sync_context_on_no_results(self):
+        """handle_message should use sync-aware message when search returns nothing."""
+        update, context, mock_search, mock_llm, _ = _make_handler_context(
+            search_results=[],
+            intent=QueryIntent(search_terms="something"),
+        )
+        # Mock the pool to return 0 messages (initial sync)
+        mock_search._pool.fetchval = AsyncMock(side_effect=[0, 0])
+
+        await handle_message(update, context)
+
+        reply_text = update.message.reply_text.call_args[0][0]
+        assert "initial sync is still in progress" in reply_text
+        mock_llm.query.assert_not_called()

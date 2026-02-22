@@ -542,6 +542,27 @@ phase_service_activation() {
         echo ""
         log_info "Service status:"
         systemctl --no-pager status tg-syncer tg-querybot 2>/dev/null || true
+
+        # Brief polling to confirm sync is pulling messages
+        echo ""
+        log_info "Waiting for first messages to confirm sync is working..."
+        POLL_OK=false
+        for i in $(seq 1 6); do
+            MSG_COUNT=$(sudo -u postgres psql -d "${DB_NAME}" -tAc "SELECT COUNT(*) FROM messages;" 2>/dev/null || echo "0")
+            CHAT_COUNT=$(sudo -u postgres psql -d "${DB_NAME}" -tAc "SELECT COUNT(*) FROM chats;" 2>/dev/null || echo "0")
+            if [[ "${MSG_COUNT}" -gt 0 ]]; then
+                log_success "Sync is working: ${MSG_COUNT} messages across ${CHAT_COUNT} chat(s)"
+                POLL_OK=true
+                break
+            fi
+            echo -e "  Waiting for first messages... (${i}/6)"
+            sleep 5
+        done
+        if [[ "${POLL_OK}" == false ]]; then
+            log_info "No messages yet (initial sync can take 10-30 minutes)."
+            log_info "Monitor progress with: telenad sync-status"
+            log_info "Check syncer logs with: telenad logs"
+        fi
     fi
 }
 
@@ -570,9 +591,12 @@ print_final_summary() {
     echo ""
     echo -e "${BOLD}Next:${NC}"
     echo "  1. The syncer is now pulling your last 90 days of messages."
+    echo "     Initial sync takes 10-30 minutes depending on history size."
     echo "     Monitor progress with: telenad sync-status"
-    echo "  2. Once messages appear, message your bot on Telegram and ask a question."
-    echo "  3. Check service logs: telenad logs"
+    echo "  2. You can message the bot right away — it will tell you when"
+    echo "     the sync is still in progress and show current message counts."
+    echo "  3. Use /stats in the bot to see sync status and message counts."
+    echo "  4. Check service logs: telenad logs"
     echo ""
     echo -e "${BOLD}Useful commands:${NC}"
     echo "  telenad status                           # Check service health"

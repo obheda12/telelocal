@@ -76,9 +76,9 @@ echo "  Total messages: ${TOTAL_MESSAGES}"
 echo "  Total chats:    ${TOTAL_CHATS}"
 
 # Time since last sync activity (most recent message timestamp in DB)
-LAST_SYNCED=$(db_query "SELECT TO_CHAR(MAX(synced_at), 'YYYY-MM-DD HH24:MI:SS') FROM messages;" 2>/dev/null || echo "")
+LAST_SYNCED=$(db_query "SELECT TO_CHAR(MAX(timestamp), 'YYYY-MM-DD HH24:MI:SS') FROM messages;" 2>/dev/null || echo "")
 if [[ -n "${LAST_SYNCED}" && "${LAST_SYNCED}" != "" ]]; then
-    SINCE_LAST=$(db_query "SELECT NOW() - MAX(synced_at) FROM messages;" 2>/dev/null || echo "unknown")
+    SINCE_LAST=$(db_query "SELECT NOW() - MAX(timestamp) FROM messages;" 2>/dev/null || echo "unknown")
     echo "  Last activity:  ${LAST_SYNCED} (${SINCE_LAST} ago)"
 else
     echo "  Last activity:  no messages synced yet"
@@ -98,14 +98,14 @@ printf "  %-40s %8s  %-12s  %-12s\n" "$(printf '%0.s-' {1..40})" "--------" "---
 # Query: join chats and messages, group by chat, order by message count descending
 db_query "
 SELECT
-    COALESCE(c.title, 'Chat ' || c.telegram_id::text),
-    COUNT(m.id),
-    TO_CHAR(MIN(m.message_date), 'YYYY-MM-DD'),
-    TO_CHAR(MAX(m.message_date), 'YYYY-MM-DD')
+    COALESCE(c.title, 'Chat ' || c.chat_id::text),
+    COUNT(m.message_id),
+    TO_CHAR(MIN(m.timestamp), 'YYYY-MM-DD'),
+    TO_CHAR(MAX(m.timestamp), 'YYYY-MM-DD')
 FROM chats c
-LEFT JOIN messages m ON m.chat_id = c.id
-GROUP BY c.id, c.title, c.telegram_id
-ORDER BY COUNT(m.id) DESC;
+LEFT JOIN messages m ON m.chat_id = c.chat_id
+GROUP BY c.chat_id, c.title
+ORDER BY COUNT(m.message_id) DESC;
 " | while IFS='|' read -r title count oldest newest; do
     # Truncate long chat titles
     if [[ ${#title} -gt 38 ]]; then
@@ -113,5 +113,41 @@ ORDER BY COUNT(m.id) DESC;
     fi
     printf "  %-40s %8s  %-12s  %-12s\n" "${title}" "${count}" "${oldest:-n/a}" "${newest:-n/a}"
 done
+
+# ---------------------------------------------------------------------------
+# Sync pass history (from audit_log)
+# ---------------------------------------------------------------------------
+echo ""
+echo -e "${BOLD}Sync Pass Status${NC}"
+echo ""
+
+FIRST_PASS=$(db_query "
+SELECT TO_CHAR(timestamp, 'YYYY-MM-DD HH24:MI:SS')
+FROM audit_log
+WHERE service = 'syncer' AND action = 'sync_pass' AND success = true
+ORDER BY timestamp ASC LIMIT 1;
+" 2>/dev/null || echo "")
+
+LATEST_PASS=$(db_query "
+SELECT TO_CHAR(timestamp, 'YYYY-MM-DD HH24:MI:SS')
+FROM audit_log
+WHERE service = 'syncer' AND action = 'sync_pass' AND success = true
+ORDER BY timestamp DESC LIMIT 1;
+" 2>/dev/null || echo "")
+
+PASS_COUNT=$(db_query "
+SELECT COUNT(*)
+FROM audit_log
+WHERE service = 'syncer' AND action = 'sync_pass' AND success = true;
+" 2>/dev/null || echo "0")
+
+if [[ -n "${FIRST_PASS}" && "${FIRST_PASS}" != "" ]]; then
+    echo "  Completed passes: ${PASS_COUNT}"
+    echo "  First pass:       ${FIRST_PASS}"
+    echo "  Latest pass:      ${LATEST_PASS}"
+else
+    echo "  No completed sync passes recorded yet."
+    echo "  The initial sync may still be in progress."
+fi
 
 echo ""

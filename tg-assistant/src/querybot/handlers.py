@@ -16,6 +16,8 @@ from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
+import asyncpg
+
 from querybot.llm import ClaudeAssistant
 from querybot.search import MessageSearch
 from shared.audit import AuditLogger
@@ -109,6 +111,35 @@ def _split_message(text: str) -> List[str]:
     return chunks
 
 
+async def _get_sync_status_context(pool: asyncpg.Pool) -> str:
+    """Check message/chat counts and return a sync-aware no-results message.
+
+    Uses only ``messages`` and ``chats`` tables (querybot_role has SELECT on
+    these but NOT on ``audit_log``).
+    """
+    msg_count = await pool.fetchval("SELECT COUNT(*) FROM messages")
+    chat_count = await pool.fetchval("SELECT COUNT(*) FROM chats")
+
+    if msg_count == 0:
+        return (
+            "The initial sync is still in progress — no messages have been "
+            "stored yet. This usually takes 10–30 minutes after first setup.\n\n"
+            "Check progress on the server with: telenad sync-status"
+        )
+
+    if chat_count <= 3:
+        return (
+            f"The initial sync may still be in progress "
+            f"({msg_count:,} messages across {chat_count} chat(s) so far). "
+            f"More messages are being pulled — try again shortly."
+        )
+
+    return (
+        "No relevant messages found. Try broadening your search "
+        "or check that the chat has been synced."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Command handlers
 # ---------------------------------------------------------------------------
@@ -159,17 +190,26 @@ async def handle_stats(
     search: MessageSearch = context.bot_data["search"]
     llm: ClaudeAssistant = context.bot_data["llm"]
 
-    sync_stats = await search._pool.fetchval("SELECT COUNT(*) FROM messages")
+    msg_count = await search._pool.fetchval("SELECT COUNT(*) FROM messages")
     chat_count = await search._pool.fetchval("SELECT COUNT(*) FROM chats")
     last_sync = await search._pool.fetchval("SELECT MAX(timestamp) FROM messages")
+
+    # Determine sync status line
+    if msg_count == 0:
+        sync_line = "Sync: initial sync in progress (no messages yet)"
+    elif last_sync:
+        sync_line = f"Sync: active (last message: {last_sync.strftime('%Y-%m-%d %H:%M')})"
+    else:
+        sync_line = "Sync: unknown"
 
     usage = llm.get_usage_stats()
 
     stats_text = (
         f"Sync statistics:\n"
-        f"  Messages: {sync_stats or 0}\n"
+        f"  {sync_line}\n"
+        f"  Messages: {msg_count or 0}\n"
         f"  Chats: {chat_count or 0}\n"
-        f"  Last sync: {last_sync.isoformat() if last_sync else 'Never'}\n\n"
+        f"  Last message: {last_sync.isoformat() if last_sync else 'Never'}\n\n"
         f"LLM usage (this session):\n"
         f"  Intent tokens: {usage['intent_input_tokens']} in / {usage['intent_output_tokens']} out\n"
         f"  Synthesis tokens: {usage['synthesis_input_tokens']} in / {usage['synthesis_output_tokens']} out\n"
@@ -235,10 +275,8 @@ async def handle_message(
         results = await search.full_text_search(question)
 
     if not results:
-        await update.message.reply_text(
-            "No relevant messages found. Try broadening your search "
-            "or check that the chat has been synced."
-        )
+        no_results_msg = await _get_sync_status_context(search._pool)
+        await update.message.reply_text(no_results_msg)
         return
 
     # 3.5. Enforce max context size (track truncation)

@@ -138,9 +138,22 @@ async def sync_once(
         return await store.store_messages_batch(batch)
 
     dialogs = await client.get_dialogs()
-    for dialog in dialogs:
+    total_dialogs = len(dialogs)
+
+    await audit.log(
+        "syncer",
+        "sync_pass_start",
+        {"total_dialogs": total_dialogs},
+        success=True,
+    )
+
+    for chat_idx, dialog in enumerate(dialogs):
         chat_id = dialog.id
         chat_title = getattr(dialog, "title", None) or getattr(dialog, "name", str(chat_id))
+
+        logger.info(
+            "Syncing chat %d/%d: %s", chat_idx + 1, total_dialogs, chat_title
+        )
 
         last_id = await store.get_last_synced_id(chat_id)
 
@@ -228,6 +241,9 @@ async def sync_once(
             {
                 "chat_id": chat_id,
                 "chat_title": chat_title,
+                "chat_index": chat_idx + 1,
+                "total_chats": total_dialogs,
+                "initial_sync": last_id is None,
                 "new_messages": new_count,
                 "messages_processed": processed_count,
             },
@@ -304,14 +320,20 @@ async def main() -> None:
             )
 
             # --- main loop ---
+            pass_number = 0
             while not _shutdown_event.is_set():
+                pass_number += 1
                 try:
                     count = await sync_once(client, store, embedder, audit, config)
-                    logger.info("Sync pass complete: %d new messages", count)
+                    logger.info(
+                        "Sync pass #%d complete: %d new messages",
+                        pass_number,
+                        count,
+                    )
                     await audit.log(
                         "syncer",
                         "sync_pass",
-                        {"new_messages": count},
+                        {"new_messages": count, "pass_number": pass_number},
                         success=True,
                     )
                 except Exception:
