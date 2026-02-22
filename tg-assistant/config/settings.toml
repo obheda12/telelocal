@@ -63,10 +63,12 @@ sync_interval_seconds = 30
 # but this baseline rate limit avoids hitting it in the first place.
 rate_limit_seconds = 2
 
-# Maximum messages to fetch per sync cycle per dialog.
-# Keeps each sync cycle bounded to avoid long-running API sessions
-# and excessive memory use on the Pi.
-batch_size = 100
+# Maximum messages to buffer in memory before flushing to the database.
+# Larger batches reduce the number of rate_limit_delay pauses between
+# flushes, significantly speeding up sync.  500 messages ≈ 2-3 MB RAM,
+# well within the Pi's syncer_max_memory_mb budget.
+# Telegram API rate limiting is handled internally by Telethon.
+batch_size = 500
 
 # How far back to fetch messages on the FIRST sync of a chat (days).
 # Once a chat has been synced, subsequent passes use the last synced

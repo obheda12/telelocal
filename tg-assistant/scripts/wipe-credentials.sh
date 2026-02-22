@@ -155,8 +155,10 @@ log_info "Removing keychain entries..."
 if command -v secret-tool &>/dev/null; then
     for KEY in bot_token anthropic_api_key session_encryption_key \
                tg-assistant-bot-token tg-assistant-claude-api-key; do
-        if secret-tool lookup service tg-assistant key "${KEY}" &>/dev/null; then
-            secret-tool clear service tg-assistant key "${KEY}" 2>/dev/null || true
+        # timeout prevents hanging on headless systems where the keyring
+        # daemon is unavailable or waiting for interactive authentication.
+        if timeout 5 secret-tool lookup service tg-assistant key "${KEY}" &>/dev/null; then
+            timeout 5 secret-tool clear service tg-assistant key "${KEY}" 2>/dev/null || true
             log_success "Removed keychain entry: ${KEY}"
         fi
     done

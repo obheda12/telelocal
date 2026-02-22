@@ -249,7 +249,10 @@ class TestHandleMessage:
         )
 
         mock_llm.query.assert_called_once()
-        update.message.reply_text.assert_called_once_with("Alice said hello.")
+        from telegram.constants import ParseMode
+        update.message.reply_text.assert_called_once_with(
+            "Alice said hello.", parse_mode=ParseMode.HTML
+        )
         mock_audit.log.assert_called_once()
 
     @pytest.mark.asyncio

@@ -13,6 +13,7 @@ from functools import wraps
 from typing import Any, Callable, Coroutine, List
 
 from telegram import Update
+from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
 from querybot.llm import ClaudeAssistant
@@ -260,7 +261,14 @@ async def handle_message(
 
     # 6. Reply (split if > 4096 chars — Telegram message limit)
     for chunk in _split_message(answer):
-        await update.message.reply_text(chunk)
+        try:
+            await update.message.reply_text(
+                chunk, parse_mode=ParseMode.HTML
+            )
+        except Exception:
+            # Claude may produce malformed HTML tags; fall back to plain text
+            logger.debug("HTML parse failed for chunk, retrying as plain text")
+            await update.message.reply_text(chunk)
 
     # 7. Audit (metadata only — never log message content)
     await audit.log(
