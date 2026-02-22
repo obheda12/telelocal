@@ -347,7 +347,9 @@ tg-assistant/
 │   └── TELETHON_HARDENING.md      # Telethon-specific security guide
 ├── scripts/
 │   ├── setup.sh                   # Single-command deployment
-│   └── monitor-network.sh         # Traffic verification
+│   ├── monitor-network.sh         # Traffic verification
+│   ├── benchmark-pipeline.sh      # Ingestion + query latency benchmark
+│   └── benchmark_pipeline.py      # Benchmark implementation
 ├── systemd/
 │   ├── tg-syncer.service          # Syncer service (hardened)
 │   └── tg-querybot.service        # Query bot service (hardened)

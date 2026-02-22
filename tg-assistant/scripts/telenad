@@ -10,6 +10,7 @@
 #   telenad wipe           Destroy all credentials and state
 #   telenad status         Check service health
 #   telenad sync-status    Show sync progress (messages per chat, last activity)
+#   telenad benchmark      Measure ingestion + query latency
 #   telenad manage-chats   Interactively include/exclude chats from sync
 #   telenad logs [service] Tail service logs (syncer|querybot|both)
 #   telenad restart        Restart both services
@@ -37,6 +38,7 @@ usage() {
     echo "Operations:"
     echo "  status         Show service health and key info"
     echo "  sync-status    Show sync progress (messages per chat, last activity)"
+    echo "  benchmark      Measure ingestion + query latency"
     echo "  manage-chats   Interactively include/exclude chats from sync"
     echo "  logs           Tail both service logs (Ctrl+C to stop)"
     echo "  logs syncer    Tail syncer logs only"
@@ -71,6 +73,10 @@ cmd_wipe() {
 
 cmd_sync_status() {
     exec "${SCRIPT_DIR}/sync-status.sh"
+}
+
+cmd_benchmark() {
+    exec "${SCRIPT_DIR}/benchmark-pipeline.sh" "$@"
 }
 
 cmd_manage_chats() {
@@ -184,6 +190,7 @@ case "${COMMAND}" in
     wipe)       cmd_wipe ;;
     status)      cmd_status ;;
     sync-status)  cmd_sync_status ;;
+    benchmark)    cmd_benchmark "${@:2}" ;;
     manage-chats) cmd_manage_chats ;;
     logs)         cmd_logs "${2:-both}" ;;
     restart)    cmd_restart ;;
