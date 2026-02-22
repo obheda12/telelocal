@@ -67,6 +67,8 @@ Environment=PYTHONDONTWRITEBYTECODE=1
 # Credential names MUST match the key_name passed to get_secret() in Python.
 # DB auth uses Unix socket peer authentication — no password credential needed.
 LoadCredentialEncrypted=session_encryption_key:/etc/credstore.encrypted/session_encryption_key
+LoadCredentialEncrypted=tg-assistant-api-id:/etc/credstore.encrypted/tg-assistant-api-id
+LoadCredentialEncrypted=tg-assistant-api-hash:/etc/credstore.encrypted/tg-assistant-api-hash
 
 # -----------------------------------------------------------------------------
 # Restart policy

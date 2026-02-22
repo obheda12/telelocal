@@ -241,6 +241,8 @@ phase_collect_credentials() {
 
     _encrypt_credential "tg-assistant-bot-token" "${COLLECT_BOT_TOKEN}"
     _encrypt_credential "tg-assistant-claude-api-key" "${COLLECT_ANTHROPIC_KEY}"
+    _encrypt_credential "tg-assistant-api-id" "${COLLECT_API_ID}"
+    _encrypt_credential "tg-assistant-api-hash" "${COLLECT_API_HASH}"
 
     log_success "Credential collection complete"
 }
@@ -270,21 +272,7 @@ phase_configure() {
         log_info "owner_telegram_id already configured"
     fi
 
-    # Inject API ID
-    if grep -q "YOUR_API_ID" "${CONFIG_FILE}" 2>/dev/null; then
-        sed -i "s|YOUR_API_ID|${COLLECT_API_ID}|g" "${CONFIG_FILE}"
-        log_success "API ID set in config"
-    else
-        log_info "API ID already configured"
-    fi
-
-    # Inject API hash
-    if grep -q "YOUR_API_HASH" "${CONFIG_FILE}" 2>/dev/null; then
-        sed -i "s|YOUR_API_HASH|${COLLECT_API_HASH}|g" "${CONFIG_FILE}"
-        log_success "API hash set in config"
-    else
-        log_info "API hash already configured"
-    fi
+    # NOTE: API ID/hash are stored in systemd credstore; config is left as placeholders.
 
     log_success "Configuration updated"
 }

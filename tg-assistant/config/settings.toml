@@ -40,11 +40,10 @@ pool_size = 5
 db_user = "tg_syncer"
 
 # Telegram API credentials -- obtain from https://my.telegram.org/apps
-# SECURITY: These are placeholders. The real values are stored in the system
-# keychain and injected via environment variables at runtime by systemd.
-# They appear here only for schema documentation and local development.
-api_id = "YOUR_API_ID"       # Integer, but stored as string for TOML compat
-api_hash = "YOUR_API_HASH"   # 32-character hex string
+# SECURITY: Stored in systemd credstore and injected via LoadCredentialEncrypted.
+# Placeholders remain here for schema documentation only.
+api_id = "YOUR_API_ID"       # Integer, stored in credstore as tg-assistant-api-id
+api_hash = "YOUR_API_HASH"   # 32-character hex, stored in credstore as tg-assistant-api-hash
 
 # Path to the encrypted Telethon .session file.
 # CRITICAL: A stolen session file grants FULL account access (read, write,

@@ -114,10 +114,14 @@ async def init_database(pool: asyncpg.Pool) -> None:
                     timestamp          TIMESTAMPTZ NOT NULL,
                     text               TEXT,
                     raw_json           JSONB,
-                    embedding          vector(1024),
+                    embedding          vector(384),
                     text_search_vector TSVECTOR
                         GENERATED ALWAYS AS (
                             to_tsvector('english', COALESCE(text, ''))
+                        ) STORED,
+                    text_search_vector_simple TSVECTOR
+                        GENERATED ALWAYS AS (
+                            to_tsvector('simple', COALESCE(text, ''))
                         ) STORED,
                     PRIMARY KEY (message_id, chat_id)
                 );
@@ -148,11 +152,14 @@ async def init_database(pool: asyncpg.Pool) -> None:
                 CREATE INDEX IF NOT EXISTS idx_messages_fts
                 ON messages USING GIN (text_search_vector);
             """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_messages_fts_simple
+                ON messages USING GIN (text_search_vector_simple);
+            """)
 
             await conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_messages_embedding
-                ON messages USING ivfflat (embedding vector_cosine_ops)
-                WITH (lists = 100);
+                ON messages USING hnsw (embedding vector_cosine_ops);
             """)
             # Indexes for filtered search (chat + time, time-only)
             # Note: idx_messages_chat_timestamp covers chat_id-only queries too

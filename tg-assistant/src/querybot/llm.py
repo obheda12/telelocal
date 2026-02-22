@@ -92,9 +92,11 @@ class ClaudeAssistant:
         # Rate limiting state
         self._call_timestamps: List[float] = []
 
-        # Cost tracking
-        self._total_input_tokens: int = 0
-        self._total_output_tokens: int = 0
+        # Cost tracking (separate intent vs synthesis)
+        self._intent_input_tokens: int = 0
+        self._intent_output_tokens: int = 0
+        self._synthesis_input_tokens: int = 0
+        self._synthesis_output_tokens: int = 0
 
     # ------------------------------------------------------------------
     # System prompt
@@ -167,8 +169,8 @@ class ClaudeAssistant:
                 raise ValueError("Empty response from intent extraction")
 
             raw_text = response.content[0].text.strip()
-            self._total_input_tokens += response.usage.input_tokens
-            self._total_output_tokens += response.usage.output_tokens
+            self._intent_input_tokens += response.usage.input_tokens
+            self._intent_output_tokens += response.usage.output_tokens
 
             # Strip markdown code fences if Claude wraps the JSON
             if raw_text.startswith("```"):
@@ -313,8 +315,8 @@ class ClaudeAssistant:
         )
 
         # Track tokens
-        self._total_input_tokens += response.usage.input_tokens
-        self._total_output_tokens += response.usage.output_tokens
+        self._synthesis_input_tokens += response.usage.input_tokens
+        self._synthesis_output_tokens += response.usage.output_tokens
 
         return response.content[0].text
 
@@ -324,10 +326,14 @@ class ClaudeAssistant:
 
     def get_usage_stats(self) -> Dict[str, Any]:
         """Return cumulative token usage and estimated cost."""
-        input_cost = (self._total_input_tokens / 1_000_000) * _SONNET_INPUT_COST_PER_M
-        output_cost = (self._total_output_tokens / 1_000_000) * _SONNET_OUTPUT_COST_PER_M
+        input_cost = (self._synthesis_input_tokens / 1_000_000) * _SONNET_INPUT_COST_PER_M
+        output_cost = (self._synthesis_output_tokens / 1_000_000) * _SONNET_OUTPUT_COST_PER_M
         return {
-            "input_tokens": self._total_input_tokens,
-            "output_tokens": self._total_output_tokens,
+            "intent_input_tokens": self._intent_input_tokens,
+            "intent_output_tokens": self._intent_output_tokens,
+            "synthesis_input_tokens": self._synthesis_input_tokens,
+            "synthesis_output_tokens": self._synthesis_output_tokens,
+            "input_tokens": self._intent_input_tokens + self._synthesis_input_tokens,
+            "output_tokens": self._intent_output_tokens + self._synthesis_output_tokens,
             "estimated_cost_usd": round(input_cost + output_cost, 4),
         }

@@ -53,91 +53,44 @@ Startup:  keychain → Fernet key → decrypt session → in-memory only → Tel
 Shutdown: disconnect → dereference in-memory session → nothing written to disk
 ```
 
-Implementation: `src/syncer/session_security.py`. Key functions:
+Implementation: `src/shared/secrets.py` for encryption helpers and
+`src/syncer/main.py` for runtime decryption to tmpfs. Key functions:
 
 | Function | Purpose |
 |----------|---------|
-| `get_fernet_key()` | Reads from system keychain; raises `RuntimeError` if missing (no fallback) |
-| `verify_file_permissions()` | Enforces `0600` owned by `tg-syncer` |
-| `verify_session_integrity()` | SHA-256 hash check against stored baseline (detects tampering) |
-| `decrypt_session()` | Returns `StringSession` string; never writes plaintext to disk |
-| `encrypt_and_store_session()` | Used during setup and rotation |
+| `get_secret()` | Reads from systemd credentials or keychain |
+| `decrypt_session_file()` | Decrypts the encrypted session bytes in memory |
+| `encrypt_session_file()` | Encrypts a plaintext session file in place |
 
 **Why Fernet**: Misuse-resistant authenticated encryption from Python's `cryptography` library. 128-bit keys are sufficient — the threat is offline file theft, not state-level cryptanalysis.
 
 ### File Permissions
 
 ```
-/home/tg-syncer/
-└── .telethon/                 # drwx------ (0700) tg-syncer:tg-syncer
-    ├── session.encrypted      # -rw------- (0600) tg-syncer:tg-syncer
-    └── session.sha256         # -rw------- (0600) tg-syncer:tg-syncer
+/var/lib/tg-syncer/
+└── tg_syncer_session.session.enc  # -rw------- (0600) tg-syncer:tg-syncer
 ```
 
 The encryption key lives in the system keychain — never on disk or in env vars. Environment variables are visible via `/proc/<pid>/environ`, logged by crash reporters, and inherited by child processes.
 
 ### Session Rotation
 
-Rotate every 90 days or after any suspected compromise. Full script: `scripts/rotate-session.sh`.
+Rotate every 90 days or after any suspected compromise. Use the built-in
+session setup script to recreate and encrypt the session safely.
 
 1. `sudo systemctl stop tg-syncer`
 2. Back up current encrypted session:
    ```bash
-   sudo cp /home/tg-syncer/.telethon/session.encrypted \
-            /home/tg-syncer/.telethon/session.encrypted.bak.$(date +%Y%m%d)
+   sudo cp /var/lib/tg-syncer/tg_syncer_session.session.enc \
+            /var/lib/tg-syncer/tg_syncer_session.session.enc.bak.$(date +%Y%m%d)
    ```
 3. Terminate old session in Telegram (Settings > Devices)
-4. Create new session interactively:
+4. Recreate the session:
    ```bash
-   sudo -u tg-syncer python3 -c "
-   from telethon import TelegramClient
-   from telethon.sessions import StringSession
-   import asyncio
-
-   async def create():
-       client = TelegramClient(
-           StringSession(),
-           api_id=<YOUR_API_ID>,
-           api_hash='<YOUR_API_HASH>',
-           device_model='TG-Syncer',
-           system_version='RPi',
-           app_version='1.0',
-       )
-       await client.start()
-       print('SESSION_STRING:', client.session.save())
-       await client.disconnect()
-
-   asyncio.run(create())
-   "
+   sudo ./scripts/setup-telethon-session.sh
    ```
-5. Encrypt and store the new session:
-   ```bash
-   sudo -u tg-syncer python3 -c "
-   from syncer.session_security import encrypt_and_store_session
-   encrypt_and_store_session('<PASTE_SESSION_STRING_HERE>')
-   "
-   ```
-6. Verify new session works:
-   ```bash
-   sudo -u tg-syncer python3 -c "
-   from syncer.session_security import decrypt_session
-   from telethon import TelegramClient
-   from telethon.sessions import StringSession
-   import asyncio
-
-   async def verify():
-       session_str = decrypt_session()
-       client = TelegramClient(StringSession(session_str), <API_ID>, '<API_HASH>')
-       await client.connect()
-       me = await client.get_me()
-       print(f'Authenticated as: {me.first_name} (ID: {me.id})')
-       await client.disconnect()
-
-   asyncio.run(verify())
-   "
-   ```
-7. `sudo systemctl start tg-syncer`
-8. Confirm old session no longer appears in Telegram Devices
+5. `sudo systemctl start tg-syncer`
+6. Confirm old session no longer appears in Telegram Devices
 
 ---
 
@@ -186,7 +139,7 @@ The wrapper can be bypassed via `client._client` (direct attribute access). Dete
 
 Telegram monitors for bot-like behavior and can temporarily rate-limit (`FloodWaitError`), permanently restrict, or ban accounts. Since we use a personal account, access patterns must look human-like.
 
-Implementation: `src/syncer/rate_limiter.py` (`TelethonRateLimiter` class).
+Implementation: `src/syncer/main.py` (`rate_limit_delay` helper).
 
 | Parameter | Value | Purpose |
 |-----------|-------|---------|
@@ -324,7 +277,7 @@ Alerts go to `/var/log/tg-assistant/security-alerts.log` and systemd journal (CR
 2. `sudo systemctl stop tg-syncer`
 3. Enable 2FA if not set
 4. Preserve evidence: `sudo cp -a /var/log/tg-assistant/ /root/incident-$(date +%Y%m%d)/`
-5. Rotate session via `scripts/rotate-session.sh`
+5. Rotate session via `scripts/setup-telethon-session.sh`
 6. Review audit logs: `jq 'select(.status == "blocked")' telethon-audit.jsonl`
 
 ### Active Account Compromise
@@ -350,9 +303,7 @@ Not a security incident, but can lead to account restriction.
 sudo systemctl stop tg-syncer tg-querybot                        # Stop everything
 tail -50 /var/log/tg-assistant/security-alerts.log                # Recent alerts
 tail -100 /var/log/tg-assistant/telethon-audit.jsonl | jq .       # Recent audit
-sha256sum /home/tg-syncer/.telethon/session.encrypted             # Verify integrity
-cat /home/tg-syncer/.telethon/session.sha256                      # Compare hashes
-stat -c '%a %U:%G %n' /home/tg-syncer/.telethon/session.encrypted # Check permissions
+stat -c '%a %U:%G %n' /var/lib/tg-syncer/tg_syncer_session.session.enc # Check permissions
 ```
 
 ---

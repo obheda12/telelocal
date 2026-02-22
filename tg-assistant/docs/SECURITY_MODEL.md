@@ -122,7 +122,8 @@ flowchart TB
 
 | Asset | Classification | Location | Compromise Impact |
 |-------|---------------|----------|-------------------|
-| **Telethon session file** | CRITICAL | `/home/tg-syncer/.telethon/session.encrypted` | Full Telegram account takeover: read, write, delete messages; change settings; impersonate user |
+| **Telethon session file** | CRITICAL | `/var/lib/tg-syncer/tg_syncer_session.session.enc` | Full Telegram account takeover: read, write, delete messages; change settings; impersonate user |
+| **Telegram API ID/hash** | MEDIUM | `systemd-creds` encrypted blobs (`/etc/credstore.encrypted/`) | Enables MTProto authentication with session; not sufficient alone without session |
 | **Fernet encryption key** | CRITICAL | System keychain (libsecret) | Needed to decrypt Telethon session; theft + encrypted session file = full account access |
 | **Claude API key** | HIGH | systemd `LoadCredential` (runtime only) | Unauthorized API usage billed to operator; potential data exfiltration via API calls |
 | **Bot token** | HIGH | systemd `LoadCredential` (runtime only) | Attacker can read bot messages and impersonate the bot (but not the user account) |
@@ -782,7 +783,7 @@ flowchart TD
     A3 --> STOP1["STOPPED"]
 
     A --> A4["Via filesystem"]
-    A4 --> A5{"/home/tg-syncer<br/>readable?"}
+    A4 --> A5{"/var/lib/tg-syncer<br/>readable?"}
     A5 -->|"No (ProtectHome=true)"| STOP2["STOPPED"]
 
     A --> A6["Via process memory"]

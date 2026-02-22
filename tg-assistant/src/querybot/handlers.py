@@ -170,8 +170,9 @@ async def handle_stats(
         f"  Chats: {chat_count or 0}\n"
         f"  Last sync: {last_sync.isoformat() if last_sync else 'Never'}\n\n"
         f"LLM usage (this session):\n"
-        f"  Input tokens: {usage['input_tokens']}\n"
-        f"  Output tokens: {usage['output_tokens']}\n"
+        f"  Intent tokens: {usage['intent_input_tokens']} in / {usage['intent_output_tokens']} out\n"
+        f"  Synthesis tokens: {usage['synthesis_input_tokens']} in / {usage['synthesis_output_tokens']} out\n"
+        f"  Total tokens: {usage['input_tokens']} in / {usage['output_tokens']} out\n"
         f"  Estimated cost: ${usage['estimated_cost_usd']}"
     )
     await update.message.reply_text(stats_text)
@@ -239,6 +240,13 @@ async def handle_message(
         )
         return
 
+    # 3.5. Enforce max context size (track truncation)
+    max_ctx = context.bot_data.get("max_context_messages")
+    context_truncated = False
+    if isinstance(max_ctx, int) and max_ctx > 0 and len(results) > max_ctx:
+        results = results[:max_ctx]
+        context_truncated = True
+
     # 4. Scan search results for injection patterns (detect + log only)
     injection_warnings_count = 0
     for r in results:
@@ -266,6 +274,8 @@ async def handle_message(
             "intent_has_search_terms": intent.search_terms is not None,
             "intent_days_back": intent.days_back,
             "injection_warnings_count": injection_warnings_count,
+            "context_truncated": context_truncated,
+            "max_context_messages": max_ctx,
         },
         success=True,
     )

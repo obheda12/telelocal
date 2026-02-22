@@ -115,9 +115,29 @@ async def sync_once(
     batch_size = syncer_config.get("batch_size", 100)
     rate_seconds = syncer_config.get("rate_limit_seconds", 2)
     max_history_days = syncer_config.get("max_history_days", 365)
-    use_vectors = embedder.dimension == 1024
+    use_vectors = embedder.dimension is not None and embedder.dimension > 0
 
     total_new = 0
+
+    async def _flush_batch(
+        batch: list[Dict[str, Any]],
+        texts_for_embedding: list[str],
+    ) -> int:
+        if not batch:
+            return 0
+
+        if texts_for_embedding and use_vectors:
+            try:
+                embeddings = await embedder.batch_generate(texts_for_embedding)
+                emb_idx = 0
+                for msg_dict in batch:
+                    if msg_dict.get("text") and emb_idx < len(embeddings):
+                        msg_dict["embedding"] = embeddings[emb_idx]
+                        emb_idx += 1
+            except Exception:
+                logger.warning("Failed to generate embeddings for batch", exc_info=True)
+
+        return await store.store_messages_batch(batch)
 
     dialogs = await client.get_dialogs()
     for dialog in dialogs:
@@ -126,30 +146,27 @@ async def sync_once(
 
         last_id = await store.get_last_synced_id(chat_id)
 
-        # Build get_messages kwargs
-        fetch_kwargs: Dict[str, Any] = {"limit": batch_size}
+        # Iterator for messages (paginated)
+        cutoff: datetime | None = None
         if last_id:
-            # Incremental sync — only fetch newer messages
-            fetch_kwargs["min_id"] = last_id
+            iterator = client.iter_messages(dialog, min_id=last_id, reverse=True)
         else:
-            # Initial sync — fetch the most recent messages (newest first).
-            # batch_size (limit) controls how many we get.
-            # No offset_date needed: Telethon returns newest first by default.
             if max_history_days > 0:
+                cutoff = datetime.now(timezone.utc) - timedelta(days=max_history_days)
                 logger.info(
-                    "Initial sync for chat %s (%s): fetching up to %d most recent messages",
-                    chat_id, chat_title, batch_size,
+                    "Initial sync for chat %s (%s): fetching messages since %s",
+                    chat_id, chat_title, cutoff.isoformat(),
                 )
+            iterator = client.iter_messages(dialog, reverse=False)
 
-        messages = await client.get_messages(dialog, **fetch_kwargs)
+        batch: list[Dict[str, Any]] = []
+        texts_for_embedding: list[str] = []
+        new_count = 0
 
-        if not messages:
-            continue
+        async for msg in iterator:
+            if cutoff and msg.date < cutoff:
+                break
 
-        # Build message dicts
-        batch = []
-        texts_for_embedding = []
-        for msg in messages:
             text = getattr(msg, "text", None) or getattr(msg, "message", None)
             sender = getattr(msg, "sender", None)
             sender_id = getattr(sender, "id", None) if sender else None
@@ -162,6 +179,7 @@ async def sync_once(
             try:
                 raw = msg.to_dict() if hasattr(msg, "to_dict") else {}
             except Exception:
+                logger.debug("to_dict() failed for message_id=%s", msg.id, exc_info=True)
                 raw = {}
 
             msg_dict = {
@@ -178,19 +196,16 @@ async def sync_once(
             if text and use_vectors:
                 texts_for_embedding.append(text)
 
-        # Generate embeddings for texts (if provider produces 1024-dim)
-        if texts_for_embedding and use_vectors:
-            try:
-                embeddings = await embedder.batch_generate(texts_for_embedding)
-                emb_idx = 0
-                for msg_dict in batch:
-                    if msg_dict["text"] and emb_idx < len(embeddings):
-                        msg_dict["embedding"] = embeddings[emb_idx]
-                        emb_idx += 1
-            except Exception:
-                logger.warning("Failed to generate embeddings for batch", exc_info=True)
+            if len(batch) >= batch_size:
+                new_count += await _flush_batch(batch, texts_for_embedding)
+                batch = []
+                texts_for_embedding = []
+                await rate_limit_delay(rate_seconds)
 
-        new_count = await store.store_messages_batch(batch)
+        # Flush remaining
+        if batch:
+            new_count += await _flush_batch(batch, texts_for_embedding)
+
         total_new += new_count
 
         # Determine chat type
@@ -245,8 +260,8 @@ async def main() -> None:
     """Top-level async entry point for the syncer service."""
     # --- config & secrets ---
     config = load_config()
-    api_id: int = int(config["syncer"]["api_id"])
-    api_hash: str = config["syncer"]["api_hash"]
+    api_id: int = int(get_secret("tg-assistant-api-id"))
+    api_hash: str = get_secret("tg-assistant-api-hash")
 
     # Session file is encrypted at rest; decrypt to RAM-backed tmpfs only.
     # Telethon needs an SQLite file path — we write to /dev/shm (tmpfs)
@@ -270,11 +285,11 @@ async def main() -> None:
         db_config["user"] = config["syncer"].get("db_user", "tg_syncer")
         pool = await get_connection_pool(db_config)
         await init_database(pool)
-        store = MessageStore(pool)
-        audit = AuditLogger(pool)
-
         # --- embeddings ---
         embedder = create_embedding_provider(config.get("embeddings", {}))
+
+        store = MessageStore(pool, embedding_dim=embedder.dimension)
+        audit = AuditLogger(pool)
 
         # --- Telegram (read-only) ---
         raw_client = TelethonClient(session_base, api_id, api_hash)

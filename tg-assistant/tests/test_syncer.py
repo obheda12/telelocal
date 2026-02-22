@@ -3,6 +3,7 @@ Unit tests for syncer modules: sync_once, embeddings factory.
 """
 
 import sys
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -60,6 +61,10 @@ class TestLocalEmbeddings:
 
 
 class TestSyncOnce:
+    async def _iter_messages(self, messages):
+        for m in messages:
+            yield m
+
     @pytest.mark.asyncio
     async def test_sync_once_basic(self):
         """sync_once should iterate dialogs, fetch messages, and store them."""
@@ -77,8 +82,7 @@ class TestSyncOnce:
         mock_msg.id = 100
         mock_msg.text = "Hello world"
         mock_msg.message = "Hello world"
-        mock_msg.date = MagicMock()
-        mock_msg.date.isoformat.return_value = "2024-01-15T10:00:00Z"
+        mock_msg.date = datetime(2024, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
         mock_sender = MagicMock()
         mock_sender.id = 999
         mock_sender.first_name = "Alice"
@@ -87,9 +91,9 @@ class TestSyncOnce:
         mock_msg.to_dict.return_value = {"id": 100}
 
         # Mock client
-        mock_client = AsyncMock()
-        mock_client.get_dialogs.return_value = [mock_dialog]
-        mock_client.get_messages.return_value = [mock_msg]
+        mock_client = MagicMock()
+        mock_client.get_dialogs = AsyncMock(return_value=[mock_dialog])
+        mock_client.iter_messages = MagicMock(return_value=self._iter_messages([mock_msg]))
 
         # Mock store
         mock_store = AsyncMock()
@@ -103,7 +107,7 @@ class TestSyncOnce:
         # Mock audit
         mock_audit = AsyncMock()
 
-        config = {"syncer": {"batch_size": 100, "rate_limit_seconds": 0}}
+        config = {"syncer": {"batch_size": 100, "rate_limit_seconds": 0, "max_history_days": 0}}
 
         with patch("syncer.main.rate_limit_delay", new_callable=AsyncMock):
             count = await sync_once(
@@ -123,9 +127,9 @@ class TestSyncOnce:
         mock_dialog.id = 12345
         mock_dialog.title = "Empty Chat"
 
-        mock_client = AsyncMock()
-        mock_client.get_dialogs.return_value = [mock_dialog]
-        mock_client.get_messages.return_value = []
+        mock_client = MagicMock()
+        mock_client.get_dialogs = AsyncMock(return_value=[mock_dialog])
+        mock_client.iter_messages = MagicMock(return_value=self._iter_messages([]))
 
         mock_store = AsyncMock()
         mock_store.get_last_synced_id.return_value = 50

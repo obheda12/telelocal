@@ -163,14 +163,17 @@ class TestHybridSearchRRF:
 
 class TestVectorSearchDimensionCheck:
     @pytest.mark.asyncio
-    async def test_skips_vector_search_for_384_dim(self):
-        """Vector search should return empty when embedder is 384-dim."""
+    async def test_vector_search_runs_for_384_dim(self):
+        """Vector search should run when embedder has a valid dimension."""
         mock_pool = MagicMock()
         mock_embedder = MagicMock()
         mock_embedder.dimension = 384
+        mock_embedder.generate_embedding = AsyncMock(return_value=[0.0] * 384)
 
         search = MessageSearch(mock_pool, mock_embedder)
-        results = await search.vector_search("test query")
+        with patch.object(search._pool, "fetch", new_callable=AsyncMock) as mock_fetch:
+            mock_fetch.return_value = []
+            results = await search.vector_search("test query")
 
         assert results == []
-        mock_embedder.generate_embedding.assert_not_called()
+        mock_embedder.generate_embedding.assert_called_once()

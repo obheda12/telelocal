@@ -407,6 +407,12 @@ table inet tg_assistant {
     chain output {
         type filter hook output priority 0; policy accept;
 
+        # DNS is needed for initial resolution
+        meta skuid ${SYNCER_UID} udp dport 53 accept
+        meta skuid ${SYNCER_UID} tcp dport 53 accept
+        meta skuid ${QUERYBOT_UID} udp dport 53 accept
+        meta skuid ${QUERYBOT_UID} tcp dport 53 accept
+
         # tg-syncer: allow only Telegram datacenter IP ranges (MTProto)
         # Telegram DC IPs: 149.154.160.0/20, 91.108.4.0/22, 91.108.8.0/22,
         #                  91.108.12.0/22, 91.108.16.0/22, 91.108.20.0/22,
@@ -427,10 +433,6 @@ table inet tg_assistant {
         meta skuid ${QUERYBOT_UID} tcp dport 443 ip daddr 149.154.160.0/20 accept
         meta skuid ${QUERYBOT_UID} tcp dport 443 ip daddr 91.108.4.0/22 accept
         meta skuid ${QUERYBOT_UID} ip daddr != 127.0.0.0/8 log prefix "tg-querybot-blocked: " drop
-
-        # DNS is needed for initial resolution
-        meta skuid ${SYNCER_UID} udp dport 53 accept
-        meta skuid ${QUERYBOT_UID} udp dport 53 accept
     }
 }
 NFTEOF
@@ -520,20 +522,28 @@ CREATE TABLE IF NOT EXISTS messages (
     timestamp          TIMESTAMPTZ NOT NULL,
     text               TEXT,
     raw_json           JSONB,
-    embedding          vector(1024),
+    embedding          vector(384),
     text_search_vector TSVECTOR
         GENERATED ALWAYS AS (
             to_tsvector('english', COALESCE(text, ''))
+        ) STORED,
+    text_search_vector_simple TSVECTOR
+        GENERATED ALWAYS AS (
+            to_tsvector('simple', COALESCE(text, ''))
         ) STORED,
     PRIMARY KEY (message_id, chat_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_messages_fts
     ON messages USING GIN (text_search_vector);
+CREATE INDEX IF NOT EXISTS idx_messages_fts_simple
+    ON messages USING GIN (text_search_vector_simple);
 CREATE INDEX IF NOT EXISTS idx_messages_chat_timestamp
     ON messages (chat_id, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_timestamp
     ON messages (timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_messages_embedding
+    ON messages USING hnsw (embedding vector_cosine_ops);
 
 -- =========================================================================
 -- Schema: chats
@@ -560,8 +570,9 @@ CREATE TABLE IF NOT EXISTS audit_log (
 
 -- =========================================================================
 -- Permissions: syncer_role (INSERT + SELECT on messages/chats, INSERT on audit_log)
+-- NOTE: messages are immutable after sync. No UPDATE on messages.
 -- =========================================================================
-GRANT SELECT, INSERT, UPDATE ON messages TO syncer_role;
+GRANT SELECT, INSERT ON messages TO syncer_role;
 GRANT SELECT, INSERT, UPDATE ON chats TO syncer_role;
 GRANT INSERT ON audit_log TO syncer_role;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO syncer_role;

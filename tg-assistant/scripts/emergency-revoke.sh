@@ -66,8 +66,6 @@ INCIDENT_DIR="/root/tg-incident-$(date +%Y%m%d-%H%M%S)"
 
 # Keychain keys (service = tg-assistant)
 KEYCHAIN_KEYS=(
-    "api_id"
-    "api_hash"
     "bot_token"
     "anthropic_api_key"
     "telethon_session_key"
@@ -316,6 +314,16 @@ phase_clear_keychain() {
             log_info "${key} not found in keychain (already cleared or never set)"
         fi
     done
+
+    # Also shred encrypted credstore entries (systemd-creds)
+    if [[ -d /etc/credstore.encrypted ]]; then
+        for f in /etc/credstore.encrypted/*; do
+            if [[ -f "${f}" ]]; then
+                shred -u "${f}" 2>/dev/null || rm -f "${f}"
+                log_success "Shredded credstore entry: $(basename "${f}")"
+            fi
+        done
+    fi
 
     # Also clear any temp credential files
     if [[ -f "${CONFIG_DIR}/.db_credentials" ]]; then

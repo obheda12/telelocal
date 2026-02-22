@@ -145,6 +145,7 @@ def build_application(config: Dict[str, Any]) -> Application:
         )
 
         owner_id = config["querybot"]["owner_telegram_id"]
+        max_context_messages = config["querybot"].get("max_context_messages", 50)
 
         security_config = config.get("security", {})
         sanitizer = ContentSanitizer(
@@ -156,6 +157,7 @@ def build_application(config: Dict[str, Any]) -> Application:
 
         # 4. Store in bot_data for handler access
         app.bot_data["owner_id"] = owner_id
+        app.bot_data["max_context_messages"] = max_context_messages
         app.bot_data["search"] = search
         app.bot_data["llm"] = llm
         app.bot_data["audit"] = audit
@@ -163,8 +165,13 @@ def build_application(config: Dict[str, Any]) -> Application:
         app.bot_data["sanitizer"] = sanitizer
         app.bot_data["input_validator"] = input_validator
 
+    async def _post_shutdown(app: Application) -> None:
+        pool = app.bot_data.get("pool")
+        if pool:
+            await pool.close()
+
     # 2. Create Application with post_init for async setup
-    app = Application.builder().token(bot_token).post_init(_post_init).build()
+    app = Application.builder().token(bot_token).post_init(_post_init).post_shutdown(_post_shutdown).build()
 
     # 5. Register handlers with owner filter
     owner_id = config["querybot"]["owner_telegram_id"]

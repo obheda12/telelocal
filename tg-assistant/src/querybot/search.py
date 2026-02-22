@@ -115,7 +115,11 @@ class MessageSearch:
             params.append(search_terms)
             fts_idx = len(params)
             conditions.append(
-                f"m.text_search_vector @@ plainto_tsquery('english', ${fts_idx})"
+                "("
+                f"m.text_search_vector @@ plainto_tsquery('english', ${fts_idx}) "
+                "OR "
+                f"m.text_search_vector_simple @@ plainto_tsquery('simple', ${fts_idx})"
+                ")"
             )
 
         if chat_ids:
@@ -138,8 +142,10 @@ class MessageSearch:
         # FTS results ranked by relevance; browse results by recency
         if has_fts:
             score_expr = (
-                f"ts_rank(m.text_search_vector, "
-                f"plainto_tsquery('english', ${fts_idx}))"
+                "GREATEST("
+                f"ts_rank(m.text_search_vector, plainto_tsquery('english', ${fts_idx})), "
+                f"ts_rank(m.text_search_vector_simple, plainto_tsquery('simple', ${fts_idx}))"
+                ")"
             )
             order_expr = "score DESC"
         else:
@@ -181,11 +187,16 @@ class MessageSearch:
             """
             SELECT m.message_id, m.chat_id, c.title, m.sender_name,
                    m.timestamp, m.text,
-                   ts_rank(m.text_search_vector, query) AS score
+                   GREATEST(
+                       ts_rank(m.text_search_vector, query),
+                       ts_rank(m.text_search_vector_simple, query_simple)
+                   ) AS score
             FROM messages m
             JOIN chats c ON c.chat_id = m.chat_id,
-                 plainto_tsquery('english', $1) query
+                 plainto_tsquery('english', $1) query,
+                 plainto_tsquery('simple', $1) query_simple
             WHERE m.text_search_vector @@ query
+               OR m.text_search_vector_simple @@ query_simple
             ORDER BY score DESC
             LIMIT $2
             """,
@@ -204,8 +215,7 @@ class MessageSearch:
         limit: int = 20,
     ) -> List[SearchResult]:
         """Search messages using pgvector cosine similarity."""
-        # Skip vector search if embedder doesn't produce 1024-dim vectors
-        if self._embedder.dimension != 1024:
+        if not self._embedder.dimension:
             return []
 
         query_embedding = await self._embedder.generate_embedding(query)

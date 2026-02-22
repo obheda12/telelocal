@@ -35,7 +35,7 @@ The setup script handles everything in order:
 
 1. **Pre-flight** -- platform, sudo, internet checks
 2. **System setup** -- apt packages, Python 3.11+, PostgreSQL + pgvector, system users, venv, systemd services, nftables
-3. **Credentials** -- prompts for all keys/tokens, stores them in the system keychain
+3. **Credentials** -- prompts for all keys/tokens, stores them in the encrypted credstore (systemd-creds)
 4. **Configuration** -- injects your values into `settings.toml`
 5. **Telethon session** -- interactive login (phone, code, 2FA), encrypts and stores the session
 6. **Security verification** -- checks permissions, firewall, DB roles, encryption
@@ -74,7 +74,7 @@ journalctl -u tg-querybot -f
 | Configuration | `/etc/tg-assistant/settings.toml` |
 | System prompt | `/etc/tg-assistant/system_prompt.md` |
 | Audit logs | `/var/log/tg-assistant/audit.log` |
-| Telethon session | `/home/tg-syncer/.telethon/` (encrypted, `0700`) |
+| Telethon session | `/var/lib/tg-syncer/` (encrypted, `0700`) |
 | Syncer service | `/etc/systemd/system/tg-syncer.service` |
 | Query bot service | `/etc/systemd/system/tg-querybot.service` |
 | Firewall rules | `/etc/nftables.d/tg-assistant-firewall.conf` |
@@ -137,7 +137,7 @@ curl -s "https://api.telegram.org/bot<YOUR_TOKEN>/getMe" | python3 -m json.tool
 ### Telethon session errors
 
 ```bash
-ls -la /home/tg-syncer/.telethon/
+ls -la /var/lib/tg-syncer/
 
 # Session expired or invalidated -- recreate it
 sudo systemctl stop tg-syncer
@@ -173,7 +173,7 @@ grep -i "injection\|blocked\|denied" /var/log/tg-assistant/audit.log
 stat -c '%a %U:%G %n' /etc/tg-assistant/settings.toml
 
 # Verify session file permissions (should be 0700 directory, 0600 files)
-sudo ls -la /home/tg-syncer/.telethon/
+sudo ls -la /var/lib/tg-syncer/
 
 # Check active Telethon sessions on your account
 # Open Telegram > Settings > Devices
@@ -196,4 +196,13 @@ sudo systemctl restart tg-syncer tg-querybot
 
 # Re-verify security after updates
 sudo ./tests/security-verification.sh
+```
+
+### Optional: backfill embeddings
+
+If you upgraded from an older install or changed embedding settings, you may
+need to backfill missing embeddings:
+
+```bash
+TG_ASSISTANT_DB_USER=postgres /opt/tg-assistant/venv/bin/python3 /opt/tg-assistant/scripts/backfill-embeddings.py
 ```

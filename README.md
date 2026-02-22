@@ -58,6 +58,8 @@ sequenceDiagram
 
 The syncer uses a **read-only wrapper** around Telethon — only 15 explicitly allowed read methods work. All write methods (`send_message`, `delete_messages`, etc.) raise `PermissionError`.
 
+The syncer paginates message history to avoid gaps: on the first sync of a chat it walks back through history (bounded by `max_history_days` if set), and on subsequent syncs it fetches **all** messages newer than the last stored ID — even if more than one batch arrives between cycles.
+
 ### Your Query Flow
 
 ```mermaid
@@ -368,19 +370,23 @@ Test-to-source ratio: 0.63:1 (134 tests). No external dependencies beyond stdlib
 ```sql
 -- Messages: synced from all Telegram chats
 CREATE TABLE messages (
-    id              BIGSERIAL PRIMARY KEY,
-    telegram_msg_id BIGINT NOT NULL,
-    chat_id         BIGINT NOT NULL,
-    chat_title      VARCHAR(255),
-    sender_id       BIGINT,
-    sender_name     VARCHAR(255),
-    content         TEXT NOT NULL,
-    message_type    VARCHAR(50) DEFAULT 'text',
-    reply_to_msg_id BIGINT,
-    timestamp       TIMESTAMPTZ NOT NULL,
-    synced_at       TIMESTAMPTZ DEFAULT NOW(),
-    embedding       vector(384),
-    UNIQUE(telegram_msg_id, chat_id)
+    message_id         BIGINT NOT NULL,
+    chat_id            BIGINT NOT NULL,
+    sender_id          BIGINT,
+    sender_name        TEXT,
+    timestamp          TIMESTAMPTZ NOT NULL,
+    text               TEXT,
+    raw_json           JSONB,
+    embedding          vector(384),
+    text_search_vector TSVECTOR
+        GENERATED ALWAYS AS (
+            to_tsvector('english', COALESCE(text, ''))
+        ) STORED,
+    text_search_vector_simple TSVECTOR
+        GENERATED ALWAYS AS (
+            to_tsvector('simple', COALESCE(text, ''))
+        ) STORED,
+    PRIMARY KEY (message_id, chat_id)
 );
 
 -- Role separation: syncer can write, querybot can only read
@@ -389,6 +395,15 @@ GRANT INSERT, SELECT ON messages, chats TO syncer_role;
 
 CREATE ROLE querybot_role;
 GRANT SELECT ON messages, chats TO querybot_role;
+```
+
+### Embedding Backfill (after upgrades)
+
+If you upgrade from an older install or change embedding settings, you may need
+to backfill missing embeddings for existing rows. Run:
+
+```bash
+TG_ASSISTANT_DB_USER=postgres /opt/tg-assistant/venv/bin/python3 /opt/tg-assistant/scripts/backfill-embeddings.py
 ```
 
 ---
@@ -447,7 +462,7 @@ sudo ./tg-assistant/scripts/monitor-network.sh 30
 systemctl status tg-syncer tg-querybot
 
 # 4. Verify Telethon session hasn't been exported
-ls -la /home/tg-syncer/.telethon/  # Should only have encrypted .session
+ls -la /var/lib/tg-syncer/  # Should only have encrypted .session.enc
 
 # 5. Check disk space
 df -h /var/log/tg-assistant

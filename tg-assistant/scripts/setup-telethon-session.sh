@@ -123,6 +123,27 @@ fi
 echo ""
 
 # ---------------------------------------------------------------------------
+# Store API credentials in systemd credstore (encrypted at rest)
+# ---------------------------------------------------------------------------
+if ! command -v systemd-creds &>/dev/null; then
+    log_error "systemd-creds not found. Requires systemd 250+."
+    log_error "Check: systemctl --version"
+    exit 1
+fi
+
+mkdir -p /etc/credstore.encrypted
+chmod 700 /etc/credstore.encrypted
+chown root:root /etc/credstore.encrypted
+
+printf '%s' "${API_ID}" | systemd-creds encrypt --name="tg-assistant-api-id" - "/etc/credstore.encrypted/tg-assistant-api-id"
+chmod 600 "/etc/credstore.encrypted/tg-assistant-api-id"
+chown root:root "/etc/credstore.encrypted/tg-assistant-api-id"
+
+printf '%s' "${API_HASH}" | systemd-creds encrypt --name="tg-assistant-api-hash" - "/etc/credstore.encrypted/tg-assistant-api-hash"
+chmod 600 "/etc/credstore.encrypted/tg-assistant-api-hash"
+chown root:root "/etc/credstore.encrypted/tg-assistant-api-hash"
+
+# ---------------------------------------------------------------------------
 # Create the session via Python
 # ---------------------------------------------------------------------------
 echo -e "${BOLD}Step 2: Creating Telethon session${NC}"

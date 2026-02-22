@@ -42,6 +42,12 @@ _UPSERT_CHAT_SQL = """
                   updated_at = NOW()
 """
 
+_UPDATE_EMBEDDING_SQL = """
+    UPDATE messages
+    SET embedding = $1
+    WHERE message_id = $2 AND chat_id = $3
+"""
+
 
 class MessageStore:
     """Manages message persistence in PostgreSQL.
@@ -51,8 +57,9 @@ class MessageStore:
               :func:`shared.db.get_connection_pool`).
     """
 
-    def __init__(self, pool: asyncpg.Pool) -> None:
+    def __init__(self, pool: asyncpg.Pool, embedding_dim: Optional[int] = None) -> None:
         self._pool = pool
+        self._embedding_dim = embedding_dim
 
     # ------------------------------------------------------------------
     # Write operations (syncer_role needs INSERT on messages table)
@@ -61,9 +68,15 @@ class MessageStore:
     def _msg_params(self, msg: Dict[str, Any]) -> tuple:
         """Extract ordered parameters from a message dict."""
         embedding = msg.get("embedding")
-        # Store NULL for embeddings that don't match the 1024-dim column
-        if embedding is not None and len(embedding) != 1024:
-            embedding = None
+        # Store NULL for embeddings that don't match the configured dimension
+        if embedding is not None and self._embedding_dim:
+            if len(embedding) != self._embedding_dim:
+                logger.warning(
+                    "Embedding dimension mismatch: got=%d expected=%d; storing NULL",
+                    len(embedding),
+                    self._embedding_dim,
+                )
+                embedding = None
         raw_json = msg.get("raw_json")
         if raw_json is not None and not isinstance(raw_json, str):
             raw_json = json.dumps(raw_json)
@@ -100,14 +113,25 @@ class MessageStore:
         if not messages:
             return 0
 
-        inserted = 0
         async with self._pool.acquire() as conn:
-            for msg in messages:
-                params = self._msg_params(msg)
-                row = await conn.fetchrow(_INSERT_RETURNING_SQL, *params)
-                if row is not None:
-                    inserted += 1
+            params: List[Any] = []
+            values_sql: List[str] = []
+            for idx, msg in enumerate(messages):
+                row_params = self._msg_params(msg)
+                params.extend(row_params)
+                base = idx * len(row_params)
+                placeholders = ", ".join(f"${base + i}" for i in range(1, len(row_params) + 1))
+                values_sql.append(f"({placeholders})")
 
+            sql = (
+                "INSERT INTO messages (message_id, chat_id, sender_id, sender_name, "
+                "timestamp, text, raw_json, embedding) VALUES "
+                + ", ".join(values_sql)
+                + " ON CONFLICT (message_id, chat_id) DO NOTHING RETURNING 1"
+            )
+            rows = await conn.fetch(sql, *params)
+
+        inserted = len(rows)
         logger.debug("Batch insert: %d/%d new rows", inserted, len(messages))
         return inserted
 
@@ -146,6 +170,19 @@ class MessageStore:
             chat_type,
             participant_count,
         )
+
+    async def update_message_embedding(
+        self,
+        message_id: int,
+        chat_id: int,
+        embedding: List[float],
+    ) -> None:
+        """Update embedding for a message (used by backfill scripts)."""
+        if self._embedding_dim and len(embedding) != self._embedding_dim:
+            raise ValueError(
+                f"Embedding dimension mismatch: got={len(embedding)} expected={self._embedding_dim}"
+            )
+        await self._pool.execute(_UPDATE_EMBEDDING_SQL, embedding, message_id, chat_id)
 
     async def get_sync_stats(self) -> Dict[str, Any]:
         """Return summary statistics for monitoring."""

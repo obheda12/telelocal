@@ -60,12 +60,12 @@ test_config_permissions() {
         return
     fi
 
-    # Check permissions (should be 600)
+    # Check permissions (should be 644; no secrets in file)
     PERMS=$(stat -c %a "${CONFIG_FILE}")
-    if [[ "${PERMS}" == "600" ]]; then
-        log_pass "settings.toml has correct permissions (600)"
+    if [[ "${PERMS}" == "644" ]]; then
+        log_pass "settings.toml has correct permissions (644)"
     else
-        log_fail "settings.toml has permissions ${PERMS} (expected 600)"
+        log_fail "settings.toml has permissions ${PERMS} (expected 644)"
     fi
 
     # Check ownership (should be root:root)
@@ -209,12 +209,16 @@ test_nftables() {
         log_info "Enable with: sudo systemctl enable --now nftables"
     fi
 
-    # Check for tg_assistant table
-    if nft list tables 2>/dev/null | grep -q "tg_assistant"; then
-        log_pass "nftables table 'tg_assistant' exists"
+    # Check for tg_assistant table (either name is acceptable)
+    if nft list tables 2>/dev/null | grep -Eq "tg_assistant(_isolation)?"; then
+        log_pass "nftables table exists (tg_assistant or tg_assistant_isolation)"
 
         # Check for per-user rules
-        RULES=$(nft list table inet tg_assistant 2>/dev/null || echo "")
+        if nft list table inet tg_assistant 2>/dev/null; then
+            RULES=$(nft list table inet tg_assistant 2>/dev/null || echo "")
+        else
+            RULES=$(nft list table inet tg_assistant_isolation 2>/dev/null || echo "")
+        fi
 
         SYNCER_UID=$(id -u "${SYNCER_USER}" 2>/dev/null || echo "NONE")
         QUERYBOT_UID=$(id -u "${QUERYBOT_USER}" 2>/dev/null || echo "NONE")
@@ -413,10 +417,10 @@ test_audit_logging() {
 
     # Check config file for audit settings
     if [[ -f "${CONFIG_FILE}" ]]; then
-        if grep -q 'log_all_queries.*=.*true' "${CONFIG_FILE}" 2>/dev/null; then
-            log_pass "Query logging is enabled in config"
+        if grep -q 'enable_audit_log.*=.*true' "${CONFIG_FILE}" 2>/dev/null; then
+            log_pass "Audit logging is enabled in config"
         else
-            log_warn "Query logging may not be enabled in config"
+            log_warn "Audit logging may not be enabled in config"
         fi
     fi
 }
@@ -498,6 +502,14 @@ test_no_plaintext_credentials() {
         log_pass "No plaintext credentials detected in ${CONFIG_FILE}"
     fi
 
+    # Verify API ID/hash are placeholders (stored in encrypted credstore instead)
+    if grep -q 'api_id = "YOUR_API_ID"' "${CONFIG_FILE}" 2>/dev/null && \
+       grep -q 'api_hash = "YOUR_API_HASH"' "${CONFIG_FILE}" 2>/dev/null; then
+        log_pass "API ID/hash are placeholders (stored in credstore)"
+    else
+        log_warn "API ID/hash appear set in config; should be placeholders"
+    fi
+
     # Check for .env files with credentials
     for DIR in "${CONFIG_DIR}" "${SYNCER_HOME}" "${QUERYBOT_HOME}" "/opt/tg-assistant"; do
         if [[ -f "${DIR}/.env" ]]; then
@@ -520,6 +532,19 @@ test_no_plaintext_credentials() {
             fi
         fi
     done
+
+    # Check encrypted credstore entries exist
+    if [[ -d /etc/credstore.encrypted ]]; then
+        for CRED in tg-assistant-bot-token tg-assistant-claude-api-key tg-assistant-api-id tg-assistant-api-hash session_encryption_key; do
+            if [[ -f "/etc/credstore.encrypted/${CRED}" ]]; then
+                log_pass "Credstore entry present: ${CRED}"
+            else
+                log_warn "Credstore entry missing: ${CRED}"
+            fi
+        done
+    else
+        log_warn "Credstore directory not found: /etc/credstore.encrypted"
+    fi
 
     # Check environment of running processes
     for SVC_USER in "${SYNCER_USER}" "${QUERYBOT_USER}"; do
