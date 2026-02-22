@@ -65,6 +65,7 @@ Performance defaults:
 - `store_raw_json = false` by default to reduce ingest CPU and database bloat.
 - Active dialogs are synced in most-recent-first order so fresh chats become queryable first.
 - Last-synced message IDs are prefetched in one DB query per pass (instead of one query per chat).
+- Intent extraction caps chat-list context (`max_intent_chats = 200` by default) to reduce Haiku latency on large accounts.
 
 ### Your Query Flow
 
@@ -92,7 +93,7 @@ sequenceDiagram
     Bot->>DB: Fetch chat list (cached)
     Bot->>Haiku: Question + chat list → extract intent
     Haiku-->>Bot: {chat_ids, sender, time_range, keywords}
-    Bot->>DB: Filtered FTS (scoped to matched chats)
+    Bot->>DB: Single-query hybrid search (FTS + vector RRF, scoped filters)
     DB-->>Bot: Top-K relevant messages
     Bot->>Sonnet: Top-K context + your question
     Sonnet-->>Bot: Analysis / summary
@@ -120,17 +121,17 @@ flowchart LR
     F --> |"days_back"| FS
     F --> |"search_terms"| FS
 
-    FS["**Filtered FTS**<br/>(PostgreSQL)"] --> R["Scoped results<br/>grouped by chat"]
+    FS["**Filtered Hybrid Search**<br/>(PostgreSQL FTS + pgvector RRF)"] --> R["Scoped results<br/>grouped by chat"]
     R --> S["**Synthesis**<br/>(Sonnet)"]
     S --> A["Your answer"]
 ```
 
 | You ask | Intent extracted | What gets searched |
 |---------|----------------|--------------------|
-| "What did the Acme team say about pricing?" | `chat_ids=[Acme <>...]`, `search_terms="pricing"` | Only the Acme chat, FTS for "pricing" |
+| "What did the Acme team say about pricing?" | `chat_ids=[Acme <>...]`, `search_terms="pricing"` | Only the Acme chat, hybrid semantic + keyword ranking |
 | "Summarize yesterday's engineering chat" | `chat_ids=[Engineering <>...]`, `days_back=2` | Last 2 days in Engineering, no keyword filter (browse mode) |
 | "What did Alice say about deployment?" | `sender_name="Alice"`, `search_terms="deployment"` | All chats, filtered to Alice's messages about deployment |
-| "Find messages about the budget deadline" | `search_terms="budget deadline"` | All chats, keyword search only |
+| "Find messages about the budget deadline" | `search_terms="budget deadline"` | All chats, hybrid semantic + keyword ranking |
 
 The intent extraction runs on **Haiku** (~$0.002/query) and only sees your question + chat names — never message content. The main synthesis runs on **Sonnet** with the filtered results.
 

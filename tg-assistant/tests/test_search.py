@@ -177,3 +177,97 @@ class TestVectorSearchDimensionCheck:
 
         assert results == []
         mock_embedder.generate_embedding.assert_called_once()
+
+
+class TestFilteredSearchOptimized:
+    @pytest.mark.asyncio
+    async def test_filtered_search_uses_single_query_hybrid(self):
+        """FTS queries should use one hybrid SQL query instead of Python-side merge."""
+        mock_pool = MagicMock()
+        mock_pool.fetch = AsyncMock(return_value=[])
+
+        mock_embedder = MagicMock()
+        mock_embedder.dimension = 384
+        mock_embedder.generate_embedding = AsyncMock(return_value=[0.0] * 384)
+
+        search = MessageSearch(mock_pool, mock_embedder)
+        results = await search.filtered_search(
+            search_terms="launch update",
+            chat_ids=[1, 2],
+            sender_name="Ali_ce%",
+            days_back=7,
+            limit=5,
+        )
+
+        assert results == []
+        mock_embedder.generate_embedding.assert_called_once_with("launch update")
+        mock_pool.fetch.assert_called_once()
+        sql = mock_pool.fetch.call_args[0][0]
+        assert "WITH q AS" in sql
+        assert "FROM candidates k" in sql
+
+    @pytest.mark.asyncio
+    async def test_filtered_search_falls_back_to_fts_if_embedding_fails(self):
+        """If embedding generation fails, filtered_search should still return FTS results."""
+        mock_pool = MagicMock()
+        mock_pool.fetch = AsyncMock(return_value=[])
+
+        mock_embedder = MagicMock()
+        mock_embedder.dimension = 384
+        mock_embedder.generate_embedding = AsyncMock(side_effect=RuntimeError("boom"))
+
+        search = MessageSearch(mock_pool, mock_embedder)
+        results = await search.filtered_search(
+            search_terms="test query",
+            limit=10,
+        )
+
+        assert results == []
+        mock_pool.fetch.assert_called_once()
+        sql = mock_pool.fetch.call_args[0][0]
+        assert "ORDER BY score DESC" in sql
+
+    @pytest.mark.asyncio
+    async def test_filtered_search_browse_mode_skips_embedding(self):
+        """Browse mode (no search terms) should order by recency without embedding work."""
+        mock_pool = MagicMock()
+        mock_pool.fetch = AsyncMock(return_value=[])
+
+        mock_embedder = MagicMock()
+        mock_embedder.dimension = 384
+        mock_embedder.generate_embedding = AsyncMock(return_value=[0.0] * 384)
+
+        search = MessageSearch(mock_pool, mock_embedder)
+        results = await search.filtered_search(
+            search_terms=None,
+            chat_ids=[42],
+            limit=10,
+        )
+
+        assert results == []
+        mock_embedder.generate_embedding.assert_not_called()
+        mock_pool.fetch.assert_called_once()
+        sql = mock_pool.fetch.call_args[0][0]
+        assert "ORDER BY m.timestamp DESC" in sql
+
+
+class TestChatListCaching:
+    @pytest.mark.asyncio
+    async def test_get_chat_list_limit_uses_cached_rows(self):
+        """get_chat_list(limit=...) should return a sliced cached list."""
+        mock_pool = MagicMock()
+        mock_pool.fetch = AsyncMock(return_value=[
+            {"chat_id": 3, "title": "C", "chat_type": "group"},
+            {"chat_id": 2, "title": "B", "chat_type": "group"},
+            {"chat_id": 1, "title": "A", "chat_type": "group"},
+        ])
+        mock_embedder = MagicMock()
+        mock_embedder.dimension = 384
+
+        search = MessageSearch(mock_pool, mock_embedder)
+        first = await search.get_chat_list(limit=2)
+        second = await search.get_chat_list(limit=1)
+
+        assert len(first) == 2
+        assert len(second) == 1
+        mock_pool.fetch.assert_called_once()

@@ -160,6 +160,11 @@ max_queries_per_minute = 20
 # 50 messages is a good balance for summarization tasks.
 max_context_messages = 50
 
+# Maximum number of chat entries to include in intent extraction prompts.
+# Lower values reduce Haiku latency/token cost when you have many chats.
+# Set to 0 to include all chats.
+max_intent_chats = 200
+
 # Claude API configuration
 [querybot.claude]
 # Model selection. Claude Sonnet 4.5 balances quality, speed, and cost.

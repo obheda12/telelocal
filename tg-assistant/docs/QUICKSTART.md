@@ -161,6 +161,8 @@ journalctl -u tg-syncer --since "1 hour ago" | grep -i flood
 - Keep `syncer.store_raw_json = false` unless you explicitly need full raw payloads.
 - For faster catch-up on many chats, keep a small `syncer.idle_chat_delay_seconds` (default `0.1`).
 - The syncer now batches per-chat high-water-mark lookups into one DB query per pass for lower latency on large chat counts.
+- Query-time searches with `search_terms` run as a single SQL hybrid rank (FTS + vector), reducing round-trips and Python merge overhead.
+- If you have hundreds of chats, tune `querybot.max_intent_chats` (default `200`) to reduce intent extraction latency/cost.
 
 ---
 

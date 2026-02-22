@@ -148,6 +148,7 @@ def build_application(config: Dict[str, Any]) -> Application:
 
         owner_id = config["querybot"]["owner_telegram_id"]
         max_context_messages = config["querybot"].get("max_context_messages", 50)
+        max_intent_chats = config["querybot"].get("max_intent_chats", 200)
 
         security_config = config.get("security", {})
         sanitizer = ContentSanitizer(
@@ -160,6 +161,7 @@ def build_application(config: Dict[str, Any]) -> Application:
         # 4. Store in bot_data for handler access
         app.bot_data["owner_id"] = owner_id
         app.bot_data["max_context_messages"] = max_context_messages
+        app.bot_data["max_intent_chats"] = max_intent_chats
         app.bot_data["search"] = search
         app.bot_data["llm"] = llm
         app.bot_data["audit"] = audit

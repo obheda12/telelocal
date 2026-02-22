@@ -298,7 +298,13 @@ async def handle_message(
         return
 
     # 1. Get chat list + extract intent
-    chat_list = await search.get_chat_list()
+    max_intent_chats = context.bot_data.get("max_intent_chats")
+    chat_list_limit = (
+        max_intent_chats
+        if isinstance(max_intent_chats, int) and max_intent_chats > 0
+        else None
+    )
+    chat_list = await search.get_chat_list(limit=chat_list_limit)
     intent = await llm.extract_query_intent(question, chat_list)
 
     # 2. Filtered search using extracted intent
