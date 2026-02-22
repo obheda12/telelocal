@@ -200,8 +200,12 @@ class ClaudeAssistant:
             if days_back is not None:
                 days_back = max(1, int(days_back))
 
+            search_terms = data.get("search_terms")
+            if isinstance(search_terms, list):
+                search_terms = " ".join(str(t) for t in search_terms)
+
             intent = QueryIntent(
-                search_terms=data.get("search_terms") or None,
+                search_terms=search_terms or None,
                 chat_ids=chat_ids,
                 sender_name=data.get("sender_name") or None,
                 days_back=days_back,

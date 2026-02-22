@@ -306,11 +306,25 @@ setup_venv() {
             keyrings.alt
     fi
 
+    # Pre-download the sentence-transformers model so the syncer doesn't need
+    # internet access at runtime (nftables blocks HuggingFace from tg-syncer).
+    MODEL_DIR="${INSTALL_DIR}/models"
+    mkdir -p "${MODEL_DIR}"
+    log_info "Pre-downloading embedding model (this may take a few minutes on Pi)..."
+    HF_HOME="${MODEL_DIR}" SENTENCE_TRANSFORMERS_HOME="${MODEL_DIR}" \
+        python3 -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2', device='cpu')" \
+        && log_success "Embedding model cached at ${MODEL_DIR}" \
+        || log_warn "Model pre-download failed (embeddings will be unavailable until fixed)"
+
     deactivate
 
     # Make venv accessible to both service users
     chown -R root:root "${VENV_DIR}"
     chmod -R 755 "${VENV_DIR}"
+
+    # Model cache readable by syncer service
+    chown -R root:root "${MODEL_DIR}"
+    chmod -R 755 "${MODEL_DIR}"
 
     log_success "Virtual environment ready at ${VENV_DIR}"
 }

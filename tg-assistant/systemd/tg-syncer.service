@@ -52,6 +52,10 @@ ExecReload=/bin/kill -HUP $MAINPID
 Environment=TG_ASSISTANT_CONFIG=/etc/tg-assistant/settings.toml
 Environment=PYTHONPATH=/opt/tg-assistant/src
 Environment=PYTHONDONTWRITEBYTECODE=1
+# sentence-transformers / HuggingFace model cache (pre-downloaded during setup)
+Environment=HF_HOME=/opt/tg-assistant/models
+Environment=TRANSFORMERS_CACHE=/opt/tg-assistant/models
+Environment=SENTENCE_TRANSFORMERS_HOME=/opt/tg-assistant/models
 
 # -----------------------------------------------------------------------------
 # Credential injection via systemd-creds (encrypted at rest)
@@ -102,6 +106,8 @@ PrivateTmp=true
 # - Telethon session: writable (session updates during sync)
 ReadWritePaths=/var/log/tg-assistant
 ReadWritePaths=/var/lib/tg-syncer
+# - Model cache: read-only (pre-downloaded during setup)
+ReadOnlyPaths=/opt/tg-assistant/models
 # - Config: read-only access
 ReadOnlyPaths=/etc/tg-assistant
 
@@ -161,11 +167,11 @@ RestrictNamespaces=true
 # -----------------------------------------------------------------------------
 # RESOURCE LIMITS (Raspberry Pi optimized)
 # -----------------------------------------------------------------------------
-# Hard memory ceiling. The syncer processes messages in batches (batch_size=100)
-# so memory usage should be stable. 256M is generous for Python + Telethon.
-MemoryMax=256M
+# Hard memory ceiling. PyTorch + sentence-transformers (~80MB model + runtime)
+# needs more than base Python + Telethon. 512M covers the embedding model.
+MemoryMax=512M
 # Soft memory limit (systemd sends SIGTERM at this threshold on memory pressure)
-MemoryHigh=200M
+MemoryHigh=400M
 
 # CPU quota. The syncer runs every 30s and should finish quickly.
 # 50% prevents it from starving the querybot or other services.
