@@ -56,7 +56,7 @@ async def backfill(batch_size: int = 200) -> None:
     pool = await get_connection_pool(db_config)
 
     embedder = create_embedding_provider(config.get("embeddings", {}))
-    store = MessageStore(pool, embedding_dim=embedder.dimension)
+    expected_dim = embedder.dimension
 
     total = 0
 
@@ -73,9 +73,9 @@ async def backfill(batch_size: int = 200) -> None:
             break
 
         for (message_id, chat_id, _), embedding in zip(rows, embeddings):
-            if store._embedding_dim and len(embedding) != store._embedding_dim:
+            if expected_dim and len(embedding) != expected_dim:
                 raise ValueError(
-                    f"Embedding dimension mismatch: got={len(embedding)} expected={store._embedding_dim}"
+                    f"Embedding dimension mismatch: got={len(embedding)} expected={expected_dim}"
                 )
             await pool.execute(
                 "UPDATE messages SET embedding = $1 WHERE message_id = $2 AND chat_id = $3",
