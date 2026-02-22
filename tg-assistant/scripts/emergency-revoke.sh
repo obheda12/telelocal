@@ -54,7 +54,7 @@ LOG_DIR="/var/log/tg-assistant"
 
 SYNCER_USER="tg-syncer"
 SYNCER_HOME="/home/${SYNCER_USER}"
-SESSION_DIR="${SYNCER_HOME}/.telethon"
+SESSION_DIR="/var/lib/tg-syncer"
 SESSION_NAME="tg_syncer_session"
 ENCRYPTED_FILE="${SESSION_DIR}/${SESSION_NAME}.session.enc"
 
@@ -66,6 +66,13 @@ INCIDENT_DIR="/root/tg-incident-$(date +%Y%m%d-%H%M%S)"
 
 # Keychain keys (service = tg-assistant)
 KEYCHAIN_KEYS=(
+    # Current credential names (credstore + optional keychain fallback)
+    "tg-assistant-bot-token"
+    "tg-assistant-claude-api-key"
+    "tg-assistant-api-id"
+    "tg-assistant-api-hash"
+    "session_encryption_key"
+    # Legacy names kept for cleanup compatibility
     "bot_token"
     "anthropic_api_key"
     "telethon_session_key"
@@ -126,7 +133,7 @@ case "${MODE}" in
         echo "    2. Preserve logs and config to ${INCIDENT_DIR}"
         echo "    3. Shred the Telethon session file"
         echo "    4. Clear ALL credentials from the system keychain"
-        echo "    5. Rotate database passwords"
+        echo "    5. Shred encrypted credstore entries"
         echo "    6. Print external action checklist"
         ;;
     session)
@@ -134,7 +141,7 @@ case "${MODE}" in
         echo "    1. Stop tg-syncer service"
         echo "    2. Preserve logs to ${INCIDENT_DIR}"
         echo "    3. Shred the Telethon session file"
-        echo "    4. Clear telethon_session_key from keychain"
+        echo "    4. Clear session encryption key entries"
         ;;
     credentials)
         echo "  This will:"
@@ -278,13 +285,15 @@ phase_shred_session() {
         shredded=true
     fi
 
-    # Clear the session encryption key from keychain
+    # Clear session key entries from keychain fallback.
     if command -v secret-tool &>/dev/null; then
-        if secret-tool clear service tg-assistant key telethon_session_key 2>/dev/null; then
-            log_success "Cleared telethon_session_key from keychain"
-        else
-            log_info "telethon_session_key not found in keychain (already cleared or never set)"
-        fi
+        for key in session_encryption_key telethon_session_key; do
+            if secret-tool clear service tg-assistant key "${key}" 2>/dev/null; then
+                log_success "Cleared ${key} from keychain"
+            else
+                log_info "${key} not found in keychain (already cleared or never set)"
+            fi
+        done
     else
         log_warn "secret-tool not available — cannot clear keychain entries"
     fi
@@ -292,7 +301,7 @@ phase_shred_session() {
     if [[ "${shredded}" == true ]]; then
         ACTIONS_TAKEN+=("Shredded Telethon session files")
     fi
-    ACTIONS_TAKEN+=("Cleared session encryption key from keychain")
+    ACTIONS_TAKEN+=("Cleared session encryption key entries")
 }
 
 # =========================================================================
@@ -335,65 +344,13 @@ phase_clear_keychain() {
 }
 
 # =========================================================================
-# Phase 5: Rotate database passwords
+# Phase 5: Database credential model
 # =========================================================================
 phase_rotate_db_passwords() {
-    phase_header 5 "Rotate database passwords"
-
-    # Check if PostgreSQL is running
-    if ! command -v psql &>/dev/null; then
-        log_warn "psql not found — skipping database password rotation"
-        log_warn "Rotate DB passwords manually when PostgreSQL is available"
-        return
-    fi
-
-    if ! sudo -u postgres psql -c "SELECT 1" &>/dev/null; then
-        log_warn "Cannot connect to PostgreSQL — skipping password rotation"
-        log_warn "Rotate DB passwords manually when PostgreSQL is available"
-        return
-    fi
-
-    local new_syncer_pass new_querybot_pass
-    new_syncer_pass="$(openssl rand -base64 24)"
-    new_querybot_pass="$(openssl rand -base64 24)"
-
-    # Rotate syncer password
-    if sudo -u postgres psql -c "ALTER ROLE ${DB_SYNCER_USER} PASSWORD '${new_syncer_pass//\'/\'\'}'" "${DB_NAME}" 2>/dev/null; then
-        log_success "Rotated password for DB role ${DB_SYNCER_USER}"
-    else
-        log_warn "Could not rotate password for ${DB_SYNCER_USER}"
-    fi
-
-    # Rotate querybot password
-    if sudo -u postgres psql -c "ALTER ROLE ${DB_QUERYBOT_USER} PASSWORD '${new_querybot_pass//\'/\'\'}'" "${DB_NAME}" 2>/dev/null; then
-        log_success "Rotated password for DB role ${DB_QUERYBOT_USER}"
-    else
-        log_warn "Could not rotate password for ${DB_QUERYBOT_USER}"
-    fi
-
-    # Update settings.toml with new passwords
-    if [[ -f "${CONFIG_FILE}" ]]; then
-        # Replace syncer password line
-        if grep -q "syncer_password" "${CONFIG_FILE}" 2>/dev/null; then
-            sed -i "s|syncer_password = \".*\"|syncer_password = \"${new_syncer_pass}\"|" "${CONFIG_FILE}"
-            log_success "Updated syncer_password in ${CONFIG_FILE}"
-        fi
-
-        # Replace querybot password line
-        if grep -q "querybot_password" "${CONFIG_FILE}" 2>/dev/null; then
-            sed -i "s|querybot_password = \".*\"|querybot_password = \"${new_querybot_pass}\"|" "${CONFIG_FILE}"
-            log_success "Updated querybot_password in ${CONFIG_FILE}"
-        fi
-    else
-        log_warn "Config file not found at ${CONFIG_FILE} — new passwords not persisted"
-        log_warn "You will need to set passwords manually during re-setup"
-    fi
-
-    # Clear passwords from shell variables
-    new_syncer_pass="REDACTED"
-    new_querybot_pass="REDACTED"
-
-    ACTIONS_TAKEN+=("Rotated database passwords for ${DB_SYNCER_USER} and ${DB_QUERYBOT_USER}")
+    phase_header 5 "Database credential model"
+    log_info "PostgreSQL uses Unix socket peer auth in this deployment."
+    log_info "No DB passwords are stored or rotated by incident tooling."
+    ACTIONS_TAKEN+=("DB password rotation skipped (peer-auth deployment)")
 }
 
 # =========================================================================
@@ -423,6 +380,9 @@ phase_print_checklist() {
             echo "  [ ] Rotate Anthropic API key:"
             echo "        https://console.anthropic.com/settings/keys"
             echo "        Delete the compromised key and create a new one"
+            echo ""
+            echo "  [ ] Rotate Telegram API ID/hash:"
+            echo "        https://my.telegram.org > API development tools"
             echo ""
             echo "  [ ] Review Telegram login activity for unauthorized access"
             echo ""

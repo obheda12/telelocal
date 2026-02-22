@@ -77,6 +77,7 @@ journalctl -u tg-querybot -f
 | Telethon session | `/var/lib/tg-syncer/` (encrypted, `0700`) |
 | Syncer service | `/etc/systemd/system/tg-syncer.service` |
 | Query bot service | `/etc/systemd/system/tg-querybot.service` |
+| API IP refresh timer | `/etc/systemd/system/tg-refresh-api-ipsets.timer` |
 | Firewall rules | `/etc/nftables.d/tg-assistant-firewall.conf` |
 
 ---
@@ -86,12 +87,16 @@ journalctl -u tg-querybot -f
 ```bash
 # Check service status
 systemctl status tg-syncer tg-querybot
+systemctl status tg-refresh-api-ipsets.timer
 
 # View syncer logs (live)
 journalctl -u tg-syncer -f
 
 # View query bot logs (live)
 journalctl -u tg-querybot -f
+
+# View API allowlist refresh logs
+journalctl -u tg-refresh-api-ipsets.service -n 50 --no-pager
 
 # View audit log
 tail -f /var/log/tg-assistant/audit.log
@@ -165,7 +170,9 @@ journalctl -u tg-syncer --since "1 hour ago" | grep -i flood
 - For faster catch-up on many chats, keep a small `syncer.idle_chat_delay_seconds` (default `0.1`).
 - The syncer now batches per-chat high-water-mark lookups into one DB query per pass for lower latency on large chat counts.
 - Query-time searches with `search_terms` run as a single SQL hybrid rank (FTS + vector), reducing round-trips and Python merge overhead.
+- Tune `querybot.hybrid_min_terms` / `querybot.hybrid_min_term_length` to skip vector work on short keyword queries and reduce p95 latency.
 - If you have hundreds of chats, tune `querybot.max_intent_chats` (default `200`) to reduce intent extraction latency/cost.
+- For the fastest ingest on large/busy accounts, enable `syncer.defer_embeddings = true` to decouple message writes from embedding generation.
 - Use `./scripts/benchmark-pipeline.sh` after changes and compare p95 latency before/after.
 
 ---
@@ -182,7 +189,7 @@ sudo tcpdump -i any -n 'not host api.telegram.org and not host api.anthropic.com
 # Check for injection attempts in audit log
 grep -i "injection\|blocked\|denied" /var/log/tg-assistant/audit.log
 
-# Verify config file permissions (should be 600)
+# Verify config file permissions (should be 644)
 stat -c '%a %U:%G %n' /etc/tg-assistant/settings.toml
 
 # Verify session file permissions (should be 0700 directory, 0600 files)

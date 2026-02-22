@@ -373,6 +373,64 @@ class TestSyncOnce:
         mock_store.store_messages_batch.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_sync_once_deferred_embeddings(self):
+        """sync_once should store first then backfill embeddings when deferred mode is on."""
+        from syncer.main import sync_once
+
+        mock_dialog = MagicMock()
+        mock_dialog.id = 12345
+        mock_dialog.title = "Deferred Chat"
+        mock_dialog.date = datetime.now(timezone.utc)
+
+        mock_msg = MagicMock()
+        mock_msg.id = 101
+        mock_msg.text = "Need follow-up tomorrow"
+        mock_msg.message = "Need follow-up tomorrow"
+        mock_msg.date = datetime.now(timezone.utc)
+        mock_msg.sender = None
+        mock_msg.to_dict.return_value = {}
+
+        mock_client = MagicMock()
+        mock_client.get_dialogs = AsyncMock(return_value=[mock_dialog])
+        mock_client.iter_messages = MagicMock(return_value=self._iter_messages([mock_msg]))
+
+        mock_store = AsyncMock()
+        mock_store.get_last_synced_ids = AsyncMock(return_value={})
+        mock_store.store_messages_batch.return_value = 1
+        mock_store.store_messages_batch_returning.return_value = [
+            (101, 12345, "Need follow-up tomorrow")
+        ]
+        mock_store.update_embeddings_batch.return_value = 1
+
+        mock_embedder = MagicMock()
+        mock_embedder.dimension = 384
+        mock_embedder.batch_generate = AsyncMock(return_value=[[0.1] * 384])
+
+        mock_audit = AsyncMock()
+
+        config = {
+            "syncer": {
+                "batch_size": 100,
+                "rate_limit_seconds": 0,
+                "defer_embeddings": True,
+            }
+        }
+
+        with patch("syncer.main.rate_limit_delay", new_callable=AsyncMock):
+            count = await sync_once(
+                mock_client, mock_store, mock_embedder, mock_audit, config
+            )
+
+        assert count == 1
+        mock_store.store_messages_batch_returning.assert_called_once()
+        mock_embedder.batch_generate.assert_called_once()
+        mock_store.update_embeddings_batch.assert_called_once()
+        assert any(
+            call.args[1] == "deferred_embedding_flush"
+            for call in mock_audit.log.await_args_list
+        )
+
+    @pytest.mark.asyncio
     async def test_sync_once_uses_prefetched_last_ids(self):
         """sync_once should use batched last-id lookup when available."""
         from syncer.main import sync_once
@@ -667,6 +725,59 @@ class TestSyncOnce:
         mock_store.update_chat_metadata.assert_called_once_with(
             chat_id=111, title="Work Chat", chat_type="group",
         )
+
+    @pytest.mark.asyncio
+    async def test_sync_once_captures_reply_and_thread_fields(self):
+        """sync_once should persist reply/thread linkage metadata."""
+        from syncer.main import sync_once
+
+        mock_dialog = MagicMock()
+        mock_dialog.id = 12345
+        mock_dialog.title = "Threaded Chat"
+        mock_dialog.is_group = True
+        mock_dialog.is_channel = False
+        mock_dialog.date = datetime.now(timezone.utc)
+
+        class ReplyHeader:
+            reply_to_msg_id = 88
+            reply_to_top_id = 77
+            forum_topic = True
+
+        mock_msg = MagicMock()
+        mock_msg.id = 100
+        mock_msg.text = "Following up in thread"
+        mock_msg.message = "Following up in thread"
+        mock_msg.date = datetime.now(timezone.utc)
+        mock_msg.sender = None
+        mock_msg.reply_to = ReplyHeader()
+        mock_msg.to_dict.return_value = {}
+
+        mock_client = MagicMock()
+        mock_client.get_dialogs = AsyncMock(return_value=[mock_dialog])
+        mock_client.iter_messages = MagicMock(return_value=self._iter_messages([mock_msg]))
+
+        mock_store = AsyncMock()
+        mock_store.get_last_synced_id.return_value = None
+        mock_store.store_messages_batch.return_value = 1
+
+        mock_embedder = MagicMock()
+        mock_embedder.dimension = 0  # disable vectors for this test
+        mock_audit = AsyncMock()
+
+        config = {"syncer": {"batch_size": 100, "rate_limit_seconds": 0}}
+
+        with patch("syncer.main.rate_limit_delay", new_callable=AsyncMock):
+            count = await sync_once(
+                mock_client, mock_store, mock_embedder, mock_audit, config
+            )
+
+        assert count == 1
+        batch = mock_store.store_messages_batch.call_args[0][0]
+        assert len(batch) == 1
+        msg_dict = batch[0]
+        assert msg_dict["reply_to_msg_id"] == 88
+        assert msg_dict["thread_top_msg_id"] == 77
+        assert msg_dict["is_topic_message"] is True
 
 
 # ---------------------------------------------------------------------------

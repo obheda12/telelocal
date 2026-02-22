@@ -1,0 +1,19 @@
+[Unit]
+Description=Refresh tg-assistant querybot API IP allowlists
+After=network-online.target nftables.service
+Wants=network-online.target
+ConditionPathExists=/opt/tg-assistant/scripts/refresh-api-ipsets.sh
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/opt/tg-assistant/scripts/refresh-api-ipsets.sh
+
+# Minimal hardening for a root network-maintenance task.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN

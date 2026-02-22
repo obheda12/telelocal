@@ -17,9 +17,9 @@ Design principles:
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
+from weakref import WeakKeyDictionary
 from typing import Any, FrozenSet
 
 from telethon import TelegramClient as TelethonClient
@@ -54,6 +54,11 @@ ALLOWED_METHODS: FrozenSet[str] = frozenset(
     }
 )
 
+# Keep internal state out of instance attributes so simple
+# ``object.__getattribute__(wrapper, "_client")`` bypasses fail closed.
+_CLIENT_MAP: "WeakKeyDictionary[ReadOnlyTelegramClient, TelethonClient]" = WeakKeyDictionary()
+_ALLOWED_MAP: "WeakKeyDictionary[ReadOnlyTelegramClient, FrozenSet[str]]" = WeakKeyDictionary()
+
 
 class ReadOnlyTelegramClient:
     """Async-safe, read-only proxy around a TelethonClient instance.
@@ -70,17 +75,26 @@ class ReadOnlyTelegramClient:
         2. Raise ``PermissionError``.
     """
 
+    __slots__ = ("__weakref__",)
+
     def __init__(self, client: TelethonClient) -> None:
-        # Store via object.__setattr__ to avoid triggering our own
-        # __getattr__ / __setattr__ if we were to override them.
-        object.__setattr__(self, "_client", client)
-        object.__setattr__(self, "_allowed", ALLOWED_METHODS)
+        _CLIENT_MAP[self] = client
+        _ALLOWED_MAP[self] = ALLOWED_METHODS
+
+    @staticmethod
+    def _state(self: "ReadOnlyTelegramClient") -> tuple[TelethonClient, FrozenSet[str]]:
+        client = _CLIENT_MAP.get(self)
+        allowed = _ALLOWED_MAP.get(self)
+        if client is None or allowed is None:
+            raise PermissionError("ReadOnlyTelegramClient: internal state unavailable.")
+        return client, allowed
 
     # ----- async context manager ------------------------------------------
 
     async def __aenter__(self) -> "ReadOnlyTelegramClient":
         """Connect the underlying client and return *self* (the wrapper)."""
-        await self._client.connect()
+        client, _ = ReadOnlyTelegramClient._state(self)
+        await client.connect()
         logger.info("ReadOnlyTelegramClient connected.")
         return self
 
@@ -91,12 +105,13 @@ class ReadOnlyTelegramClient:
         exc_tb: Any,
     ) -> None:
         """Disconnect the underlying client."""
-        await self._client.disconnect()
+        client, _ = ReadOnlyTelegramClient._state(self)
+        await client.disconnect()
         logger.info("ReadOnlyTelegramClient disconnected.")
 
     # ----- attribute proxy ------------------------------------------------
 
-    def __getattr__(self, name: str) -> Any:
+    def __getattribute__(self, name: str) -> Any:
         """Proxy attribute access with an allowlist check.
 
         Allowed methods are returned as-is from the underlying client.
@@ -105,9 +120,39 @@ class ReadOnlyTelegramClient:
         Attributes that are *not* callable (e.g. ``client.session``) are also
         blocked — only the explicit method names are permitted.
         """
+        # Always allow access to the wrapper's own public protocol methods.
+        if name in {
+            "__class__",
+            "__repr__",
+            "__aenter__",
+            "__aexit__",
+            "__setattr__",
+            "__delattr__",
+            "__getattribute__",
+            "_state",
+        }:
+            return object.__getattribute__(self, name)
+
+        # Block direct access to internals to prevent bypassing the allowlist.
+        if name in {"_client", "_allowed", "__dict__", "__weakref__"} or name.startswith("_"):
+            logger.critical(
+                "BLOCKED  | attr=%-27s ts=%s  — internal attribute access denied",
+                name,
+                time.time(),
+            )
+            raise PermissionError(
+                f"ReadOnlyTelegramClient: internal attribute access to '{name}' is denied."
+            )
+
         try:
-            if name in self._allowed:
-                attr = getattr(self._client, name)
+            client, allowed = ReadOnlyTelegramClient._state(self)
+
+            if name in allowed:
+                attr = getattr(client, name)
+                if not callable(attr):
+                    raise PermissionError(
+                        f"ReadOnlyTelegramClient: allowed member '{name}' is not callable."
+                    )
                 logger.debug(
                     "ALLOWED  | method=%-25s ts=%s",
                     name,
@@ -123,7 +168,7 @@ class ReadOnlyTelegramClient:
             )
             raise PermissionError(
                 f"ReadOnlyTelegramClient: access to '{name}' is denied. "
-                f"Only these methods are permitted: {sorted(self._allowed)}"
+                f"Only these methods are permitted: {sorted(allowed)}"
             )
 
         except PermissionError:
@@ -162,8 +207,9 @@ class ReadOnlyTelegramClient:
     # ----- informational --------------------------------------------------
 
     def __repr__(self) -> str:
+        client, allowed = ReadOnlyTelegramClient._state(self)
         return (
             f"<ReadOnlyTelegramClient "
-            f"allowed={sorted(self._allowed)} "
-            f"connected={self._client.is_connected()}>"
+            f"allowed={sorted(allowed)} "
+            f"connected={client.is_connected()}>"
         )

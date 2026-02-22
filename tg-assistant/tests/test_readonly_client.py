@@ -298,12 +298,14 @@ class TestEdgeCases:
             readonly_client.GET_MESSAGES
 
     def test_multiple_wrapper_instances_share_allowlist(self, mock_client):
-        """Multiple instances should share the same frozenset (class-level)."""
+        """Internal allowlist should not be externally readable per instance."""
         client1 = ReadOnlyTelegramClient(mock_client)
         client2 = ReadOnlyTelegramClient(mock_client)
 
-        assert client1._allowed is client2._allowed
-        assert client1._allowed is ALLOWED_METHODS
+        with pytest.raises(PermissionError):
+            _ = client1._allowed
+        with pytest.raises(PermissionError):
+            _ = client2._allowed
 
     def test_allowed_methods_contains_expected_count(self):
         """
@@ -317,3 +319,18 @@ class TestEdgeCases:
             f"ALLOWED_METHODS has {actual_count} entries, expected {expected_count}. "
             f"If you intentionally changed the allowlist, update this test."
         )
+
+    def test_internal_client_attribute_is_blocked(self, readonly_client):
+        """Internal client object should never be externally accessible."""
+        with pytest.raises(PermissionError, match="_client"):
+            _ = readonly_client._client
+
+    def test_dunder_dict_is_blocked(self, readonly_client):
+        """Block __dict__ access to prevent introspection-based bypasses."""
+        with pytest.raises(PermissionError, match="__dict__"):
+            _ = readonly_client.__dict__
+
+    def test_object_getattribute_cannot_extract_client(self, readonly_client):
+        """Even raw object.__getattribute__ should not expose the inner client."""
+        with pytest.raises(AttributeError):
+            object.__getattribute__(readonly_client, "_client")

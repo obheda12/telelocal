@@ -153,8 +153,9 @@ done
 log_info "Removing keychain entries..."
 
 if command -v secret-tool &>/dev/null; then
-    for KEY in bot_token anthropic_api_key session_encryption_key \
-               tg-assistant-bot-token tg-assistant-claude-api-key; do
+    for KEY in bot_token anthropic_api_key telethon_session_key session_encryption_key \
+               tg-assistant-bot-token tg-assistant-claude-api-key \
+               tg-assistant-api-id tg-assistant-api-hash; do
         # timeout prevents hanging on headless systems where the keyring
         # daemon is unavailable or waiting for interactive authentication.
         if timeout 5 secret-tool lookup service tg-assistant key "${KEY}" &>/dev/null; then
@@ -233,11 +234,11 @@ log_info "Resetting configuration..."
 
 CONFIG_FILE="/etc/tg-assistant/settings.toml"
 if [[ -f "${CONFIG_FILE}" ]]; then
-    # Reset owner_telegram_id to placeholder
-    sed -i 's/^owner_telegram_id = [0-9]*/owner_telegram_id = 0/' "${CONFIG_FILE}" 2>/dev/null
+    # Reset owner_telegram_id to default numeric sentinel (valid TOML)
+    sed -i 's/^owner_telegram_id = .*/owner_telegram_id = 0/' "${CONFIG_FILE}" 2>/dev/null
     # Reset API credentials to placeholders
-    sed -i 's/^api_id = [0-9]*/api_id = YOUR_API_ID/' "${CONFIG_FILE}" 2>/dev/null
-    sed -i 's/^api_hash = "[^"]*"/api_hash = "YOUR_API_HASH"/' "${CONFIG_FILE}" 2>/dev/null
+    sed -i 's/^api_id = .*/api_id = "YOUR_API_ID"/' "${CONFIG_FILE}" 2>/dev/null
+    sed -i 's/^api_hash = .*/api_hash = "YOUR_API_HASH"/' "${CONFIG_FILE}" 2>/dev/null
     log_success "Configuration reset to defaults"
 fi
 

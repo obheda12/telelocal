@@ -250,6 +250,33 @@ class TestFilteredSearchOptimized:
         sql = mock_pool.fetch.call_args[0][0]
         assert "ORDER BY m.timestamp DESC" in sql
 
+    @pytest.mark.asyncio
+    async def test_filtered_search_short_keyword_uses_fts_only(self):
+        """Single-keyword queries should skip hybrid vector work for lower latency."""
+        mock_pool = MagicMock()
+        mock_pool.fetch = AsyncMock(return_value=[])
+
+        mock_embedder = MagicMock()
+        mock_embedder.dimension = 384
+        mock_embedder.generate_embedding = AsyncMock(return_value=[0.0] * 384)
+
+        search = MessageSearch(
+            mock_pool,
+            mock_embedder,
+            hybrid_min_terms=2,
+            hybrid_min_term_length=3,
+        )
+        results = await search.filtered_search(
+            search_terms="budget",
+            limit=10,
+        )
+
+        assert results == []
+        mock_embedder.generate_embedding.assert_not_called()
+        mock_pool.fetch.assert_called_once()
+        sql = mock_pool.fetch.call_args[0][0]
+        assert "ORDER BY score DESC" in sql
+
 
 class TestChatListCaching:
     @pytest.mark.asyncio
@@ -271,3 +298,44 @@ class TestChatListCaching:
         assert len(first) == 2
         assert len(second) == 1
         mock_pool.fetch.assert_called_once()
+
+
+class TestEmbeddingCaching:
+    @pytest.mark.asyncio
+    async def test_reuses_cached_query_embedding(self):
+        """Repeated identical queries should not regenerate embeddings."""
+        mock_pool = MagicMock()
+        mock_pool.fetch = AsyncMock(return_value=[])
+        mock_embedder = MagicMock()
+        mock_embedder.dimension = 384
+        mock_embedder.generate_embedding = AsyncMock(return_value=[0.0] * 384)
+
+        search = MessageSearch(mock_pool, mock_embedder)
+        await search.vector_search("Launch status")
+        await search.vector_search("  launch   status  ")
+
+        # Normalization + cache => one embed call total.
+        mock_embedder.generate_embedding.assert_called_once()
+
+
+class TestThreadMetadataMapping:
+    def test_rows_to_results_maps_reply_thread_fields(self):
+        """rows_to_results should preserve reply/thread metadata for LLM context."""
+        row = {
+            "message_id": 10,
+            "chat_id": 2,
+            "title": "Thread Chat",
+            "sender_name": "Alice",
+            "reply_to_msg_id": 9,
+            "thread_top_msg_id": 7,
+            "is_topic_message": True,
+            "timestamp": None,
+            "text": "Reply message",
+            "score": 0.5,
+        }
+        results = MessageSearch._rows_to_results([row])
+        assert len(results) == 1
+        result = results[0]
+        assert result.reply_to_msg_id == 9
+        assert result.thread_top_msg_id == 7
+        assert result.is_topic_message is True

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import random
 import signal
 import sys
@@ -38,7 +39,9 @@ from shared.secrets import get_secret, decrypt_session_file
 logger = logging.getLogger("syncer.main")
 
 # Default paths — overridable via settings.toml
-_DEFAULT_CONFIG_PATH = Path("/etc/tg-assistant/settings.toml")
+_DEFAULT_CONFIG_PATH = Path(
+    os.environ.get("TG_ASSISTANT_CONFIG", "/etc/tg-assistant/settings.toml")
+)
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -136,6 +139,125 @@ async def prescan_dialogs(
 # ---------------------------------------------------------------------------
 
 
+class DeferredEmbeddingWorker:
+    """Background worker for deferred embedding generation.
+
+    This lets the sync loop persist messages immediately, then backfill
+    embeddings concurrently in batches.
+    """
+
+    def __init__(
+        self,
+        store: MessageStore,
+        embedder: EmbeddingProvider,
+        batch_size: int = 256,
+        queue_size: int = 4096,
+    ) -> None:
+        self._store = store
+        self._embedder = embedder
+        self._batch_size = max(1, batch_size)
+        self._queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=max(1, queue_size))
+        self._stop_token = object()
+        self._task: asyncio.Task[None] | None = None
+        self._closed = False
+        self._queued = 0
+        self._updated = 0
+        self._failed = 0
+
+    def _start(self) -> None:
+        if self._task is None:
+            self._task = asyncio.create_task(
+                self._run(),
+                name="tg-assistant-embedding-worker",
+            )
+
+    async def enqueue_many(self, rows: list[tuple[int, int, str]]) -> None:
+        """Queue ``(message_id, chat_id, text)`` rows for embedding backfill."""
+        if self._closed or not rows:
+            return
+        self._start()
+        for row in rows:
+            await self._queue.put(row)
+        self._queued += len(rows)
+
+    async def _flush_pending(self, pending: list[tuple[int, int, str]]) -> None:
+        texts = [text for _, _, text in pending]
+        try:
+            vectors = await self._embedder.batch_generate(texts)
+        except Exception:
+            self._failed += len(pending)
+            logger.warning("Deferred embedding batch generation failed", exc_info=True)
+            return
+
+        if len(vectors) != len(pending):
+            logger.warning(
+                "Deferred embedding size mismatch: vectors=%d pending=%d",
+                len(vectors),
+                len(pending),
+            )
+
+        updates: list[tuple[list[float], int, int]] = []
+        expected_dim = self._embedder.dimension
+        for (message_id, chat_id, _), vector in zip(pending, vectors):
+            if expected_dim and len(vector) != expected_dim:
+                self._failed += 1
+                logger.debug(
+                    "Skipping embedding with mismatched dimension for message_id=%s chat_id=%s",
+                    message_id,
+                    chat_id,
+                )
+                continue
+            updates.append((vector, message_id, chat_id))
+
+        skipped = len(pending) - len(updates)
+        if skipped > 0:
+            self._failed += skipped
+
+        if not updates:
+            return
+
+        try:
+            updated = await self._store.update_embeddings_batch(updates)
+            self._updated += updated
+        except Exception:
+            self._failed += len(updates)
+            logger.warning("Deferred embedding DB update failed", exc_info=True)
+
+    async def _run(self) -> None:
+        pending: list[tuple[int, int, str]] = []
+        stop = False
+
+        while True:
+            item = await self._queue.get()
+            if item is self._stop_token:
+                self._queue.task_done()
+                stop = True
+            else:
+                pending.append(item)
+
+            if pending and (stop or len(pending) >= self._batch_size):
+                await self._flush_pending(pending)
+                for _ in pending:
+                    self._queue.task_done()
+                pending = []
+
+            if stop:
+                break
+
+    async def close(self) -> Dict[str, int]:
+        """Flush remaining rows and stop worker."""
+        self._closed = True
+        if self._task is not None:
+            await self._queue.put(self._stop_token)
+            await self._task
+            self._task = None
+        return {
+            "queued": self._queued,
+            "updated": self._updated,
+            "failed": self._failed,
+        }
+
+
 async def sync_once(
     client: ReadOnlyTelegramClient,
     store: MessageStore,
@@ -163,9 +285,29 @@ async def sync_once(
     store_raw_json = syncer_config.get("store_raw_json", False)
     idle_chat_delay_seconds = syncer_config.get("idle_chat_delay_seconds", 0.1)
     log_batch_progress = syncer_config.get("log_batch_progress", False)
+    defer_embeddings = syncer_config.get("defer_embeddings", False)
+    embedding_update_batch_size = max(
+        1, int(syncer_config.get("embedding_update_batch_size", batch_size))
+    )
+    embedding_queue_size = max(
+        1, int(syncer_config.get("embedding_queue_size", batch_size * 8))
+    )
     use_vectors = embedder.dimension is not None and embedder.dimension > 0
 
     total_new = 0
+    embedding_worker: DeferredEmbeddingWorker | None = None
+    if use_vectors and defer_embeddings:
+        embedding_worker = DeferredEmbeddingWorker(
+            store=store,
+            embedder=embedder,
+            batch_size=embedding_update_batch_size,
+            queue_size=embedding_queue_size,
+        )
+        logger.info(
+            "Deferred embeddings enabled (update_batch_size=%d queue_size=%d)",
+            embedding_update_batch_size,
+            embedding_queue_size,
+        )
 
     async def _flush_batch(
         batch: list[Dict[str, Any]],
@@ -173,6 +315,30 @@ async def sync_once(
     ) -> int:
         if not batch:
             return 0
+
+        if embedding_worker is not None:
+            rows_for_deferred: list[tuple[int, int, str]] = []
+            if hasattr(store, "store_messages_batch_returning"):
+                rows_for_deferred = await store.store_messages_batch_returning(batch)
+                inserted = len(rows_for_deferred)
+            else:
+                # Backward-compatible fallback for older MessageStore implementations.
+                inserted = await store.store_messages_batch(batch)
+                if inserted > 0:
+                    for msg_dict in batch:
+                        text = msg_dict.get("text")
+                        if text:
+                            rows_for_deferred.append(
+                                (
+                                    int(msg_dict["message_id"]),
+                                    int(msg_dict["chat_id"]),
+                                    str(text),
+                                )
+                            )
+
+            if rows_for_deferred:
+                await embedding_worker.enqueue_many(rows_for_deferred)
+            return inserted
 
         if texts_for_embedding and use_vectors:
             try:
@@ -310,17 +476,58 @@ async def sync_once(
         processed_count = 0
 
         async for msg in iterator:
-            if cutoff and msg.date < cutoff:
+            msg_date = msg.date
+            if msg_date and msg_date.tzinfo is None:
+                msg_date = msg_date.replace(tzinfo=timezone.utc)
+
+            if cutoff and msg_date and msg_date < cutoff:
                 break
 
             text = getattr(msg, "text", None) or getattr(msg, "message", None)
-            sender = getattr(msg, "sender", None)
-            sender_id = getattr(sender, "id", None) if sender else None
+            sender_id = getattr(msg, "sender_id", None)
             sender_name = None
+            raw_reply_to_msg_id = getattr(msg, "reply_to_msg_id", None)
+            reply_to_msg_id = (
+                int(raw_reply_to_msg_id)
+                if isinstance(raw_reply_to_msg_id, int)
+                else None
+            )
+            raw_thread_top_msg_id = getattr(msg, "reply_to_top_id", None)
+            thread_top_msg_id = (
+                int(raw_thread_top_msg_id)
+                if isinstance(raw_thread_top_msg_id, int)
+                else None
+            )
+            is_topic_message = False
+
+            # Prefer cached sender data attached to the message object to avoid
+            # triggering extra entity lookups in the hot ingest loop.
+            sender = getattr(msg, "_sender", None) or getattr(msg, "sender", None)
             if sender:
+                sender_id = sender_id or getattr(sender, "id", None)
                 first = getattr(sender, "first_name", "") or ""
                 last = getattr(sender, "last_name", "") or ""
                 sender_name = f"{first} {last}".strip() or str(sender_id)
+            elif sender_id is not None:
+                sender_name = str(sender_id)
+
+            reply_to = getattr(msg, "reply_to", None)
+            if reply_to is not None:
+                if reply_to_msg_id is None:
+                    raw = getattr(reply_to, "reply_to_msg_id", None)
+                    if isinstance(raw, int):
+                        reply_to_msg_id = int(raw)
+                if thread_top_msg_id is None:
+                    raw = getattr(reply_to, "reply_to_top_id", None)
+                    if isinstance(raw, int):
+                        thread_top_msg_id = int(raw)
+                forum_topic = getattr(reply_to, "forum_topic", False)
+                if isinstance(forum_topic, bool):
+                    is_topic_message = forum_topic
+
+            # Topic-style replies often use top-msg id as thread key.
+            if thread_top_msg_id is None and is_topic_message and reply_to_msg_id is not None:
+                thread_top_msg_id = reply_to_msg_id
 
             raw = None
             if store_raw_json:
@@ -335,13 +542,16 @@ async def sync_once(
                 "chat_id": chat_id,
                 "sender_id": sender_id,
                 "sender_name": sender_name,
-                "timestamp": msg.date,
+                "reply_to_msg_id": reply_to_msg_id,
+                "thread_top_msg_id": thread_top_msg_id,
+                "is_topic_message": is_topic_message,
+                "timestamp": msg_date,
                 "text": text,
                 "raw_json": raw,
                 "embedding": None,
             }
             batch.append(msg_dict)
-            if text and use_vectors:
+            if text and use_vectors and embedding_worker is None:
                 texts_for_embedding.append(text)
 
             if len(batch) >= batch_size:
@@ -353,7 +563,6 @@ async def sync_once(
                     chat_progress.log_batch()
                 batch = []
                 texts_for_embedding = []
-                await rate_limit_delay(rate_seconds)
 
         # Flush remaining
         if batch:
@@ -407,6 +616,21 @@ async def sync_once(
         # Keep idle chat probes fast; full delay only when data was processed.
         await rate_limit_delay(rate_seconds if processed_count > 0 else idle_chat_delay_seconds)
 
+    if embedding_worker is not None:
+        embed_stats = await embedding_worker.close()
+        logger.info(
+            "Deferred embedding worker complete: queued=%d updated=%d failed=%d",
+            embed_stats["queued"],
+            embed_stats["updated"],
+            embed_stats["failed"],
+        )
+        await audit.log(
+            "syncer",
+            "deferred_embedding_flush",
+            embed_stats,
+            success=embed_stats["failed"] == 0,
+        )
+
     return total_new
 
 
@@ -442,12 +666,17 @@ async def main() -> None:
     session_key = get_secret("session_encryption_key")
     session_bytes = decrypt_session_file(session_path, session_key)
 
-    import tempfile, os  # noqa: E401
+    import tempfile  # noqa: E401
     shm_dir = "/dev/shm" if os.path.isdir("/dev/shm") else None
     tmp_fd, tmp_path = tempfile.mkstemp(suffix=".session", dir=shm_dir)
+    pool = None
+    audit = None
     try:
-        os.write(tmp_fd, session_bytes)
-        os.close(tmp_fd)
+        with os.fdopen(tmp_fd, "wb") as tmp_handle:
+            tmp_handle.write(session_bytes)
+            tmp_handle.flush()
+        # Drop plaintext session bytes as soon as they're materialized in tmpfs.
+        session_bytes = b""
         os.chmod(tmp_path, 0o600)
         # Telethon appends ".session" to the path, so strip the suffix
         session_base = tmp_path.removesuffix(".session")
@@ -504,18 +733,28 @@ async def main() -> None:
                     )
                 except asyncio.TimeoutError:
                     pass  # normal — timeout means it's time to sync again
-
-        # --- cleanup ---
-        await pool.close()
-        logger.info("Syncer shut down cleanly.")
     finally:
+        if audit is not None:
+            try:
+                await audit.close()
+            except Exception:
+                logger.exception("Failed to flush/close audit logger")
+        if pool is not None:
+            try:
+                await pool.close()
+            except Exception:
+                logger.exception("Failed to close database pool")
+        logger.info("Syncer shut down cleanly.")
+
         # Shred the decrypted session from tmpfs
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
-        # Telethon may also create a -journal file
-        journal = tmp_path + "-journal"
-        if os.path.exists(journal):
-            os.remove(journal)
+        for path in (
+            tmp_path,
+            tmp_path + "-journal",
+            tmp_path + "-wal",
+            tmp_path + "-shm",
+        ):
+            if os.path.exists(path):
+                os.remove(path)
 
 
 def run() -> None:

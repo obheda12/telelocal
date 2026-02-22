@@ -54,8 +54,6 @@ QUERYBOT_HOME="/home/${QUERYBOT_USER}"
 DB_NAME="tg_assistant"
 DB_SYNCER_USER="tg_syncer"
 DB_QUERYBOT_USER="tg_querybot"
-DB_SYNCER_PASS="$(openssl rand -base64 24)"
-DB_QUERYBOT_PASS="$(openssl rand -base64 24)"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -217,11 +215,6 @@ create_system_users() {
             log_success "Created system user: ${SVC_USER}"
         fi
     done
-
-    # Telethon session directory for syncer
-    mkdir -p "${SYNCER_HOME}/.telethon"
-    chown -R "${SYNCER_USER}:${SYNCER_USER}" "${SYNCER_HOME}/.telethon"
-    chmod 700 "${SYNCER_HOME}/.telethon"
 
     log_success "System users configured"
 }
@@ -389,7 +382,11 @@ deploy_systemd_services() {
 
     SYSTEMD_SOURCE="${PROJECT_ROOT}/systemd"
 
-    for SVC_FILE in tg-syncer.service tg-querybot.service; do
+    for SVC_FILE in \
+        tg-syncer.service \
+        tg-querybot.service \
+        tg-refresh-api-ipsets.service \
+        tg-refresh-api-ipsets.timer; do
         if [[ -f "${SYSTEMD_SOURCE}/${SVC_FILE}" ]]; then
             cp "${SYSTEMD_SOURCE}/${SVC_FILE}" "/etc/systemd/system/${SVC_FILE}"
             log_success "Deployed ${SVC_FILE}"
@@ -479,6 +476,16 @@ NFTEOF
         systemctl enable nftables 2>/dev/null || true
         log_info "nftables will be applied on next boot (or run: sudo systemctl start nftables)"
     fi
+
+    # Populate querybot API allowlist sets from DNS (best effort).
+    REFRESH_SCRIPT="${PROJECT_ROOT}/scripts/refresh-api-ipsets.sh"
+    if [[ -f "${REFRESH_SCRIPT}" ]]; then
+        if bash "${REFRESH_SCRIPT}" >/dev/null 2>&1; then
+            log_success "Initialized dynamic querybot API IP sets"
+        else
+            log_warn "Could not initialize dynamic API IP sets (timer will retry later)"
+        fi
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -518,12 +525,12 @@ DO \$\$
 BEGIN
     -- Syncer login role
     IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = '${DB_SYNCER_USER}') THEN
-        CREATE ROLE ${DB_SYNCER_USER} WITH LOGIN PASSWORD '${DB_SYNCER_PASS}';
+        CREATE ROLE ${DB_SYNCER_USER} WITH LOGIN;
     END IF;
 
     -- Querybot login role
     IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = '${DB_QUERYBOT_USER}') THEN
-        CREATE ROLE ${DB_QUERYBOT_USER} WITH LOGIN PASSWORD '${DB_QUERYBOT_PASS}';
+        CREATE ROLE ${DB_QUERYBOT_USER} WITH LOGIN;
     END IF;
 
     -- Abstract roles for permission grouping
@@ -550,6 +557,9 @@ CREATE TABLE IF NOT EXISTS messages (
     chat_id            BIGINT NOT NULL,
     sender_id          BIGINT,
     sender_name        TEXT,
+    reply_to_msg_id    BIGINT,
+    thread_top_msg_id  BIGINT,
+    is_topic_message   BOOLEAN DEFAULT FALSE,
     timestamp          TIMESTAMPTZ NOT NULL,
     text               TEXT,
     raw_json           JSONB,
@@ -571,6 +581,11 @@ CREATE INDEX IF NOT EXISTS idx_messages_fts_simple
     ON messages USING GIN (text_search_vector_simple);
 CREATE INDEX IF NOT EXISTS idx_messages_chat_timestamp
     ON messages (chat_id, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_messages_chat_message_id
+    ON messages (chat_id, message_id DESC);
+CREATE INDEX IF NOT EXISTS idx_messages_chat_thread_timestamp
+    ON messages (chat_id, thread_top_msg_id, timestamp DESC)
+    WHERE thread_top_msg_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_messages_timestamp
     ON messages (timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_embedding
@@ -602,10 +617,14 @@ CREATE TABLE IF NOT EXISTS audit_log (
 );
 
 -- =========================================================================
--- Permissions: syncer_role (INSERT + SELECT on messages/chats, INSERT on audit_log)
--- NOTE: messages are immutable after sync. No UPDATE on messages.
+-- Permissions: syncer_role
+-- - messages: INSERT + SELECT + UPDATE(embedding) only
+-- - chats:    SELECT + INSERT + UPDATE
+-- - audit:    INSERT
+-- NOTE: Message content is immutable after sync; only embedding backfill is writable.
 -- =========================================================================
 GRANT SELECT, INSERT ON messages TO syncer_role;
+GRANT UPDATE (embedding) ON messages TO syncer_role;
 GRANT SELECT, INSERT, UPDATE ON chats TO syncer_role;
 GRANT INSERT ON audit_log TO syncer_role;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO syncer_role;
@@ -731,6 +750,12 @@ deploy_application() {
         chmod +x "${INSTALL_DIR}/scripts/"*.sh "${INSTALL_DIR}/scripts/telenad" 2>/dev/null || true
         ln -sf "${INSTALL_DIR}/scripts/telenad" /usr/local/bin/telenad
         log_success "CLI installed: telenad"
+
+        if systemctl enable --now tg-refresh-api-ipsets.timer >/dev/null 2>&1; then
+            log_success "Enabled tg-refresh-api-ipsets.timer"
+        else
+            log_warn "Could not enable tg-refresh-api-ipsets.timer (enable manually if needed)"
+        fi
     fi
 }
 
@@ -808,9 +833,7 @@ print_summary() {
     echo "  Or continue manually -- see docs/QUICKSTART.md for steps."
     echo ""
 
-    # DB passwords are only needed for the initial role creation above.
-    # Production services use peer auth (Unix socket) — no passwords required.
-    log_info "Database uses peer auth over Unix socket — no password files needed."
+    log_info "Database uses peer auth over Unix socket — no DB passwords are stored."
 }
 
 # ---------------------------------------------------------------------------

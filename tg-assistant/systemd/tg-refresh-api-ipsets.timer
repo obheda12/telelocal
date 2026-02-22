@@ -1,0 +1,12 @@
+[Unit]
+Description=Periodic refresh of tg-assistant querybot API IP allowlists
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=6h
+RandomizedDelaySec=15min
+Persistent=true
+Unit=tg-refresh-api-ipsets.service
+
+[Install]
+WantedBy=timers.target

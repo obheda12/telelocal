@@ -97,6 +97,7 @@ class TestGetSecret:
     def test_credentials_directory_missing_file_falls_through(self, tmp_path, monkeypatch):
         """If credential file doesn't exist, should fall through to next source."""
         monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(tmp_path))
+        monkeypatch.setenv("TG_ASSISTANT_ALLOW_ENV_SECRETS", "1")
         monkeypatch.setenv("TG_ASSISTANT_BOT_TOKEN", "from-env")
         result = get_secret("bot_token")
         assert result == "from-env"
@@ -111,6 +112,7 @@ class TestGetSecret:
 
     def test_env_var_fallback(self, monkeypatch):
         """When secret-tool is not available, should fall back to env var."""
+        monkeypatch.setenv("TG_ASSISTANT_ALLOW_ENV_SECRETS", "1")
         monkeypatch.setenv("TG_ASSISTANT_BOT_TOKEN", "test-token-123")
         # secret-tool won't be found in test environment
         result = get_secret("bot_token")
@@ -118,6 +120,7 @@ class TestGetSecret:
 
     def test_env_var_fallback_with_hyphens(self, monkeypatch):
         """Hyphens in key names should be converted to underscores."""
+        monkeypatch.setenv("TG_ASSISTANT_ALLOW_ENV_SECRETS", "1")
         monkeypatch.setenv("TG_ASSISTANT_SOME_API_KEY", "some-key-abc")
         result = get_secret("some-api-key")
         assert result == "some-key-abc"
@@ -126,6 +129,13 @@ class TestGetSecret:
         """Should raise RuntimeError when secret is nowhere to be found."""
         with pytest.raises(RuntimeError, match="not found"):
             get_secret("nonexistent_key_that_does_not_exist")
+
+    def test_env_var_ignored_when_fallback_disabled(self, monkeypatch):
+        """Env secrets should be rejected unless explicitly enabled."""
+        monkeypatch.delenv("TG_ASSISTANT_ALLOW_ENV_SECRETS", raising=False)
+        monkeypatch.setenv("TG_ASSISTANT_BOT_TOKEN", "test-token-123")
+        with pytest.raises(RuntimeError, match="ALLOW_ENV_SECRETS"):
+            get_secret("bot_token")
 
 
 # ---------------------------------------------------------------------------
@@ -142,12 +152,13 @@ class TestAuditLogger:
         # Mock pool that fails on acquire
         mock_pool = MagicMock()
         mock_conn = AsyncMock()
-        mock_conn.execute = AsyncMock(side_effect=Exception("DB down"))
+        mock_conn.executemany = AsyncMock(side_effect=Exception("DB down"))
         mock_pool.acquire.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
         mock_pool.acquire.return_value.__aexit__ = AsyncMock(return_value=False)
 
         audit = AuditLogger(mock_pool, log_path=log_file)
         await audit.log("syncer", "test_action", {"key": "value"}, success=True)
+        await audit.close()
 
         # File should have been written
         assert log_file.exists()
@@ -173,13 +184,14 @@ class TestAuditLogger:
 
         audit = AuditLogger(mock_pool, log_path=log_file)
         await audit.log("querybot", "query", {"q": "test"}, success=True)
+        await audit.close()
 
         # File should have been written
         assert log_file.exists()
 
         # DB execute should have been called
-        mock_conn.execute.assert_called_once()
-        call_args = mock_conn.execute.call_args
+        mock_conn.executemany.assert_called_once()
+        call_args = mock_conn.executemany.call_args
         assert "INSERT INTO audit_log" in call_args[0][0]
 
 

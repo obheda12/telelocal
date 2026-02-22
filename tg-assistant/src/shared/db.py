@@ -112,6 +112,9 @@ async def init_database(pool: asyncpg.Pool) -> None:
                     chat_id            BIGINT NOT NULL,
                     sender_id          BIGINT,
                     sender_name        TEXT,
+                    reply_to_msg_id    BIGINT,
+                    thread_top_msg_id  BIGINT,
+                    is_topic_message   BOOLEAN DEFAULT FALSE,
                     timestamp          TIMESTAMPTZ NOT NULL,
                     text               TEXT,
                     raw_json           JSONB,
@@ -126,6 +129,20 @@ async def init_database(pool: asyncpg.Pool) -> None:
                         ) STORED,
                     PRIMARY KEY (message_id, chat_id)
                 );
+            """)
+
+            # Forward-compatible upgrades for existing deployments.
+            await conn.execute("""
+                ALTER TABLE messages
+                ADD COLUMN IF NOT EXISTS reply_to_msg_id BIGINT
+            """)
+            await conn.execute("""
+                ALTER TABLE messages
+                ADD COLUMN IF NOT EXISTS thread_top_msg_id BIGINT
+            """)
+            await conn.execute("""
+                ALTER TABLE messages
+                ADD COLUMN IF NOT EXISTS is_topic_message BOOLEAN DEFAULT FALSE
             """)
 
             await conn.execute("""
@@ -169,6 +186,16 @@ async def init_database(pool: asyncpg.Pool) -> None:
             await conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_messages_chat_timestamp
                 ON messages (chat_id, timestamp DESC);
+            """)
+            # Accelerates per-chat high-water-mark lookups used by sync loops.
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_messages_chat_message_id
+                ON messages (chat_id, message_id DESC);
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_messages_chat_thread_timestamp
+                ON messages (chat_id, thread_top_msg_id, timestamp DESC)
+                WHERE thread_top_msg_id IS NOT NULL;
             """)
 
             await conn.execute("""

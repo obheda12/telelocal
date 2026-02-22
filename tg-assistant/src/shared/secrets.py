@@ -7,7 +7,8 @@ Lookup order for secrets (first match wins):
    (production: per-service isolation, root-owned source files in
    ``/etc/credstore/``, never in env vars or config files).
 2. **System keychain** — ``secret-tool lookup`` (libsecret / GNOME Keyring).
-3. **Environment variable** — ``TG_ASSISTANT_<KEY_NAME>`` (development only).
+3. **Environment variable** — ``TG_ASSISTANT_<KEY_NAME>`` when
+   ``TG_ASSISTANT_ALLOW_ENV_SECRETS=1`` (development only).
 
 The Telethon session file is encrypted at rest using Fernet symmetric
 encryption.  It is decrypted into memory only when the syncer starts,
@@ -45,7 +46,7 @@ def get_secret(key_name: str, service: str = "tg-assistant") -> str:
        key <key_name>`` (requires a D-Bus session; works for
        interactive users but not headless system services).
     3. **Environment variable** — ``TG_ASSISTANT_<KEY_NAME>``
-       (development / CI only).
+       when ``TG_ASSISTANT_ALLOW_ENV_SECRETS=1`` (development / CI only).
 
     Args:
         key_name: The key identifier (e.g. ``"bot_token"``,
@@ -100,15 +101,19 @@ def get_secret(key_name: str, service: str = "tg-assistant") -> str:
         )
 
     # 3. Environment variable (development / CI only)
+    allow_env_fallback = os.environ.get("TG_ASSISTANT_ALLOW_ENV_SECRETS", "").lower() in {
+        "1", "true", "yes",
+    }
     env_key = f"TG_ASSISTANT_{key_name.upper().replace('-', '_')}"
     env_val = os.environ.get(env_key)
-    if env_val:
+    if env_val and allow_env_fallback:
         logger.warning("Using env var fallback for secret '%s' (%s)", key_name, env_key)
         return env_val
 
     raise RuntimeError(
         f"Secret '{key_name}' not found in credentials directory, "
-        f"keychain (service={service}), or environment variable {env_key}"
+        f"keychain (service={service}), or environment variable {env_key} "
+        "(env fallback requires TG_ASSISTANT_ALLOW_ENV_SECRETS=1)"
     )
 
 

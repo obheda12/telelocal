@@ -23,6 +23,7 @@ if str(SRC) not in sys.path:
 
 from shared.db import get_connection_pool
 from syncer.embeddings import create_embedding_provider
+from syncer.message_store import MessageStore
 
 logger = logging.getLogger("backfill.embeddings")
 
@@ -52,43 +53,53 @@ async def fetch_missing(
 async def backfill(batch_size: int = 200) -> None:
     config = load_config()
     db_config = dict(config["database"])
-    db_config["user"] = os.environ.get("TG_ASSISTANT_DB_USER") or config["syncer"].get("db_user", "tg_syncer")
+    db_config["user"] = os.environ.get("TG_ASSISTANT_DB_USER") or "postgres"
     pool = await get_connection_pool(db_config)
 
-    embedder = create_embedding_provider(config.get("embeddings", {}))
-    expected_dim = embedder.dimension
-
-    total = 0
-
-    while True:
-        rows = await fetch_missing(pool, batch_size)
-        if not rows:
-            break
-
-        texts = [r[2] for r in rows]
-        try:
-            embeddings = await embedder.batch_generate(texts)
-        except Exception:
-            logger.exception("Embedding batch failed; aborting")
-            break
-
-        for (message_id, chat_id, _), embedding in zip(rows, embeddings):
-            if expected_dim and len(embedding) != expected_dim:
-                raise ValueError(
-                    f"Embedding dimension mismatch: got={len(embedding)} expected={expected_dim}"
-                )
-            await pool.execute(
-                "UPDATE messages SET embedding = $1 WHERE message_id = $2 AND chat_id = $3",
-                embedding,
-                message_id,
-                chat_id,
+    try:
+        can_update = await pool.fetchval(
+            "SELECT has_table_privilege(current_user, 'messages', 'UPDATE')"
+        )
+        if not can_update:
+            raise PermissionError(
+                "Current DB role cannot UPDATE messages. "
+                "Re-run with TG_ASSISTANT_DB_USER=postgres or a migration role."
             )
 
-        total += len(rows)
-        logger.info("Backfilled %d embeddings", total)
+        embedder = create_embedding_provider(config.get("embeddings", {}))
+        expected_dim = embedder.dimension
+        store = MessageStore(pool, embedding_dim=expected_dim)
 
-    await pool.close()
-    logger.info("Backfill complete. Total updated: %d", total)
+        total = 0
+
+        while True:
+            rows = await fetch_missing(pool, batch_size)
+            if not rows:
+                break
+
+            texts = [r[2] for r in rows]
+            try:
+                embeddings = await embedder.batch_generate(texts)
+            except Exception:
+                logger.exception("Embedding batch failed; aborting")
+                break
+
+            updates: list[tuple[list[float], int, int]] = []
+            for (message_id, chat_id, _), embedding in zip(rows, embeddings):
+                if expected_dim and len(embedding) != expected_dim:
+                    raise ValueError(
+                        f"Embedding dimension mismatch: got={len(embedding)} expected={expected_dim}"
+                    )
+                updates.append((embedding, message_id, chat_id))
+
+            updated = await store.update_embeddings_batch(updates)
+
+            total += updated
+            logger.info("Backfilled %d embeddings", total)
+
+        logger.info("Backfill complete. Total updated: %d", total)
+    finally:
+        await pool.close()
 
 
 def run() -> None:

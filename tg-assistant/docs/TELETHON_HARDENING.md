@@ -108,10 +108,10 @@ ALLOWED_METHODS: FrozenSet[str] = frozenset({
 })
 
 class ReadOnlyTelegramClient:
-    def __getattr__(self, name: str) -> Any:
+    def __getattribute__(self, name: str) -> Any:
         if name not in ALLOWED_METHODS:
             raise PermissionError(f"Method '{name}' blocked. Read-only mode.")
-        return getattr(self._client, name)
+        return getattr(underlying_client, name)
 
     def __setattr__(self, name, value):  # Immutable
         raise PermissionError("Wrapper is immutable.")
@@ -129,9 +129,9 @@ Every blocked call is logged as a security event. Full implementation: `src/sync
 
 With a blocklist, you race against Telethon's changelog. With an allowlist, **default is deny**.
 
-### Known Bypass
+### Residual Bypass Risk
 
-The wrapper can be bypassed via `client._client` (direct attribute access). Detectable via code review and import linting. The wrapper defends against bugs and compromised dependencies — source code modification is mitigated by `ProtectSystem=strict`.
+The wrapper now keeps the underlying Telethon object outside instance attributes, so direct `client._client` extraction is blocked. Residual risk remains if an attacker can execute arbitrary Python in-process and introspect module internals. This control is still one layer in defense in depth; kernel/network/systemd isolation remain required.
 
 ---
 
@@ -287,7 +287,7 @@ Alerts go to `/var/log/tg-assistant/security-alerts.log` and systemd journal (CR
 1. **Terminate ALL other sessions** from your phone (only trusted device)
 2. Change 2FA password
 3. `sudo systemctl stop tg-syncer`
-4. If Pi was compromised: rotate ALL credentials (session, bot token, Claude API key, DB passwords, Fernet key)
+4. If Pi was compromised: rotate ALL credentials (session, bot token, Claude API key, Telegram API ID/hash, Fernet key)
 
 ### Repeated FloodWaitErrors
 

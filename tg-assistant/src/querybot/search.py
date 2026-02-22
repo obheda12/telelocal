@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -41,6 +43,9 @@ class SearchResult:
     timestamp: str
     text: str
     score: float
+    reply_to_msg_id: Optional[int] = None
+    thread_top_msg_id: Optional[int] = None
+    is_topic_message: bool = False
 
 
 @dataclass
@@ -65,12 +70,42 @@ class MessageSearch:
         self,
         pool: asyncpg.Pool,
         embedding_provider: EmbeddingProvider,
+        *,
+        hybrid_min_terms: int = 2,
+        hybrid_min_term_length: int = 3,
     ) -> None:
         self._pool = pool
         self._embedder = embedding_provider
+        self._hybrid_min_terms = max(1, hybrid_min_terms)
+        self._hybrid_min_term_length = max(1, hybrid_min_term_length)
         # Chat list cache
         self._chat_cache: Optional[List[Dict[str, Any]]] = None
         self._chat_cache_time: float = 0.0
+        # Query-embedding cache for repeated prompts.
+        self._embedding_cache: "OrderedDict[str, List[float]]" = OrderedDict()
+        self._embedding_cache_max = 256
+
+    def _should_use_hybrid(self, search_terms: str) -> bool:
+        """Use vector+FTS only for multi-term queries where it adds value."""
+        tokens = [
+            tok
+            for tok in re.findall(r"[A-Za-z0-9_]+", search_terms.lower())
+            if len(tok) >= self._hybrid_min_term_length
+        ]
+        return len(tokens) >= self._hybrid_min_terms
+
+    async def _get_query_embedding(self, text: str) -> List[float]:
+        key = " ".join(text.split()).strip().lower()
+        if key in self._embedding_cache:
+            emb = self._embedding_cache.pop(key)
+            self._embedding_cache[key] = emb
+            return emb
+
+        emb = await self._embedder.generate_embedding(text)
+        self._embedding_cache[key] = emb
+        if len(self._embedding_cache) > self._embedding_cache_max:
+            self._embedding_cache.popitem(last=False)
+        return emb
 
     def _append_filter_conditions(
         self,
@@ -114,7 +149,7 @@ class MessageSearch:
         missing_rank = fetch_limit + 1
 
         try:
-            query_embedding = await self._embedder.generate_embedding(search_terms)
+            query_embedding = await self._get_query_embedding(search_terms)
         except Exception:
             logger.warning("Embedding generation failed; falling back to filtered FTS", exc_info=True)
             return await self._filtered_fts_search(
@@ -193,6 +228,7 @@ class MessageSearch:
                 SELECT message_id, chat_id FROM vec
             )
             SELECT m.message_id, m.chat_id, c.title, m.sender_name,
+                   m.reply_to_msg_id, m.thread_top_msg_id, m.is_topic_message,
                    m.timestamp, m.text,
                    (
                        ${fts_weight_idx}::float8
@@ -252,6 +288,7 @@ class MessageSearch:
         limit_idx = len(params)
         sql = f"""
             SELECT m.message_id, m.chat_id, c.title, m.sender_name,
+                   m.reply_to_msg_id, m.thread_top_msg_id, m.is_topic_message,
                    m.timestamp, m.text,
                    {score_expr} AS score
             FROM messages m
@@ -301,7 +338,11 @@ class MessageSearch:
         has_fts = bool(search_terms and search_terms.strip())
 
         # Fast path for semantic relevance with a single DB roundtrip.
-        if has_fts and self._embedder.dimension:
+        if (
+            has_fts
+            and self._embedder.dimension
+            and self._should_use_hybrid(search_terms or "")
+        ):
             return await self._filtered_hybrid_search(
                 search_terms=search_terms or "",
                 chat_ids=chat_ids,
@@ -340,6 +381,7 @@ class MessageSearch:
 
         sql = f"""
             SELECT m.message_id, m.chat_id, c.title, m.sender_name,
+                   m.reply_to_msg_id, m.thread_top_msg_id, m.is_topic_message,
                    m.timestamp, m.text,
                    {score_expr} AS score
             FROM messages m
@@ -369,6 +411,7 @@ class MessageSearch:
         rows = await self._pool.fetch(
             """
             SELECT m.message_id, m.chat_id, c.title, m.sender_name,
+                   m.reply_to_msg_id, m.thread_top_msg_id, m.is_topic_message,
                    m.timestamp, m.text,
                    GREATEST(
                        ts_rank(m.text_search_vector, query),
@@ -401,11 +444,12 @@ class MessageSearch:
         if not self._embedder.dimension:
             return []
 
-        query_embedding = await self._embedder.generate_embedding(query)
+        query_embedding = await self._get_query_embedding(query)
 
         rows = await self._pool.fetch(
             """
             SELECT m.message_id, m.chat_id, c.title, m.sender_name,
+                   m.reply_to_msg_id, m.thread_top_msg_id, m.is_topic_message,
                    m.timestamp, m.text,
                    1 - (m.embedding <=> $1::vector) AS score
             FROM messages m
@@ -506,6 +550,9 @@ class MessageSearch:
                 timestamp=row["timestamp"].isoformat() if row["timestamp"] else "",
                 text=row["text"] or "",
                 score=float(row["score"]),
+                reply_to_msg_id=row["reply_to_msg_id"],
+                thread_top_msg_id=row["thread_top_msg_id"],
+                is_topic_message=bool(row["is_topic_message"]),
             )
             for row in rows
         ]

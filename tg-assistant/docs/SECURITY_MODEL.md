@@ -69,8 +69,8 @@ flowchart LR
 
 | Container | Technology | Role | Credentials Held |
 |-----------|-----------|------|-----------------|
-| **tg-syncer** | Telethon (MTProto) | Sync ALL user messages to local DB | Telethon session (encrypted), DB password (syncer_role) |
-| **tg-querybot** | python-telegram-bot + Claude API | Owner-only query interface | Bot token, Claude API key, DB password (querybot_role) |
+| **tg-syncer** | Telethon (MTProto) | Sync ALL user messages to local DB | Telethon session (encrypted), session encryption key |
+| **tg-querybot** | python-telegram-bot + Claude API | Owner-only query interface | Bot token, Claude API key |
 | **PostgreSQL** | PostgreSQL 15/16 + pgvector | Message storage, embeddings, audit | DB superuser (local management only) |
 
 No service has more access than it needs. No credential is shared between services. Network restrictions are kernel-level (nftables). Telethon session is encrypted at rest with the key in the system keychain.
@@ -156,7 +156,7 @@ Security does not depend on any single control. An attacker must defeat multiple
 | 2 | **Systemd Hardening** | Each service runs under a dedicated system user with `NoNewPrivileges=true`, `ProtectSystem=strict`, `ProtectHome=true`, `PrivateTmp=true`, `CapabilityBoundingSet=` (empty -- all capabilities dropped), `SystemCallFilter=@system-service`, `MemoryDenyWriteExecute=true` | Privilege escalation from compromised service, writing to system directories, gaining new capabilities, executing shellcode in writable memory | Linux kernel exploit that bypasses seccomp/capabilities |
 | 3 | **Network / nftables** | Per-UID nftables rules restrict each process to specific destination IPs and ports. Rules are enforced at the kernel's netfilter layer, not in userspace. | Data exfiltration to attacker-controlled servers, C2 communication, lateral movement to LAN hosts, credential exfiltration via DNS/HTTP | Kernel-level exploit that bypasses netfilter, or compromise of an allowed destination (Telegram/Anthropic infrastructure) |
 | 4 | **Process Isolation** | Three separate OS processes, three separate system users, three separate database roles. No shared memory, no shared credentials, no shared filesystem paths (beyond read-only system libraries). | Lateral movement between services -- compromise of the querybot does not grant access to the Telethon session; compromise of the syncer does not grant access to the Claude API key | Kernel exploit enabling cross-user memory access, or compromise of a shared resource (PostgreSQL) |
-| 5 | **Read-Only Wrapper** | The Telethon client is wrapped in `ReadOnlyTelegramClient` which uses an **allowlist** (not blocklist) of permitted methods. Any method not explicitly in `ALLOWED_METHODS` raises `PermissionError`. New Telethon methods added in future versions are blocked by default. | Accidental or malicious use of Telethon write methods (`send_message`, `edit_message`, `delete_messages`, `forward_messages`, etc.) -- the wrapper prevents the syncer from modifying any Telegram state | Python runtime exploit that bypasses the wrapper (e.g., directly accessing `self._client` via object introspection), or modification of the wrapper source code (mitigated by `ProtectSystem=strict`) |
+| 5 | **Read-Only Wrapper** | The Telethon client is wrapped in `ReadOnlyTelegramClient` which uses an **allowlist** (not blocklist) of permitted methods. Any method not explicitly in `ALLOWED_METHODS` raises `PermissionError`. New Telethon methods added in future versions are blocked by default. | Accidental or malicious use of Telethon write methods (`send_message`, `edit_message`, `delete_messages`, `forward_messages`, etc.) -- the wrapper prevents the syncer from modifying any Telegram state | Python runtime exploit that bypasses the wrapper via in-process introspection, or modification of the wrapper source code (mitigated by `ProtectSystem=strict`) |
 | 6 | **Credential Isolation** | All service credentials (bot token, Claude API key, session encryption key) are **encrypted at rest** using `systemd-creds encrypt`, which binds each credential to a machine-specific key (`/var/lib/systemd/credential.secret`). Encrypted blobs live in `/etc/credstore.encrypted/` (root:root 0600); plaintext exists **only in RAM** on a private tmpfs mount during service runtime. Each service receives only its own credentials via `LoadCredentialEncrypted=` — the querybot cannot access the session key, and the syncer cannot access the bot token. DB auth uses Unix socket peer authentication (kernel-verified identity, no passwords at all). The Telethon session file is additionally encrypted with Fernet (AES-128-CBC + HMAC-SHA256). | Credential theft from disk (stolen SD card gives only encrypted blobs, useless without the machine key), credential leakage via environment variables (never used), credential exposure in config files or version control (no secrets in config), cross-service credential access (systemd per-service injection) | Root access on the running system (can read `/run/credentials/` tmpfs or decrypt using the machine key), **or** physical SD card theft combined with extraction of the machine key from the same card (mitigated by LUKS full-disk encryption — see Appendix E) |
 | 7 | **LLM Boundary Hardening** | Untrusted synced messages are wrapped in XML boundary markers (`<message_context trust_level="untrusted">`) before reaching Claude. All user-controlled fields (sender names, chat titles, message text) are HTML-escaped to prevent tag injection. The system prompt establishes a 4-level trust hierarchy where synced content is the lowest level. `ContentSanitizer` detects known injection patterns (LLM tokens like `[INST]`/`<\|im_start\|>`, canonical override phrases, null bytes) and logs warnings with message metadata. `InputValidator` rejects malformed user queries (oversized, null bytes) before they enter the pipeline. Both are stdlib-only and add <0.1ms latency. | Prompt injection via synced messages (T2), LLM reasoning manipulation (T11) -- boundary markers make the trust boundary explicit to Claude; escaping prevents boundary escape via crafted chat titles or message text; pattern detection provides alerting for known attack signatures | Novel injection techniques that don't match known patterns and that Claude follows despite boundary markers and system prompt instructions. No deterministic defense exists for LLM manipulation; this layer reduces attack surface and provides detection, not a guarantee. |
 | 8 | **Audit** | Every Telegram API call, every database query, every Claude API request, and every bot interaction is logged to a structured JSON audit log. The audit table in PostgreSQL is append-only (both roles have INSERT but not UPDATE/DELETE on `audit_log`). Injection detection warnings are counted and included in query audit entries (`injection_warnings_count`). | Undetected compromise, post-incident forensic gaps, attribution failure | Deletion of log files (mitigated by append-only DB table and separate log file rotation), or compromise of both the application and the audit infrastructure simultaneously |
@@ -229,8 +229,16 @@ Network restrictions are enforced by nftables at the kernel's netfilter layer. T
 
 ### 7.1 nftables Rules
 
-```
-table inet tg_assistant {
+```nft
+table inet tg_assistant_isolation {
+    set querybot_api_ipv4 {
+        type ipv4_addr
+        flags interval
+    }
+    set querybot_api_ipv6 {
+        type ipv6_addr
+        flags interval
+    }
 
     chain output {
         type filter hook output priority 0; policy accept;
@@ -241,42 +249,34 @@ table inet tg_assistant {
         # --- Allow established/related connections ---
         ct state established,related accept
 
-        # --- Allow DNS for all service users ---
-        meta skuid { "tg-syncer", "tg-querybot" } udp dport 53 accept
-        meta skuid { "tg-syncer", "tg-querybot" } tcp dport 53 accept
+        # --- Allow DNS only to configured resolvers ---
+        # resolver sets are refreshed from /etc/resolv.conf
+        meta skuid { "tg-syncer", "tg-querybot" } ip daddr @dns_resolver_ipv4 udp dport 53 accept
+        meta skuid { "tg-syncer", "tg-querybot" } ip daddr @dns_resolver_ipv4 tcp dport 53 accept
+        meta skuid { "tg-syncer", "tg-querybot" } ip6 daddr @dns_resolver_ipv6 udp dport 53 accept
+        meta skuid { "tg-syncer", "tg-querybot" } ip6 daddr @dns_resolver_ipv6 tcp dport 53 accept
 
         # ==========================================================
         # tg-syncer: ONLY Telegram MTProto DCs
         # ==========================================================
         # Telegram DC IP ranges (MTProto binary protocol)
-        meta skuid "tg-syncer" ip daddr 149.154.160.0/20 tcp dport { 80, 443 } accept
-        meta skuid "tg-syncer" ip daddr 91.108.0.0/16 tcp dport { 80, 443 } accept
+        meta skuid "tg-syncer" ip daddr 149.154.160.0/20 tcp dport 443 accept
+        meta skuid "tg-syncer" ip daddr 91.108.0.0/16 tcp dport 443 accept
 
         # Block everything else for tg-syncer
         meta skuid "tg-syncer" counter drop
 
         # ==========================================================
-        # tg-querybot: ONLY Telegram Bot API + Anthropic API
+        # tg-querybot: ONLY DNS-resolved API destinations
         # ==========================================================
-        # api.telegram.org resolves within 149.154.160.0/20
-        meta skuid "tg-querybot" ip daddr 149.154.160.0/20 tcp dport 443 accept
-
-        # api.anthropic.com (resolved IPs -- update periodically)
-        # Anthropic uses CloudFront; these ranges cover current endpoints
-        meta skuid "tg-querybot" ip daddr 104.18.0.0/16 tcp dport 443 accept
-        meta skuid "tg-querybot" ip daddr 172.64.0.0/13 tcp dport 443 accept
+        # querybot_api_ipv4/querybot_api_ipv6 are refreshed by:
+        #   tg-refresh-api-ipsets.service + tg-refresh-api-ipsets.timer
+        # from DNS answers for api.telegram.org + api.anthropic.com.
+        meta skuid "tg-querybot" ip daddr @querybot_api_ipv4 tcp dport 443 accept
+        meta skuid "tg-querybot" ip6 daddr @querybot_api_ipv6 tcp dport 443 accept
 
         # Block everything else for tg-querybot
         meta skuid "tg-querybot" counter drop
-
-        # ==========================================================
-        # PostgreSQL: localhost only (no internet access)
-        # ==========================================================
-        # postgres user has no outbound rules -- default policy is
-        # accept, but postgres only binds to 127.0.0.1 (pg_hba.conf)
-        # and has no reason to make outbound connections.
-        # Explicit drop for safety:
-        meta skuid "postgres" ip daddr != 127.0.0.0/8 counter drop
     }
 }
 ```
@@ -285,8 +285,8 @@ table inet tg_assistant {
 
 | Service | User | Allowed Destinations | Allowed Ports | Protocol | Everything Else |
 |---------|------|---------------------|---------------|----------|----------------|
-| **tg-syncer** | `tg-syncer` | `149.154.160.0/20` (Telegram DC1-5), `91.108.0.0/16` (Telegram DC, CDN) | 443, 80 | TCP (MTProto over TCP) | **DROPPED** at kernel |
-| **tg-querybot** | `tg-querybot` | `149.154.160.0/20` (api.telegram.org), `104.18.0.0/16` + `172.64.0.0/13` (api.anthropic.com via CloudFront) | 443 | TCP (HTTPS) | **DROPPED** at kernel |
+| **tg-syncer** | `tg-syncer` | `149.154.160.0/20` + `91.108.0.0/16` (Telegram DC ranges) | 443 | TCP (MTProto over TCP) | **DROPPED** at kernel |
+| **tg-querybot** | `tg-querybot` | DNS-refreshed IP sets for `api.telegram.org` + `api.anthropic.com` | 443 | TCP (HTTPS) | **DROPPED** at kernel |
 | **PostgreSQL** | `postgres` | `127.0.0.0/8` (localhost only) | 5432 (listening) | TCP | **DROPPED** at kernel |
 
 ### 7.3 What Network Restrictions Prevent
@@ -298,14 +298,14 @@ table inet tg_assistant {
 | Compromised service scans local network | Possible | **Blocked** -- no LAN destinations allowed |
 | Compromised service downloads additional payloads | Possible | **Blocked** -- no arbitrary internet access |
 | Compromised service establishes reverse shell | Possible | **Blocked** -- no arbitrary outbound connections |
-| DNS exfiltration (encoding data in DNS queries) | **Possible** -- DNS is allowed | Partially mitigated: monitor DNS query logs for anomalous patterns |
+| DNS exfiltration (encoding data in DNS queries) | Harder (restricted to resolver allowlist, not arbitrary DNS hosts) | Monitor DNS query logs for anomalous patterns |
 
 ### 7.4 DNS Considerations
 
-DNS (port 53) must be allowed for hostname resolution of `api.telegram.org` and `api.anthropic.com`. This creates a residual risk: a compromised process could theoretically exfiltrate small amounts of data via DNS queries (DNS tunneling). Mitigations:
+DNS (port 53) must be allowed for hostname resolution of `api.telegram.org` and `api.anthropic.com`. DNS egress is restricted to resolver IPs discovered from `/etc/resolv.conf` (loaded into nft sets by `refresh-api-ipsets.sh`). Residual risk remains: a compromised process could still attempt DNS tunneling through those allowed resolvers. Mitigations:
 
 1. **Monitor DNS query logs** via the `monitor-network.sh` script
-2. **Future hardening**: Replace general DNS access with a local DNS stub that only resolves the specific hostnames needed (`api.telegram.org`, `api.anthropic.com`) and drops all other queries
+2. **Tighten resolver policy**: use a dedicated local resolver/stub for the host and keep `/etc/resolv.conf` minimal (single trusted resolver)
 
 ---
 
@@ -321,19 +321,20 @@ PostgreSQL enforces access control through two application-specific roles. Neith
 -- Used by: tg-syncer service
 -- Purpose: Write messages from Telegram, read for deduplication
 -- =============================================================
-CREATE ROLE syncer_role LOGIN PASSWORD '...';
+CREATE ROLE syncer_role;
 
--- Can INSERT new messages and SELECT for deduplication checks
+-- Can INSERT new messages, SELECT for deduplication checks,
+-- and UPDATE embedding column for deferred embedding backfill.
 GRANT INSERT, SELECT ON TABLE messages TO syncer_role;
-GRANT INSERT, SELECT ON TABLE chats TO syncer_role;
-GRANT USAGE, SELECT ON SEQUENCE messages_id_seq TO syncer_role;
-GRANT USAGE, SELECT ON SEQUENCE chats_id_seq TO syncer_role;
+GRANT UPDATE (embedding) ON TABLE messages TO syncer_role;
+GRANT INSERT, SELECT, UPDATE ON TABLE chats TO syncer_role;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO syncer_role;
 
 -- Can INSERT audit log entries (append-only)
 GRANT INSERT ON TABLE audit_log TO syncer_role;
-GRANT USAGE, SELECT ON SEQUENCE audit_log_id_seq TO syncer_role;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO syncer_role;
 
--- CANNOT update or delete messages
+-- CANNOT update message text/metadata or delete messages
 -- CANNOT modify schema
 -- CANNOT access other tables
 
@@ -342,7 +343,7 @@ GRANT USAGE, SELECT ON SEQUENCE audit_log_id_seq TO syncer_role;
 -- Used by: tg-querybot service
 -- Purpose: Read messages for search, write audit entries
 -- =============================================================
-CREATE ROLE querybot_role LOGIN PASSWORD '...';
+CREATE ROLE querybot_role;
 
 -- Can SELECT messages for full-text and vector search
 GRANT SELECT ON TABLE messages TO querybot_role;
@@ -350,7 +351,7 @@ GRANT SELECT ON TABLE chats TO querybot_role;
 
 -- Can INSERT audit log entries (append-only)
 GRANT INSERT ON TABLE audit_log TO querybot_role;
-GRANT USAGE, SELECT ON SEQUENCE audit_log_id_seq TO querybot_role;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO querybot_role;
 
 -- CANNOT insert, update, or delete messages
 -- CANNOT modify schema
@@ -363,7 +364,8 @@ GRANT USAGE, SELECT ON SEQUENCE audit_log_id_seq TO querybot_role;
 |-----------|:-----------:|:-------------:|-----------|
 | `SELECT` on `messages` | YES | YES | Syncer needs it for deduplication; querybot needs it for search |
 | `INSERT` on `messages` | YES | **NO** | Only the syncer writes messages |
-| `UPDATE` on `messages` | **NO** | **NO** | Messages are immutable after sync |
+| `UPDATE` on `messages.embedding` | YES | **NO** | Deferred embedding backfill by syncer only |
+| `UPDATE` on `messages` other columns | **NO** | **NO** | Message content is immutable after sync |
 | `DELETE` on `messages` | **NO** | **NO** | Messages are never deleted by the application |
 | `SELECT` on `chats` | YES | YES | Both need chat metadata |
 | `INSERT` on `chats` | YES | **NO** | Only the syncer creates chat records |
@@ -375,7 +377,7 @@ GRANT USAGE, SELECT ON SEQUENCE audit_log_id_seq TO querybot_role;
 
 ### 8.3 Security Implications
 
-A fully compromised querybot can read messages and write audit entries (benign), but **cannot** modify/delete messages, insert fakes, alter schema, or access the Telethon session. A compromised syncer can insert/read messages but cannot delete/update them, alter schema, or access querybot credentials.
+A fully compromised querybot can read messages and write audit entries (benign), but **cannot** modify/delete messages, insert fakes, alter schema, or access the Telethon session. A compromised syncer can insert/read messages and modify only `messages.embedding`, but cannot change message text, delete rows, alter schema, or access querybot credentials.
 
 ### 8.4 PostgreSQL Network Binding
 
@@ -385,11 +387,9 @@ PostgreSQL listens on `127.0.0.1` only. nftables provides a second layer: even i
 # postgresql.conf
 listen_addresses = 'localhost'
 
-# pg_hba.conf -- only local connections, password-authenticated
-local   tg_assistant    syncer_role                     scram-sha-256
-local   tg_assistant    querybot_role                   scram-sha-256
-host    tg_assistant    syncer_role     127.0.0.1/32    scram-sha-256
-host    tg_assistant    querybot_role   127.0.0.1/32    scram-sha-256
+# pg_hba.conf -- local peer auth mapped from system users
+local   tg_assistant    tg_syncer       peer map=tg-assistant
+local   tg_assistant    tg_querybot     peer map=tg-assistant
 ```
 
 ---
@@ -516,7 +516,7 @@ This section catalogs all identified threats using the STRIDE methodology. Each 
 | **Description** | A malicious update to a Python dependency (Telethon, python-telegram-bot, anthropic, asyncpg, etc.) introduces a backdoor that executes within the compromised service's permissions. |
 | **Severity** | **MEDIUM** |
 | **Mitigation** | All dependency versions pinned in `requirements.txt`. Virtual environments isolate packages per service. nftables limits what a compromised process can reach (kernel-level). systemd hardening limits what a compromised process can do (no privilege escalation, restricted syscalls, read-only filesystem). Audit logging captures anomalous behavior. |
-| **Residual Risk** | A compromised dependency running within `tg-syncer` could access the in-memory Telethon session. nftables prevents exfiltration to non-Telegram destinations, but the read-only wrapper could theoretically be bypassed by direct access to `self._client`. |
+| **Residual Risk** | A compromised dependency running within `tg-syncer` could access the in-memory Telethon session. nftables prevents exfiltration to non-Telegram destinations, but the read-only wrapper could still be bypassed by advanced in-process introspection. |
 
 ### T11: LLM Reasoning Manipulation
 

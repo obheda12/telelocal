@@ -5,8 +5,9 @@ Uses ``asyncpg`` for async database access.  All queries use parameterized
 placeholders ($1, $2, ...) — **never** string interpolation — to prevent
 SQL injection.
 
-The syncer's DB role (``syncer_role``) has INSERT and SELECT privileges
-only; it cannot UPDATE or DELETE message rows.
+The syncer's DB role (``syncer_role``) has INSERT and SELECT privileges,
+plus optional UPDATE on the ``embedding`` column only (for deferred
+embedding backfill). It cannot UPDATE message text/metadata or DELETE rows.
 """
 
 from __future__ import annotations
@@ -20,9 +21,12 @@ import asyncpg
 logger = logging.getLogger("syncer.message_store")
 
 _INSERT_SQL = """
-    INSERT INTO messages (message_id, chat_id, sender_id, sender_name,
-                          timestamp, text, raw_json, embedding)
-    VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)
+    INSERT INTO messages (
+        message_id, chat_id, sender_id, sender_name,
+        reply_to_msg_id, thread_top_msg_id, is_topic_message,
+        timestamp, text, raw_json, embedding
+    )
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11)
     ON CONFLICT (message_id, chat_id) DO NOTHING
 """
 
@@ -30,8 +34,15 @@ _UPSERT_CHAT_SQL = """
     INSERT INTO chats (chat_id, title, chat_type, participant_count, updated_at)
     VALUES ($1, $2, $3, $4, NOW())
     ON CONFLICT (chat_id)
-    DO UPDATE SET title = $2, chat_type = $3, participant_count = $4,
-                  updated_at = NOW()
+    DO UPDATE SET
+        title = EXCLUDED.title,
+        chat_type = EXCLUDED.chat_type,
+        participant_count = EXCLUDED.participant_count,
+        updated_at = NOW()
+    WHERE
+        chats.title IS DISTINCT FROM EXCLUDED.title
+        OR chats.chat_type IS DISTINCT FROM EXCLUDED.chat_type
+        OR chats.participant_count IS DISTINCT FROM EXCLUDED.participant_count
 """
 
 
@@ -48,6 +59,8 @@ class MessageStore:
         self._pool = pool
         self._embedding_dim = embedding_dim
         self._batch_insert_sql_cache: Dict[int, str] = {}
+        self._batch_insert_returning_sql_cache: Dict[int, str] = {}
+        self._batch_update_embedding_sql_cache: Dict[int, str] = {}
 
     # ------------------------------------------------------------------
     # Write operations (syncer_role needs INSERT on messages table)
@@ -73,6 +86,9 @@ class MessageStore:
             msg["chat_id"],
             msg.get("sender_id"),
             msg.get("sender_name"),
+            msg.get("reply_to_msg_id"),
+            msg.get("thread_top_msg_id"),
+            bool(msg.get("is_topic_message", False)),
             msg["timestamp"],
             msg.get("text"),
             raw_json,
@@ -104,20 +120,7 @@ class MessageStore:
         row_count = len(messages)
         sql = self._batch_insert_sql_cache.get(row_count)
         if sql is None:
-            row_width = 8  # message_id, chat_id, sender_id, sender_name, timestamp, text, raw_json, embedding
-            values_sql: List[str] = []
-            for idx in range(row_count):
-                base = idx * row_width
-                placeholders = ", ".join(
-                    f"${base + i}" for i in range(1, row_width + 1)
-                )
-                values_sql.append(f"({placeholders})")
-            sql = (
-                "INSERT INTO messages (message_id, chat_id, sender_id, sender_name, "
-                "timestamp, text, raw_json, embedding) VALUES "
-                + ", ".join(values_sql)
-                + " ON CONFLICT (message_id, chat_id) DO NOTHING"
-            )
+            sql = self._build_batch_insert_sql(row_count, returning=False)
             self._batch_insert_sql_cache[row_count] = sql
 
         async with self._pool.acquire() as conn:
@@ -137,6 +140,123 @@ class MessageStore:
         logger.debug("Batch insert: %d/%d new rows", inserted, len(messages))
         return inserted
 
+    async def store_messages_batch_returning(
+        self,
+        messages: List[Dict[str, Any]],
+    ) -> List[tuple[int, int, str]]:
+        """Insert a batch and return newly inserted rows that have text.
+
+        Returns:
+            List of ``(message_id, chat_id, text)`` for rows actually inserted.
+            This is used by deferred embedding mode to avoid embedding rows that
+            already existed in the database.
+        """
+        if not messages:
+            return []
+
+        row_count = len(messages)
+        sql = self._batch_insert_returning_sql_cache.get(row_count)
+        if sql is None:
+            sql = self._build_batch_insert_sql(row_count, returning=True)
+            self._batch_insert_returning_sql_cache[row_count] = sql
+
+        text_by_key: Dict[tuple[int, int], str] = {}
+        params: List[Any] = []
+        for msg in messages:
+            row_params = self._msg_params(msg)
+            params.extend(row_params)
+            text = msg.get("text")
+            if text:
+                text_by_key[(int(msg["message_id"]), int(msg["chat_id"]))] = str(text)
+
+        rows = await self._pool.fetch(sql, *params)
+        inserted_with_text: List[tuple[int, int, str]] = []
+        for row in rows:
+            message_id = int(row["message_id"])
+            chat_id = int(row["chat_id"])
+            text = text_by_key.get((message_id, chat_id))
+            if text:
+                inserted_with_text.append((message_id, chat_id, text))
+
+        logger.debug(
+            "Batch insert returning: %d inserted, %d with text",
+            len(rows),
+            len(inserted_with_text),
+        )
+        return inserted_with_text
+
+    def _build_batch_insert_sql(self, row_count: int, returning: bool) -> str:
+        row_width = 11
+        values_sql: List[str] = []
+        for idx in range(row_count):
+            base = idx * row_width
+            placeholders = ", ".join(
+                f"${base + i}" for i in range(1, row_width + 1)
+            )
+            values_sql.append(f"({placeholders})")
+        sql = (
+            "INSERT INTO messages ("
+            "message_id, chat_id, sender_id, sender_name, "
+            "reply_to_msg_id, thread_top_msg_id, is_topic_message, "
+            "timestamp, text, raw_json, embedding"
+            ") VALUES "
+            + ", ".join(values_sql)
+            + " ON CONFLICT (message_id, chat_id) DO NOTHING"
+        )
+        if returning:
+            sql += " RETURNING message_id, chat_id"
+        return sql
+
+    async def update_embeddings_batch(
+        self,
+        rows: List[tuple[list[float], int, int]],
+    ) -> int:
+        """Backfill embeddings for existing rows.
+
+        Args:
+            rows: ``[(embedding, message_id, chat_id), ...]``.
+
+        Returns:
+            Number of rows updated.
+        """
+        if not rows:
+            return 0
+
+        row_count = len(rows)
+        sql = self._batch_update_embedding_sql_cache.get(row_count)
+        if sql is None:
+            row_width = 3  # embedding, message_id, chat_id
+            values_sql: List[str] = []
+            for idx in range(row_count):
+                base = idx * row_width
+                placeholders = ", ".join(
+                    f"${base + i}" for i in range(1, row_width + 1)
+                )
+                values_sql.append(f"({placeholders})")
+
+            sql = (
+                "UPDATE messages AS m SET embedding = v.embedding "
+                "FROM (VALUES "
+                + ", ".join(values_sql)
+                + ") AS v(embedding, message_id, chat_id) "
+                "WHERE m.message_id = v.message_id "
+                "AND m.chat_id = v.chat_id "
+                "AND m.embedding IS NULL"
+            )
+            self._batch_update_embedding_sql_cache[row_count] = sql
+
+        params: List[Any] = []
+        for embedding, message_id, chat_id in rows:
+            params.extend((embedding, message_id, chat_id))
+
+        status = await self._pool.execute(sql, *params)
+        try:
+            updated = int(status.rsplit(" ", 1)[-1])
+        except (ValueError, IndexError):
+            logger.debug("Unexpected UPDATE status string: %s", status)
+            updated = 0
+        return updated
+
     # ------------------------------------------------------------------
     # Read operations (syncer_role needs SELECT on messages table)
     # ------------------------------------------------------------------
@@ -149,7 +269,13 @@ class MessageStore:
             been synced.
         """
         return await self._pool.fetchval(
-            "SELECT MAX(message_id) FROM messages WHERE chat_id = $1",
+            """
+            SELECT message_id
+            FROM messages
+            WHERE chat_id = $1
+            ORDER BY message_id DESC
+            LIMIT 1
+            """,
             chat_id,
         )
 
@@ -159,10 +285,12 @@ class MessageStore:
             return {}
         rows = await self._pool.fetch(
             """
-            SELECT chat_id, MAX(message_id) AS last_message_id
+            SELECT DISTINCT ON (chat_id)
+                   chat_id,
+                   message_id AS last_message_id
             FROM messages
             WHERE chat_id = ANY($1::bigint[])
-            GROUP BY chat_id
+            ORDER BY chat_id, message_id DESC
             """,
             chat_ids,
         )

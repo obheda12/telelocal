@@ -15,6 +15,7 @@ Key behaviours:
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import Any, Dict
 
@@ -44,7 +45,9 @@ from syncer.embeddings import create_embedding_provider
 
 logger = logging.getLogger("querybot.main")
 
-_DEFAULT_CONFIG_PATH = Path("/etc/tg-assistant/settings.toml")
+_DEFAULT_CONFIG_PATH = Path(
+    os.environ.get("TG_ASSISTANT_CONFIG", "/etc/tg-assistant/settings.toml")
+)
 
 
 # ---------------------------------------------------------------------------
@@ -134,7 +137,14 @@ def build_application(config: Dict[str, Any]) -> Application:
         audit = AuditLogger(pool, log_path=audit_log_path)
 
         embedder = create_embedding_provider(config.get("embeddings", {}))
-        search = MessageSearch(pool, embedder)
+        search = MessageSearch(
+            pool,
+            embedder,
+            hybrid_min_terms=config["querybot"].get("hybrid_min_terms", 2),
+            hybrid_min_term_length=config["querybot"].get(
+                "hybrid_min_term_length", 3
+            ),
+        )
 
         claude_config = config["querybot"]["claude"]
         claude_api_key = get_secret(claude_config["api_key_keychain_key"])
@@ -170,6 +180,9 @@ def build_application(config: Dict[str, Any]) -> Application:
         app.bot_data["input_validator"] = input_validator
 
     async def _post_shutdown(app: Application) -> None:
+        audit = app.bot_data.get("audit")
+        if audit:
+            await audit.close()
         pool = app.bot_data.get("pool")
         if pool:
             await pool.close()
@@ -211,7 +224,8 @@ def run() -> None:
     # python-telegram-bot manages the event loop via run_polling();
     # async init (DB pool, etc.) happens in post_init callback.
     app = build_application(config)
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    # Restrict the update surface to plain messages and commands.
+    app.run_polling(allowed_updates=[Update.MESSAGE])
 
 
 if __name__ == "__main__":

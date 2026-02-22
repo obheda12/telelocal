@@ -52,20 +52,24 @@ sequenceDiagram
     loop Every 5 minutes
         Syncer->>TG: Fetch new messages (MTProto)
         TG-->>Syncer: Messages from all chats
-        Syncer->>DB: Store messages + embeddings
+        Syncer->>DB: Store messages (+ embeddings inline or deferred)
     end
 ```
 
-The syncer uses a **read-only wrapper** around Telethon — only 15 explicitly allowed read methods work. All write methods (`send_message`, `delete_messages`, etc.) raise `PermissionError`.
+The syncer uses a **read-only wrapper** around Telethon — only 11 explicitly allowed read methods work. All write methods (`send_message`, `delete_messages`, etc.) raise `PermissionError`.
 
 The syncer paginates message history to avoid gaps: on the first sync of a chat it walks back through history (bounded by `max_history_days` if set), and on subsequent syncs it fetches **all** messages newer than the last stored ID — even if more than one batch arrives between cycles.
+
+For group/thread context quality, synced rows also store reply linkage (`reply_to_msg_id`) and thread-top linkage (`thread_top_msg_id`) so downstream summarization can reconstruct who replied to what.
 
 Performance defaults:
 - No per-pass pre-scan by default (`enable_prescan_progress = false`) to avoid one extra API call per chat.
 - `store_raw_json = false` by default to reduce ingest CPU and database bloat.
 - Active dialogs are synced in most-recent-first order so fresh chats become queryable first.
 - Last-synced message IDs are prefetched in one DB query per pass (instead of one query per chat).
+- Optional deferred embedding mode (`syncer.defer_embeddings = true`) stores first, then backfills embeddings in a background worker for faster ingest on busy accounts.
 - Intent extraction caps chat-list context (`max_intent_chats = 200` by default) to reduce Haiku latency on large accounts.
+- Short keyword queries can skip vector work via `querybot.hybrid_min_terms` / `querybot.hybrid_min_term_length` for lower query latency.
 
 ### Your Query Flow
 
@@ -158,7 +162,7 @@ flowchart TB
         subgraph Firewall["nftables (kernel-level)"]
             direction LR
             FW1["tg-syncer → TG MTProto only"]
-            FW2["tg-querybot → TG Bot API +<br/>api.anthropic.com only"]
+            FW2["tg-querybot → DNS-refreshed IP sets<br/>(api.telegram.org + api.anthropic.com)"]
         end
 
         subgraph Keychain["systemd-creds (AES-256-GCM, encrypted at rest)"]
@@ -195,7 +199,7 @@ Each service runs as a dedicated system user with minimal permissions:
 
 | Service | System User | DB Role | Network Access |
 |---------|-------------|---------|----------------|
-| TG Syncer | `tg-syncer` | `syncer_role` (INSERT + SELECT on messages) | Telegram MTProto IPs only |
+| TG Syncer | `tg-syncer` | `syncer_role` (INSERT + SELECT + UPDATE(embedding) on messages) | Telegram MTProto IPs only |
 | Query Bot | `tg-querybot` | `querybot_role` (SELECT only on messages) | `api.telegram.org` + `api.anthropic.com` |
 | PostgreSQL | `postgres` | N/A | Localhost only |
 
@@ -229,7 +233,7 @@ Full comparison: [`tg-assistant/docs/TELETHON_HARDENING.md`](tg-assistant/docs/T
 | Threat | Severity | Attack Vector | Mitigation | Residual Risk |
 |--------|----------|---------------|------------|---------------|
 | **Session theft** | **CRITICAL** | File system access to `.session` | Fernet encryption at rest, `0600` perms, dedicated user, keychain | Requires privilege escalation + keychain compromise |
-| **Unintended writes** | **CRITICAL** | Telethon writes on user's behalf | Read-only allowlist wrapper (15 methods, default-deny) | Python runtime exploit to bypass wrapper |
+| **Unintended writes** | **CRITICAL** | Telethon writes on user's behalf | Read-only allowlist wrapper (11 methods, default-deny) | Python runtime exploit to bypass wrapper |
 | **Data exfiltration** | **HIGH** | Compromised process phones home | Per-UID nftables: syncer→TG only, querybot→TG+Anthropic only | Kernel exploit to bypass netfilter |
 | **Unauthorized bot access** | **HIGH** | Attacker messages the bot | Hardcoded `owner_id` check, all others silently ignored | Telegram user ID spoof (not possible) |
 | **Privilege escalation** | **HIGH** | Exploit in any service pivots to others | Separate users, `NoNewPrivileges`, dropped capabilities, syscall filter | Kernel exploit |
@@ -242,9 +246,9 @@ Full comparison: [`tg-assistant/docs/TELETHON_HARDENING.md`](tg-assistant/docs/T
 
 **Session theft** — A Telethon session is equivalent to being logged into your Telegram on another device. If stolen, an attacker gets full account access: read, write, delete, change settings. The session file is Fernet-encrypted (AES-128-CBC + HMAC-SHA256) with the key in the system keychain. The encrypted file is `0600`, owned by a dedicated `tg-syncer` user. Plaintext only exists in memory — never on disk. An attacker would need to escalate to the `tg-syncer` user AND access the keychain, both blocked by systemd hardening.
 
-**Unintended writes** — Telethon's `TelegramClient` has full read/write access to your account. The syncer wraps it in `ReadOnlyTelegramClient` using an **allowlist** — only 15 read methods are permitted, everything else raises `PermissionError`. This is an allowlist, not a blocklist: new Telethon methods in future updates are blocked by default until reviewed.
+**Unintended writes** — Telethon's `TelegramClient` has full read/write access to your account. The syncer wraps it in `ReadOnlyTelegramClient` using an **allowlist** — only 11 read methods are permitted, everything else raises `PermissionError`. This is an allowlist, not a blocklist: new Telethon methods in future updates are blocked by default until reviewed.
 
-**Data exfiltration** — Per-UID nftables rules restrict each process to specific IPs at the kernel level. The syncer can only reach Telegram MTProto data centers (`149.154.160.0/20`, `91.108.0.0/16`). The querybot can only reach `api.telegram.org` and `api.anthropic.com`. All other outbound traffic — including to LAN hosts — is dropped. Even with code execution, a compromised process cannot phone home.
+**Data exfiltration** — Per-UID nftables rules restrict each process to specific destinations at the kernel level. The syncer can only reach Telegram MTProto data centers (`149.154.160.0/20`, `91.108.0.0/16`). The querybot can only reach DNS-refreshed IP sets for `api.telegram.org` and `api.anthropic.com` (updated by a root-owned systemd timer). DNS is also restricted to resolver IPs from `/etc/resolv.conf` (not arbitrary destination 53). All other outbound traffic — including to LAN hosts — is dropped. Even with code execution, a compromised process cannot phone home.
 
 **Credential exposure** — The system manages three high-value secrets: a Telethon session key (full Telegram account access), a Bot API token (bot impersonation), and a Claude API key (billing). All credentials are encrypted at rest using `systemd-creds encrypt` (AES-256-GCM with a machine-specific key in `/var/lib/systemd/credential.secret`). At service start, systemd decrypts them into a private RAM-only tmpfs mount — plaintext never touches disk. Each service can only access its own credentials (the querybot cannot read the Telethon session key, and the syncer cannot read the bot token or Claude key). Database authentication uses Unix socket peer auth — no passwords exist. An attacker would need to: (1) gain code execution on the Pi, (2) escalate to root or the specific service user (blocked by `NoNewPrivileges`, dropped capabilities, syscall filtering), and (3) extract the machine key from `/var/lib/systemd/credential.secret` (readable only by root). Full-disk encryption (LUKS) is recommended as an additional layer against physical theft — see [SECURITY_MODEL.md](tg-assistant/docs/SECURITY_MODEL.md) Appendix E.
 
@@ -349,10 +353,13 @@ tg-assistant/
 │   ├── setup.sh                   # Single-command deployment
 │   ├── monitor-network.sh         # Traffic verification
 │   ├── benchmark-pipeline.sh      # Ingestion + query latency benchmark
+│   ├── refresh-api-ipsets.sh      # DNS -> nftables set refresh (querybot egress)
 │   └── benchmark_pipeline.py      # Benchmark implementation
 ├── systemd/
 │   ├── tg-syncer.service          # Syncer service (hardened)
-│   └── tg-querybot.service        # Query bot service (hardened)
+│   ├── tg-querybot.service        # Query bot service (hardened)
+│   ├── tg-refresh-api-ipsets.service # Dynamic egress allowlist refresher
+│   └── tg-refresh-api-ipsets.timer   # Periodic refresh schedule
 ├── nftables/
 │   └── tg-assistant-firewall.conf # Per-process network rules
 └── requirements.txt               # Python dependencies (pinned)
@@ -383,6 +390,9 @@ CREATE TABLE messages (
     chat_id            BIGINT NOT NULL,
     sender_id          BIGINT,
     sender_name        TEXT,
+    reply_to_msg_id    BIGINT,
+    thread_top_msg_id  BIGINT,
+    is_topic_message   BOOLEAN DEFAULT FALSE,
     timestamp          TIMESTAMPTZ NOT NULL,
     text               TEXT,
     raw_json           JSONB,
@@ -486,7 +496,7 @@ If you suspect a compromise:
 1. **Stop all services** — `sudo systemctl stop tg-syncer tg-querybot`
 2. **Terminate Telethon session** — Log into Telegram, Settings > Devices, terminate the session
 3. **Preserve evidence** — Copy logs and config before making changes
-4. **Rotate ALL credentials** — Telethon session, bot token, Claude API key, DB passwords
+4. **Rotate ALL credentials** — Telethon session, bot token, Claude API key, Telegram API ID/hash, session encryption key
 5. **Review audit logs** — Look for unauthorized API calls or query patterns
 6. **Verify and restart** — Run `./tests/security-verification.sh`, then restart
 

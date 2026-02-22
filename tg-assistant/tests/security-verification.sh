@@ -39,7 +39,8 @@ LOG_DIR="/var/log/tg-assistant"
 SYNCER_USER="tg-syncer"
 QUERYBOT_USER="tg-querybot"
 SYNCER_HOME="/home/${SYNCER_USER}"
-SESSION_DIR="${SYNCER_HOME}/.telethon"
+QUERYBOT_HOME="/home/${QUERYBOT_USER}"
+SESSION_DIR="/var/lib/tg-syncer"
 SESSION_FILE="${SESSION_DIR}/tg_syncer_session.session.enc"
 DB_NAME="tg_assistant"
 
@@ -223,13 +224,13 @@ test_nftables() {
         SYNCER_UID=$(id -u "${SYNCER_USER}" 2>/dev/null || echo "NONE")
         QUERYBOT_UID=$(id -u "${QUERYBOT_USER}" 2>/dev/null || echo "NONE")
 
-        if echo "${RULES}" | grep -q "skuid ${SYNCER_UID}"; then
+        if echo "${RULES}" | grep -Eq "skuid (${SYNCER_UID}|\"${SYNCER_USER}\")"; then
             log_pass "Firewall rules exist for ${SYNCER_USER} (UID ${SYNCER_UID})"
         else
             log_fail "No firewall rules found for ${SYNCER_USER}"
         fi
 
-        if echo "${RULES}" | grep -q "skuid ${QUERYBOT_UID}"; then
+        if echo "${RULES}" | grep -Eq "skuid (${QUERYBOT_UID}|\"${QUERYBOT_USER}\")"; then
             log_pass "Firewall rules exist for ${QUERYBOT_USER} (UID ${QUERYBOT_UID})"
         else
             log_fail "No firewall rules found for ${QUERYBOT_USER}"
@@ -239,6 +240,20 @@ test_nftables() {
             log_pass "Firewall has drop rules (default-deny for service users)"
         else
             log_warn "No drop rules found -- verify traffic is restricted"
+        fi
+
+        if nft list set inet tg_assistant_isolation querybot_api_ipv4 >/dev/null 2>&1 \
+           && nft list set inet tg_assistant_isolation querybot_api_ipv6 >/dev/null 2>&1; then
+            log_pass "Dynamic querybot API IP sets exist"
+        else
+            log_warn "Dynamic querybot API IP sets not found (legacy/static ruleset may be in use)"
+        fi
+
+        if nft list set inet tg_assistant_isolation dns_resolver_ipv4 >/dev/null 2>&1 \
+           && nft list set inet tg_assistant_isolation dns_resolver_ipv6 >/dev/null 2>&1; then
+            log_pass "DNS resolver allowlist sets exist"
+        else
+            log_warn "DNS resolver allowlist sets not found (DNS may be too broad)"
         fi
     else
         log_fail "nftables table 'tg_assistant' not found"
@@ -325,6 +340,27 @@ test_db_role_separation() {
         log_pass "syncer_role can INSERT into messages"
     else
         log_fail "syncer_role cannot INSERT into messages (should be allowed)"
+    fi
+
+    # Check syncer_role can update embedding only
+    RESULT=$(sudo -u postgres psql -d "${DB_NAME}" -tAc "
+        SELECT has_column_privilege('syncer_role', 'messages', 'embedding', 'UPDATE');
+    " 2>/dev/null || echo "error")
+    if [[ "${RESULT}" == "t" ]]; then
+        log_pass "syncer_role can UPDATE messages.embedding"
+    else
+        log_fail "syncer_role cannot UPDATE messages.embedding (should be allowed)"
+    fi
+
+    RESULT=$(sudo -u postgres psql -d "${DB_NAME}" -tAc "
+        SELECT has_column_privilege('syncer_role', 'messages', 'text', 'UPDATE');
+    " 2>/dev/null || echo "error")
+    if [[ "${RESULT}" == "f" ]]; then
+        log_pass "syncer_role cannot UPDATE messages.text"
+    elif [[ "${RESULT}" == "t" ]]; then
+        log_fail "syncer_role CAN UPDATE messages.text (should be denied)"
+    else
+        log_warn "Could not verify syncer_role UPDATE(text) permission: ${RESULT}"
     fi
 
     # Check querybot_role cannot INSERT into messages

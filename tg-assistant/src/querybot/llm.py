@@ -279,7 +279,15 @@ class ClaudeAssistant:
             for r in msgs:
                 safe_sender = ClaudeAssistant._escape_xml(r.sender_name or "")
                 safe_text = ClaudeAssistant._escape_xml(r.text or "")
-                entry = f"[{r.timestamp}] {safe_sender}: {safe_text}\n"
+                thread_tags: List[str] = []
+                if r.thread_top_msg_id is not None:
+                    thread_tags.append(f"thread={r.thread_top_msg_id}")
+                if r.reply_to_msg_id is not None:
+                    thread_tags.append(f"reply_to={r.reply_to_msg_id}")
+                if r.is_topic_message:
+                    thread_tags.append("topic_message=true")
+                tag_suffix = f" ({', '.join(thread_tags)})" if thread_tags else ""
+                entry = f"[{r.timestamp}] {safe_sender}{tag_suffix}: {safe_text}\n"
                 if total_len + len(entry) > max_chars:
                     break
                 parts.append(entry)
