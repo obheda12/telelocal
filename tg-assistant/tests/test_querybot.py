@@ -8,6 +8,7 @@ import pytest
 
 from querybot.handlers import (
     _get_sync_status_context,
+    _sanitize_telegram_html,
     _split_message,
     handle_message,
     handle_start,
@@ -66,6 +67,55 @@ class TestSplitMessage:
         result = _split_message(text)
         for chunk in result:
             assert len(chunk) > 0
+
+
+# ---------------------------------------------------------------------------
+# HTML sanitizer
+# ---------------------------------------------------------------------------
+
+
+class TestSanitizeTelegramHtml:
+    def test_preserves_allowed_tags(self):
+        """Allowed Telegram HTML tags should pass through unchanged."""
+        text = '<b>bold</b> <i>ital</i> <code>cd</code> <a href="http://x">link</a> <blockquote>q</blockquote>'
+        assert _sanitize_telegram_html(text) == text
+
+    def test_escapes_stray_angle_brackets(self):
+        """Stray < > & outside tags should be escaped."""
+        assert _sanitize_telegram_html("<$12") == "&lt;$12"
+        assert _sanitize_telegram_html("P&L") == "P&amp;L"
+        assert _sanitize_telegram_html("a > b") == "a &gt; b"
+
+    def test_mixed_tags_and_content(self):
+        """Tags should be preserved while stray entities are escaped."""
+        text = "<b>Price</b>: <$12 & rising"
+        expected = "<b>Price</b>: &lt;$12 &amp; rising"
+        assert _sanitize_telegram_html(text) == expected
+
+    def test_plain_text_unchanged(self):
+        """Plain text without tags or special chars should be unchanged."""
+        text = "Hello world, nothing special here"
+        assert _sanitize_telegram_html(text) == text
+
+    def test_nested_tags_preserved(self):
+        """Nested allowed tags should be preserved."""
+        text = "<b><i>bold italic</i></b>"
+        assert _sanitize_telegram_html(text) == text
+
+    def test_pre_and_strong_tags(self):
+        """<pre>, <strong>, <em>, <u>, <s>, <del> tags should be preserved."""
+        text = "<pre>code</pre> <strong>s</strong> <em>e</em> <u>u</u> <s>s</s> <del>d</del>"
+        assert _sanitize_telegram_html(text) == text
+
+    def test_ampersand_in_normal_text(self):
+        """Ampersands in prose should be escaped."""
+        text = "Tom & Jerry"
+        assert _sanitize_telegram_html(text) == "Tom &amp; Jerry"
+
+    def test_anchor_href_preserved(self):
+        """Anchor tags with href should be fully preserved."""
+        text = '<a href="https://example.com/a?b=1&c=2">click</a>'
+        assert _sanitize_telegram_html(text) == text
 
 
 # ---------------------------------------------------------------------------

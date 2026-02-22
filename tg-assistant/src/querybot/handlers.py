@@ -9,6 +9,7 @@ from non-owner users.
 from __future__ import annotations
 
 import logging
+import re
 from functools import wraps
 from typing import Any, Callable, Coroutine, List
 
@@ -109,6 +110,49 @@ def _split_message(text: str) -> List[str]:
         text = text[split_pos:].lstrip("\n")
 
     return chunks
+
+
+# Regex matching Telegram-supported HTML tags that must be preserved.
+_ALLOWED_TAG_RE = re.compile(
+    r"</?(?:b|strong|i|em|u|ins|s|strike|del|code|pre|blockquote|tg-spoiler)"
+    r"(?:\s[^>]*)?>|"
+    r'<a\s+href="[^"]*">|</a>|'
+    r'<span\s+class="tg-spoiler">|</span>',
+    re.IGNORECASE,
+)
+
+
+def _sanitize_telegram_html(text: str) -> str:
+    """Escape stray HTML entities while preserving allowed Telegram tags.
+
+    Telegram's HTML parser rejects the entire message if it encounters
+    invalid HTML (e.g. ``<$12``, ``P&L``).  This function:
+
+    1. Finds all allowed Telegram HTML tags and replaces them with
+       unique placeholders.
+    2. Escapes ``&``, ``<``, ``>`` in the remaining text.
+    3. Restores the original tags from their placeholders.
+    """
+    placeholders: list[tuple[str, str]] = []
+
+    def _replace_tag(match: re.Match) -> str:
+        tag = match.group(0)
+        placeholder = f"\x00TAG{len(placeholders)}\x00"
+        placeholders.append((placeholder, tag))
+        return placeholder
+
+    text = _ALLOWED_TAG_RE.sub(_replace_tag, text)
+
+    # Escape HTML-special characters in the remaining text
+    text = text.replace("&", "&amp;")
+    text = text.replace("<", "&lt;")
+    text = text.replace(">", "&gt;")
+
+    # Restore preserved tags
+    for placeholder, tag in placeholders:
+        text = text.replace(placeholder, tag)
+
+    return text
 
 
 async def _get_sync_status_context(pool: asyncpg.Pool) -> str:
@@ -298,7 +342,7 @@ async def handle_message(
     answer = await llm.query(question, results)
 
     # 6. Reply (split if > 4096 chars — Telegram message limit)
-    for chunk in _split_message(answer):
+    for chunk in _split_message(_sanitize_telegram_html(answer)):
         try:
             await update.message.reply_text(
                 chunk, parse_mode=ParseMode.HTML

@@ -30,6 +30,7 @@ from telethon import TelegramClient as TelethonClient
 from syncer.readonly_client import ReadOnlyTelegramClient
 from syncer.message_store import MessageStore
 from syncer.embeddings import EmbeddingProvider, create_embedding_provider
+from syncer.manage_chats import load_excluded_ids
 from syncer.progress import ChatProgress, PassProgress
 from shared.audit import AuditLogger
 from shared.db import get_connection_pool, init_database
@@ -116,7 +117,7 @@ async def prescan_dialogs(
             total = getattr(result, "total", 0) or 0
             counts[dialog.id] = total
         except Exception:
-            logger.debug(
+            logger.warning(
                 "Pre-scan failed for chat %s", dialog.id, exc_info=True
             )
             counts[dialog.id] = 0
@@ -186,22 +187,56 @@ async def sync_once(
     dialogs = await client.get_dialogs()
     total_dialogs = len(dialogs)
 
+    # Filter to dialogs with activity within max_history_days
+    if max_history_days > 0:
+        filter_cutoff = datetime.now(timezone.utc) - timedelta(days=max_history_days)
+        active_dialogs = [
+            d for d in dialogs
+            if getattr(d, "date", None) is None  # include if no date (conservative)
+            or d.date >= filter_cutoff
+        ]
+    else:
+        active_dialogs = dialogs
+
+    logger.info(
+        "Filtered dialogs: %d active (of %d total) within %d days",
+        len(active_dialogs), total_dialogs, max_history_days,
+    )
+
+    # Apply manual exclusions from excluded_chats.json
+    excluded_ids = load_excluded_ids(config)
+    excluded_count = 0
+    if excluded_ids:
+        before_exclude = len(active_dialogs)
+        active_dialogs = [d for d in active_dialogs if d.id not in excluded_ids]
+        excluded_count = before_exclude - len(active_dialogs)
+        logger.info(
+            "Excluded %d manually-excluded chats (%d remaining)",
+            excluded_count, len(active_dialogs),
+        )
+
     await audit.log(
         "syncer",
         "sync_pass_start",
-        {"total_dialogs": total_dialogs},
+        {
+            "total_dialogs": total_dialogs,
+            "active_dialogs": len(active_dialogs),
+            "excluded_count": excluded_count,
+            "max_history_days": max_history_days,
+        },
         success=True,
     )
 
     # Pre-scan for message count estimates
-    msg_counts = await prescan_dialogs(client, dialogs)
+    msg_counts = await prescan_dialogs(client, active_dialogs)
     grand_total = sum(msg_counts.values())
 
+    active_count = len(active_dialogs)
     pass_progress = PassProgress(
-        estimated_total=grand_total, total_chats=total_dialogs
+        estimated_total=grand_total, total_chats=active_count
     )
 
-    for chat_idx, dialog in enumerate(dialogs):
+    for chat_idx, dialog in enumerate(active_dialogs):
         chat_id = dialog.id
         chat_title = getattr(dialog, "title", None) or getattr(dialog, "name", str(chat_id))
         estimated = msg_counts.get(chat_id, 0)
@@ -209,14 +244,14 @@ async def sync_once(
         logger.info(
             "Syncing chat %d/%d: %s (~%d messages)",
             chat_idx + 1,
-            total_dialogs,
+            active_count,
             chat_title,
             estimated,
         )
 
         chat_progress = ChatProgress(
             chat_index=chat_idx + 1,
-            total_chats=total_dialogs,
+            total_chats=active_count,
             chat_title=chat_title,
             estimated_total=estimated,
         )
@@ -322,7 +357,7 @@ async def sync_once(
                 "chat_id": chat_id,
                 "chat_title": chat_title,
                 "chat_index": chat_idx + 1,
-                "total_chats": total_dialogs,
+                "total_chats": active_count,
                 "initial_sync": last_id is None,
                 "new_messages": new_count,
                 "messages_processed": processed_count,

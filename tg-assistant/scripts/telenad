@@ -10,6 +10,7 @@
 #   telenad wipe           Destroy all credentials and state
 #   telenad status         Check service health
 #   telenad sync-status    Show sync progress (messages per chat, last activity)
+#   telenad manage-chats   Interactively include/exclude chats from sync
 #   telenad logs [service] Tail service logs (syncer|querybot|both)
 #   telenad restart        Restart both services
 #   telenad stop           Stop both services
@@ -36,6 +37,7 @@ usage() {
     echo "Operations:"
     echo "  status         Show service health and key info"
     echo "  sync-status    Show sync progress (messages per chat, last activity)"
+    echo "  manage-chats   Interactively include/exclude chats from sync"
     echo "  logs           Tail both service logs (Ctrl+C to stop)"
     echo "  logs syncer    Tail syncer logs only"
     echo "  logs querybot  Tail querybot logs only"
@@ -69,6 +71,10 @@ cmd_wipe() {
 
 cmd_sync_status() {
     exec "${SCRIPT_DIR}/sync-status.sh"
+}
+
+cmd_manage_chats() {
+    PYTHONPATH="${SCRIPT_DIR}/../src" python3 -m syncer.manage_chats "$@"
 }
 
 cmd_status() {
@@ -177,8 +183,9 @@ case "${COMMAND}" in
     session)    cmd_session ;;
     wipe)       cmd_wipe ;;
     status)      cmd_status ;;
-    sync-status) cmd_sync_status ;;
-    logs)        cmd_logs "${2:-both}" ;;
+    sync-status)  cmd_sync_status ;;
+    manage-chats) cmd_manage_chats ;;
+    logs)         cmd_logs "${2:-both}" ;;
     restart)    cmd_restart ;;
     stop)       cmd_stop ;;
     start)      cmd_start ;;

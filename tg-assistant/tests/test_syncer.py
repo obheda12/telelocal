@@ -1,10 +1,13 @@
 """
-Unit tests for syncer modules: sync_once, embeddings factory, progress tracking.
+Unit tests for syncer modules: sync_once, embeddings factory, progress tracking,
+and chat exclusion filtering.
 """
 
+import json
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -275,6 +278,7 @@ class TestSyncOnce:
         mock_dialog.title = "Test Chat"
         mock_dialog.is_group = False
         mock_dialog.is_channel = False
+        mock_dialog.date = datetime.now(timezone.utc)
 
         # Mock message
         mock_msg = MagicMock()
@@ -332,6 +336,7 @@ class TestSyncOnce:
         mock_dialog = MagicMock()
         mock_dialog.id = 12345
         mock_dialog.title = "Empty Chat"
+        mock_dialog.date = datetime.now(timezone.utc)
 
         # Mock TotalList for pre-scan
         mock_total_list = MagicMock()
@@ -391,6 +396,7 @@ class TestSyncOnce:
         mock_dialog.title = "Test Chat"
         mock_dialog.is_group = False
         mock_dialog.is_channel = False
+        mock_dialog.date = datetime.now(timezone.utc)
 
         mock_msg = MagicMock()
         mock_msg.id = 100
@@ -423,3 +429,249 @@ class TestSyncOnce:
             )
 
         assert count == 1
+
+    @pytest.mark.asyncio
+    async def test_sync_once_filters_inactive_dialogs(self):
+        """sync_once should skip dialogs with no activity within max_history_days."""
+        from syncer.main import sync_once
+
+        # Recent dialog — should be synced
+        recent_dialog = MagicMock()
+        recent_dialog.id = 111
+        recent_dialog.title = "Active Chat"
+        recent_dialog.is_group = False
+        recent_dialog.is_channel = False
+        recent_dialog.date = datetime.now(timezone.utc) - timedelta(days=5)
+
+        # Old dialog — should be filtered out
+        old_dialog = MagicMock()
+        old_dialog.id = 222
+        old_dialog.title = "Dead Chat"
+        old_dialog.is_group = False
+        old_dialog.is_channel = False
+        old_dialog.date = datetime.now(timezone.utc) - timedelta(days=365)
+
+        # Mock message for the recent dialog (date must be within max_history_days)
+        mock_msg = MagicMock()
+        mock_msg.id = 100
+        mock_msg.text = "Hello"
+        mock_msg.message = "Hello"
+        mock_msg.date = datetime.now(timezone.utc) - timedelta(days=1)
+        mock_msg.sender = None
+        mock_msg.to_dict.return_value = {}
+
+        mock_total_list = MagicMock()
+        mock_total_list.total = 50
+
+        mock_client = MagicMock()
+        mock_client.get_dialogs = AsyncMock(return_value=[recent_dialog, old_dialog])
+        mock_client.get_messages = AsyncMock(return_value=mock_total_list)
+        mock_client.iter_messages = MagicMock(return_value=self._iter_messages([mock_msg]))
+
+        mock_store = AsyncMock()
+        mock_store.get_last_synced_id.return_value = None
+        mock_store.store_messages_batch.return_value = 1
+
+        mock_embedder = MagicMock()
+        mock_embedder.dimension = 384
+
+        mock_audit = AsyncMock()
+
+        config = {"syncer": {"batch_size": 100, "rate_limit_seconds": 0, "max_history_days": 30}}
+
+        with patch("syncer.main.rate_limit_delay", new_callable=AsyncMock):
+            count = await sync_once(
+                mock_client, mock_store, mock_embedder, mock_audit, config
+            )
+
+        assert count == 1
+        # Only the recent dialog should be pre-scanned
+        mock_client.get_messages.assert_called_once_with(recent_dialog, limit=0)
+        # iter_messages should only be called for the recent dialog
+        mock_client.iter_messages.assert_called_once()
+        # update_chat_metadata should only be called for the recent dialog
+        mock_store.update_chat_metadata.assert_called_once_with(
+            chat_id=111, title="Active Chat", chat_type="user",
+        )
+
+    @pytest.mark.asyncio
+    async def test_sync_once_includes_dialog_without_date(self):
+        """Dialogs without a .date attribute should be included (conservative)."""
+        from syncer.main import sync_once
+
+        # Dialog with no date attribute — should still be synced
+        no_date_dialog = MagicMock(spec=[])  # spec=[] means no attributes by default
+        no_date_dialog.id = 333
+        no_date_dialog.title = "Mystery Chat"
+        no_date_dialog.is_group = False
+        no_date_dialog.is_channel = False
+        # Explicitly do NOT set .date
+
+        mock_total_list = MagicMock()
+        mock_total_list.total = 10
+
+        mock_client = MagicMock()
+        mock_client.get_dialogs = AsyncMock(return_value=[no_date_dialog])
+        mock_client.get_messages = AsyncMock(return_value=mock_total_list)
+        mock_client.iter_messages = MagicMock(return_value=self._iter_messages([]))
+
+        mock_store = AsyncMock()
+        mock_store.get_last_synced_id.return_value = 50
+
+        mock_embedder = MagicMock()
+        mock_embedder.dimension = 384
+
+        mock_audit = AsyncMock()
+
+        config = {"syncer": {"batch_size": 100, "rate_limit_seconds": 0, "max_history_days": 30}}
+
+        with patch("syncer.main.rate_limit_delay", new_callable=AsyncMock):
+            count = await sync_once(
+                mock_client, mock_store, mock_embedder, mock_audit, config
+            )
+
+        # Should have processed this dialog (0 messages, but it wasn't filtered)
+        assert count == 0
+        mock_client.get_messages.assert_called_once_with(no_date_dialog, limit=0)
+
+    @pytest.mark.asyncio
+    async def test_sync_once_excludes_manually_excluded_chats(self):
+        """sync_once should skip chats listed in excluded_chats.json."""
+        from syncer.main import sync_once
+
+        # Two active dialogs
+        included_dialog = MagicMock()
+        included_dialog.id = 111
+        included_dialog.title = "Work Chat"
+        included_dialog.is_group = True
+        included_dialog.is_channel = False
+        included_dialog.date = datetime.now(timezone.utc)
+
+        excluded_dialog = MagicMock()
+        excluded_dialog.id = 222
+        excluded_dialog.title = "Personal Chat"
+        excluded_dialog.is_group = False
+        excluded_dialog.is_channel = False
+        excluded_dialog.date = datetime.now(timezone.utc)
+
+        mock_msg = MagicMock()
+        mock_msg.id = 100
+        mock_msg.text = "Hello"
+        mock_msg.message = "Hello"
+        mock_msg.date = datetime.now(timezone.utc) - timedelta(days=1)
+        mock_msg.sender = None
+        mock_msg.to_dict.return_value = {}
+
+        mock_total_list = MagicMock()
+        mock_total_list.total = 50
+
+        mock_client = MagicMock()
+        mock_client.get_dialogs = AsyncMock(return_value=[included_dialog, excluded_dialog])
+        mock_client.get_messages = AsyncMock(return_value=mock_total_list)
+        mock_client.iter_messages = MagicMock(return_value=self._iter_messages([mock_msg]))
+
+        mock_store = AsyncMock()
+        mock_store.get_last_synced_id.return_value = None
+        mock_store.store_messages_batch.return_value = 1
+
+        mock_embedder = MagicMock()
+        mock_embedder.dimension = 384
+
+        mock_audit = AsyncMock()
+
+        config = {"syncer": {"batch_size": 100, "rate_limit_seconds": 0, "max_history_days": 0}}
+
+        with (
+            patch("syncer.main.rate_limit_delay", new_callable=AsyncMock),
+            patch("syncer.main.load_excluded_ids", return_value={222}),
+        ):
+            count = await sync_once(
+                mock_client, mock_store, mock_embedder, mock_audit, config
+            )
+
+        assert count == 1
+        # Only the included dialog should be pre-scanned and synced
+        mock_client.get_messages.assert_called_once_with(included_dialog, limit=0)
+        mock_client.iter_messages.assert_called_once()
+        mock_store.update_chat_metadata.assert_called_once_with(
+            chat_id=111, title="Work Chat", chat_type="group",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Chat exclusion file helpers
+# ---------------------------------------------------------------------------
+
+
+class TestLoadExcludedIds:
+    def test_missing_file_returns_empty_set(self, tmp_path):
+        """load_excluded_ids should return empty set when file doesn't exist."""
+        from syncer.manage_chats import load_excluded_ids
+
+        config = {}
+        with patch("syncer.manage_chats.get_excluded_chats_path", return_value=tmp_path / "nope.json"):
+            result = load_excluded_ids(config)
+
+        assert result == set()
+
+    def test_valid_file_returns_ids(self, tmp_path):
+        """load_excluded_ids should parse chat IDs from valid JSON."""
+        from syncer.manage_chats import load_excluded_ids
+
+        json_path = tmp_path / "excluded_chats.json"
+        json_path.write_text(json.dumps({
+            "excluded": {"111": "Chat A", "222": "Chat B"}
+        }))
+
+        config = {}
+        with patch("syncer.manage_chats.get_excluded_chats_path", return_value=json_path):
+            result = load_excluded_ids(config)
+
+        assert result == {111, 222}
+
+    def test_invalid_json_returns_empty_set(self, tmp_path):
+        """load_excluded_ids should return empty set for malformed JSON."""
+        from syncer.manage_chats import load_excluded_ids
+
+        json_path = tmp_path / "excluded_chats.json"
+        json_path.write_text("not valid json {{{")
+
+        config = {}
+        with patch("syncer.manage_chats.get_excluded_chats_path", return_value=json_path):
+            result = load_excluded_ids(config)
+
+        assert result == set()
+
+    def test_empty_excluded_returns_empty_set(self, tmp_path):
+        """load_excluded_ids should return empty set when excluded dict is empty."""
+        from syncer.manage_chats import load_excluded_ids
+
+        json_path = tmp_path / "excluded_chats.json"
+        json_path.write_text(json.dumps({"excluded": {}}))
+
+        config = {}
+        with patch("syncer.manage_chats.get_excluded_chats_path", return_value=json_path):
+            result = load_excluded_ids(config)
+
+        assert result == set()
+
+
+class TestSaveExcludedChats:
+    def test_save_and_reload(self, tmp_path):
+        """save_excluded_chats should write JSON that load_excluded_ids can read."""
+        from syncer.manage_chats import load_excluded_ids, save_excluded_chats
+
+        json_path = tmp_path / "excluded_chats.json"
+        config = {}
+        excluded = {111: "Chat A", 222: "Chat B"}
+
+        with patch("syncer.manage_chats.get_excluded_chats_path", return_value=json_path):
+            save_excluded_chats(config, excluded)
+            result = load_excluded_ids(config)
+
+        assert result == {111, 222}
+
+        # Verify file content is human-readable
+        data = json.loads(json_path.read_text())
+        assert "111" in data["excluded"]
+        assert data["excluded"]["111"] == "Chat A"

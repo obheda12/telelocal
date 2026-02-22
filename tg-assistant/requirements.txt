@@ -24,5 +24,8 @@ torch==2.6.0                      # PyTorch (CPU-only recommended for RPi)
 onnxruntime>=1.17.0               # ONNX Runtime for faster CPU inference
 optimum[onnxruntime]>=1.17.0      # Hugging Face ONNX export + optimization
 
+# --- Interactive CLI ---
+InquirerPy==0.3.4                 # Interactive CLI prompts (chat exclusion manager)
+
 # --- Utilities ---
 httpx==0.28.1                     # Async HTTP client (used by anthropic SDK)
