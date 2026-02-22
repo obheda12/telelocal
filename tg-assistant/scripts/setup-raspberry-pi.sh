@@ -575,6 +575,8 @@ CREATE INDEX IF NOT EXISTS idx_messages_timestamp
     ON messages (timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_embedding
     ON messages USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX IF NOT EXISTS idx_messages_sender_name_trgm
+    ON messages USING GIN (sender_name gin_trgm_ops);
 
 -- =========================================================================
 -- Schema: chats

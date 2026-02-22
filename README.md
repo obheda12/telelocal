@@ -60,6 +60,11 @@ The syncer uses a **read-only wrapper** around Telethon — only 15 explicitly a
 
 The syncer paginates message history to avoid gaps: on the first sync of a chat it walks back through history (bounded by `max_history_days` if set), and on subsequent syncs it fetches **all** messages newer than the last stored ID — even if more than one batch arrives between cycles.
 
+Performance defaults:
+- No per-pass pre-scan by default (`enable_prescan_progress = false`) to avoid one extra API call per chat.
+- `store_raw_json = false` by default to reduce ingest CPU and database bloat.
+- Active dialogs are synced in most-recent-first order so fresh chats become queryable first.
+
 ### Your Query Flow
 
 ```mermaid

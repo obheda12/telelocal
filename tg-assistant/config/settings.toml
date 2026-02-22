@@ -76,6 +76,21 @@ batch_size = 500
 # Set to 0 to disable the limit and fetch all history.
 max_history_days = 30
 
+# Optional pre-scan for per-chat message count estimates and ETA logging.
+# Disabling saves one extra Telegram API call per active chat each sync pass.
+enable_prescan_progress = false
+
+# Store full Telethon message JSON in the DB.
+# Disable for lower ingest CPU/storage and faster syncs.
+store_raw_json = false
+
+# Delay between chats that had no new messages.
+# Keep low for fast polling across many chats.
+idle_chat_delay_seconds = 0.1
+
+# Emit per-batch progress logs (verbose).
+log_batch_progress = false
+
 # Encrypt the Telethon session file at rest using Fernet (AES-128-CBC + HMAC).
 # The encryption key is stored in the system keychain, never on disk.
 # Even if the session file is stolen, it's useless without the key.

@@ -104,6 +104,7 @@ async def init_database(pool: asyncpg.Pool) -> None:
     async with pool.acquire() as conn:
         try:
             await conn.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+            await conn.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm;")
 
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS messages (
@@ -173,6 +174,10 @@ async def init_database(pool: asyncpg.Pool) -> None:
             await conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_messages_timestamp
                 ON messages (timestamp DESC);
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_messages_sender_name_trgm
+                ON messages USING GIN (sender_name gin_trgm_ops);
             """)
         except asyncpg.exceptions.InsufficientPrivilegeError:
             logger.debug(

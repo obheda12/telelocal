@@ -315,7 +315,14 @@ class TestSyncOnce:
         # Mock audit
         mock_audit = AsyncMock()
 
-        config = {"syncer": {"batch_size": 100, "rate_limit_seconds": 0, "max_history_days": 0}}
+        config = {
+            "syncer": {
+                "batch_size": 100,
+                "rate_limit_seconds": 0,
+                "max_history_days": 0,
+                "enable_prescan_progress": True,
+            }
+        }
 
         with patch("syncer.main.rate_limit_delay", new_callable=AsyncMock):
             count = await sync_once(
@@ -421,7 +428,14 @@ class TestSyncOnce:
 
         mock_audit = AsyncMock()
 
-        config = {"syncer": {"batch_size": 100, "rate_limit_seconds": 0, "max_history_days": 0}}
+        config = {
+            "syncer": {
+                "batch_size": 100,
+                "rate_limit_seconds": 0,
+                "max_history_days": 0,
+                "enable_prescan_progress": True,
+            }
+        }
 
         with patch("syncer.main.rate_limit_delay", new_callable=AsyncMock):
             count = await sync_once(
@@ -477,7 +491,14 @@ class TestSyncOnce:
 
         mock_audit = AsyncMock()
 
-        config = {"syncer": {"batch_size": 100, "rate_limit_seconds": 0, "max_history_days": 30}}
+        config = {
+            "syncer": {
+                "batch_size": 100,
+                "rate_limit_seconds": 0,
+                "max_history_days": 30,
+                "enable_prescan_progress": True,
+            }
+        }
 
         with patch("syncer.main.rate_limit_delay", new_callable=AsyncMock):
             count = await sync_once(
@@ -523,7 +544,14 @@ class TestSyncOnce:
 
         mock_audit = AsyncMock()
 
-        config = {"syncer": {"batch_size": 100, "rate_limit_seconds": 0, "max_history_days": 30}}
+        config = {
+            "syncer": {
+                "batch_size": 100,
+                "rate_limit_seconds": 0,
+                "max_history_days": 30,
+                "enable_prescan_progress": True,
+            }
+        }
 
         with patch("syncer.main.rate_limit_delay", new_callable=AsyncMock):
             count = await sync_once(
@@ -579,7 +607,14 @@ class TestSyncOnce:
 
         mock_audit = AsyncMock()
 
-        config = {"syncer": {"batch_size": 100, "rate_limit_seconds": 0, "max_history_days": 0}}
+        config = {
+            "syncer": {
+                "batch_size": 100,
+                "rate_limit_seconds": 0,
+                "max_history_days": 0,
+                "enable_prescan_progress": True,
+            }
+        }
 
         with (
             patch("syncer.main.rate_limit_delay", new_callable=AsyncMock),

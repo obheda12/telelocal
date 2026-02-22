@@ -155,6 +155,12 @@ journalctl -u tg-syncer --since "1 hour ago" | grep -i flood
 # Do NOT decrease the sync interval below the configured default.
 ```
 
+### Performance tuning
+
+- Keep `syncer.enable_prescan_progress = false` unless you need detailed ETA logs.
+- Keep `syncer.store_raw_json = false` unless you explicitly need full raw payloads.
+- For faster catch-up on many chats, keep a small `syncer.idle_chat_delay_seconds` (default `0.1`).
+
 ---
 
 ## Security Verification

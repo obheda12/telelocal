@@ -160,6 +160,10 @@ async def sync_once(
     batch_size = syncer_config.get("batch_size", 100)
     rate_seconds = syncer_config.get("rate_limit_seconds", 2)
     max_history_days = syncer_config.get("max_history_days", 365)
+    enable_prescan_progress = syncer_config.get("enable_prescan_progress", False)
+    store_raw_json = syncer_config.get("store_raw_json", False)
+    idle_chat_delay_seconds = syncer_config.get("idle_chat_delay_seconds", 0.1)
+    log_batch_progress = syncer_config.get("log_batch_progress", False)
     use_vectors = embedder.dimension is not None and embedder.dimension > 0
 
     total_new = 0
@@ -215,6 +219,17 @@ async def sync_once(
             excluded_count, len(active_dialogs),
         )
 
+    # Prioritize recently active chats so freshest context is available first.
+    def _dialog_sort_key(dialog: Any) -> datetime:
+        dt = getattr(dialog, "date", None)
+        if not isinstance(dt, datetime):
+            return datetime.min.replace(tzinfo=timezone.utc)
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt
+
+    active_dialogs.sort(key=_dialog_sort_key, reverse=True)
+
     await audit.log(
         "syncer",
         "sync_pass_start",
@@ -227,9 +242,13 @@ async def sync_once(
         success=True,
     )
 
-    # Pre-scan for message count estimates
-    msg_counts = await prescan_dialogs(client, active_dialogs)
-    grand_total = sum(msg_counts.values())
+    # Pre-scan for estimated message counts (optional, adds extra API roundtrips)
+    if enable_prescan_progress:
+        msg_counts = await prescan_dialogs(client, active_dialogs)
+        grand_total = sum(msg_counts.values())
+    else:
+        msg_counts = {d.id: 0 for d in active_dialogs}
+        grand_total = 0
 
     active_count = len(active_dialogs)
     pass_progress = PassProgress(
@@ -289,11 +308,13 @@ async def sync_once(
                 last = getattr(sender, "last_name", "") or ""
                 sender_name = f"{first} {last}".strip() or str(sender_id)
 
-            try:
-                raw = msg.to_dict() if hasattr(msg, "to_dict") else {}
-            except Exception:
-                logger.debug("to_dict() failed for message_id=%s", msg.id, exc_info=True)
-                raw = {}
+            raw = None
+            if store_raw_json:
+                try:
+                    raw = msg.to_dict() if hasattr(msg, "to_dict") else {}
+                except Exception:
+                    logger.debug("to_dict() failed for message_id=%s", msg.id, exc_info=True)
+                    raw = {}
 
             msg_dict = {
                 "message_id": msg.id,
@@ -314,7 +335,8 @@ async def sync_once(
                 new_count += stored
                 processed_count += len(batch)
                 chat_progress.update(len(batch), stored)
-                chat_progress.log_batch()
+                if log_batch_progress:
+                    chat_progress.log_batch()
                 batch = []
                 texts_for_embedding = []
                 await rate_limit_delay(rate_seconds)
@@ -368,7 +390,8 @@ async def sync_once(
             success=True,
         )
 
-        await rate_limit_delay(rate_seconds)
+        # Keep idle chat probes fast; full delay only when data was processed.
+        await rate_limit_delay(rate_seconds if processed_count > 0 else idle_chat_delay_seconds)
 
     return total_new
 
