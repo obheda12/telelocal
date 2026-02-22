@@ -30,6 +30,7 @@ from telethon import TelegramClient as TelethonClient
 from syncer.readonly_client import ReadOnlyTelegramClient
 from syncer.message_store import MessageStore
 from syncer.embeddings import EmbeddingProvider, create_embedding_provider
+from syncer.progress import ChatProgress, PassProgress
 from shared.audit import AuditLogger
 from shared.db import get_connection_pool, init_database
 from shared.secrets import get_secret, decrypt_session_file
@@ -83,6 +84,51 @@ async def rate_limit_delay(seconds: float = 1.0) -> None:
         seconds: Minimum delay between consecutive API calls.
     """
     await asyncio.sleep(seconds + random.uniform(0.1, 1.5))
+
+
+# ---------------------------------------------------------------------------
+# Pre-scan: get estimated message counts per chat
+# ---------------------------------------------------------------------------
+
+
+async def prescan_dialogs(
+    client: ReadOnlyTelegramClient,
+    dialogs: list,
+) -> Dict[int, int]:
+    """Get estimated message counts per chat for progress tracking.
+
+    Calls ``get_messages(dialog, limit=0)`` for each dialog to retrieve
+    the ``.total`` attribute — a lightweight metadata-only call.
+
+    Args:
+        client: The read-only Telegram client.
+        dialogs: List of dialogs from ``get_dialogs()``.
+
+    Returns:
+        Dict mapping chat_id to estimated total message count.
+    """
+    logger.info("Pre-scanning %d chats for message counts...", len(dialogs))
+    counts: Dict[int, int] = {}
+
+    for dialog in dialogs:
+        try:
+            result = await client.get_messages(dialog, limit=0)
+            total = getattr(result, "total", 0) or 0
+            counts[dialog.id] = total
+        except Exception:
+            logger.debug(
+                "Pre-scan failed for chat %s", dialog.id, exc_info=True
+            )
+            counts[dialog.id] = 0
+        await asyncio.sleep(0.5)
+
+    grand_total = sum(counts.values())
+    logger.info(
+        "Pre-scan complete: ~%d total messages across %d chats",
+        grand_total,
+        len(dialogs),
+    )
+    return counts
 
 
 # ---------------------------------------------------------------------------
@@ -147,12 +193,32 @@ async def sync_once(
         success=True,
     )
 
+    # Pre-scan for message count estimates
+    msg_counts = await prescan_dialogs(client, dialogs)
+    grand_total = sum(msg_counts.values())
+
+    pass_progress = PassProgress(
+        estimated_total=grand_total, total_chats=total_dialogs
+    )
+
     for chat_idx, dialog in enumerate(dialogs):
         chat_id = dialog.id
         chat_title = getattr(dialog, "title", None) or getattr(dialog, "name", str(chat_id))
+        estimated = msg_counts.get(chat_id, 0)
 
         logger.info(
-            "Syncing chat %d/%d: %s", chat_idx + 1, total_dialogs, chat_title
+            "Syncing chat %d/%d: %s (~%d messages)",
+            chat_idx + 1,
+            total_dialogs,
+            chat_title,
+            estimated,
+        )
+
+        chat_progress = ChatProgress(
+            chat_index=chat_idx + 1,
+            total_chats=total_dialogs,
+            chat_title=chat_title,
+            estimated_total=estimated,
         )
 
         last_id = await store.get_last_synced_id(chat_id)
@@ -209,18 +275,32 @@ async def sync_once(
                 texts_for_embedding.append(text)
 
             if len(batch) >= batch_size:
-                new_count += await _flush_batch(batch, texts_for_embedding)
+                stored = await _flush_batch(batch, texts_for_embedding)
+                new_count += stored
                 processed_count += len(batch)
+                chat_progress.update(len(batch), stored)
+                chat_progress.log_batch()
                 batch = []
                 texts_for_embedding = []
                 await rate_limit_delay(rate_seconds)
 
         # Flush remaining
         if batch:
-            new_count += await _flush_batch(batch, texts_for_embedding)
+            stored = await _flush_batch(batch, texts_for_embedding)
+            new_count += stored
             processed_count += len(batch)
+            chat_progress.update(len(batch), stored)
+
+        chat_progress.log_complete()
 
         total_new += new_count
+
+        # Accumulate pass-level progress
+        pass_progress.update_from_chat(chat_progress)
+
+        # Log pass progress every 5 chats
+        if (chat_idx + 1) % 5 == 0:
+            pass_progress.log_pass_progress()
 
         # Determine chat type
         chat_type = "user"
@@ -246,6 +326,9 @@ async def sync_once(
                 "initial_sync": last_id is None,
                 "new_messages": new_count,
                 "messages_processed": processed_count,
+                "estimated_total": estimated,
+                "elapsed_seconds": round(chat_progress.elapsed_seconds, 1),
+                "rate_msg_per_sec": round(chat_progress.rate, 1),
             },
             success=True,
         )

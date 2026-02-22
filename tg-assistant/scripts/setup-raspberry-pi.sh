@@ -316,6 +316,23 @@ setup_venv() {
         && log_success "Embedding model cached at ${MODEL_DIR}" \
         || log_warn "Model pre-download failed (embeddings will be unavailable until fixed)"
 
+    # Export ONNX model with ARM64 INT8 quantization for faster inference.
+    # Falls back to PyTorch at runtime if this step fails.
+    log_info "Exporting ONNX model with ARM64 quantization..."
+    HF_HOME="${MODEL_DIR}" SENTENCE_TRANSFORMERS_HOME="${MODEL_DIR}" \
+        python3 -c "
+from sentence_transformers import SentenceTransformer, export_dynamic_quantized_onnx_model
+model = SentenceTransformer('all-MiniLM-L6-v2', device='cpu')
+export_dynamic_quantized_onnx_model(
+    model,
+    quantization_config='arm64',
+    model_name_or_path='all-MiniLM-L6-v2',
+)
+print('ONNX ARM64 quantized model exported successfully')
+" \
+        && log_success "ONNX ARM64 quantized model exported" \
+        || log_warn "ONNX export failed (will fall back to PyTorch at runtime)"
+
     deactivate
 
     # Make venv accessible to both service users

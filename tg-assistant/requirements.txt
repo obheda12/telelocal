@@ -21,6 +21,8 @@ toml==0.10.2                      # TOML config file parser
 # --- Embeddings (optional — only needed for local fallback) ---
 sentence-transformers==3.3.1      # Local embedding model (all-MiniLM-L6-v2)
 torch==2.6.0                      # PyTorch (CPU-only recommended for RPi)
+onnxruntime>=1.17.0               # ONNX Runtime for faster CPU inference
+optimum[onnxruntime]>=1.17.0      # Hugging Face ONNX export + optimization
 
 # --- Utilities ---
 httpx==0.28.1                     # Async HTTP client (used by anthropic SDK)

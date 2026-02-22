@@ -1,8 +1,9 @@
 """
-Unit tests for syncer modules: sync_once, embeddings factory.
+Unit tests for syncer modules: sync_once, embeddings factory, progress tracking.
 """
 
 import sys
+import time
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -17,6 +18,7 @@ from syncer.embeddings import (
     LocalEmbeddings,
     create_embedding_provider,
 )
+from syncer.progress import ChatProgress, PassProgress, _format_duration
 
 
 # ---------------------------------------------------------------------------
@@ -56,6 +58,203 @@ class TestLocalEmbeddings:
 
 
 # ---------------------------------------------------------------------------
+# ONNX embeddings
+# ---------------------------------------------------------------------------
+
+
+class TestLocalEmbeddingsOnnx:
+    def test_backend_parameter_stored(self):
+        """Backend parameter should be stored on the instance."""
+        provider = LocalEmbeddings(backend="onnx")
+        assert provider._backend == "onnx"
+
+    def test_default_backend_is_torch(self):
+        """Default backend should be torch."""
+        provider = LocalEmbeddings()
+        assert provider._backend == "torch"
+
+    def test_factory_passes_backend_config(self):
+        """create_embedding_provider should pass backend from config."""
+        config = {"backend": "onnx", "local_model": "all-MiniLM-L6-v2"}
+        provider = create_embedding_provider(config)
+        assert isinstance(provider, LocalEmbeddings)
+        assert provider._backend == "onnx"
+
+    def test_factory_default_backend_torch(self):
+        """Factory should default to torch when backend not in config."""
+        config = {"local_model": "all-MiniLM-L6-v2"}
+        provider = create_embedding_provider(config)
+        assert provider._backend == "torch"
+
+    def test_onnx_fallback_to_torch(self):
+        """When ONNX loading fails, should fall back to PyTorch."""
+        provider = LocalEmbeddings(backend="onnx")
+
+        call_count = 0
+
+        def fake_constructor(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if kwargs.get("backend") == "onnx":
+                raise ImportError("onnxruntime not installed")
+            return MagicMock()
+
+        mock_st = MagicMock(side_effect=fake_constructor)
+
+        with patch.dict("sys.modules", {"sentence_transformers": MagicMock(SentenceTransformer=mock_st)}):
+            provider._load_model()
+
+        # Should have tried ONNX attempts (2) and then fallen back to torch (1)
+        assert call_count == 3
+        assert provider._model is not None
+
+    def test_onnx_load_attempts_order(self):
+        """ONNX load should try ARM64-quantized first, then generic."""
+        provider = LocalEmbeddings(backend="onnx")
+        attempts = provider._onnx_load_attempts()
+        assert len(attempts) == 2
+        assert attempts[0]["label"] == "onnx-arm64-qint8"
+        assert attempts[1]["label"] == "onnx"
+
+
+# ---------------------------------------------------------------------------
+# Progress tracking
+# ---------------------------------------------------------------------------
+
+
+class TestFormatDuration:
+    def test_seconds_only(self):
+        assert _format_duration(45) == "45s"
+
+    def test_zero(self):
+        assert _format_duration(0) == "0s"
+
+    def test_negative(self):
+        assert _format_duration(-5) == "0s"
+
+    def test_minutes_and_seconds(self):
+        assert _format_duration(150) == "2m 30s"
+
+    def test_exact_minutes(self):
+        assert _format_duration(120) == "2m"
+
+    def test_hours_and_minutes(self):
+        assert _format_duration(4500) == "1h 15m"
+
+    def test_exact_hours(self):
+        assert _format_duration(3600) == "1h"
+
+    def test_large_value(self):
+        assert _format_duration(7260) == "2h 1m"
+
+
+class TestChatProgress:
+    def test_initial_state(self):
+        cp = ChatProgress(1, 10, "Test Chat", estimated_total=1000)
+        assert cp.processed == 0
+        assert cp.stored == 0
+        assert cp.chat_index == 1
+        assert cp.total_chats == 10
+
+    def test_update(self):
+        cp = ChatProgress(1, 10, "Test Chat", estimated_total=1000)
+        cp.update(100, 95)
+        assert cp.processed == 100
+        assert cp.stored == 95
+
+        cp.update(200, 180)
+        assert cp.processed == 300
+        assert cp.stored == 275
+
+    def test_rate(self):
+        cp = ChatProgress(1, 10, "Test Chat", estimated_total=1000)
+        # Simulate elapsed time by backdating start
+        cp._start = time.monotonic() - 10.0  # 10 seconds ago
+        cp.update(500, 500)
+        rate = cp.rate
+        # 500 messages / ~10 seconds = ~50 msg/s
+        assert 40.0 < rate < 60.0
+
+    def test_rate_zero_time(self):
+        cp = ChatProgress(1, 10, "Test Chat", estimated_total=1000)
+        # At t=0, rate should be 0.0
+        assert cp.rate == 0.0
+
+    def test_eta_seconds(self):
+        cp = ChatProgress(1, 10, "Test Chat", estimated_total=1000)
+        cp._start = time.monotonic() - 10.0
+        cp.update(500, 500)
+        eta = cp.eta_seconds
+        # 500 remaining / 50 msg/s = ~10s
+        assert eta is not None
+        assert 5.0 < eta < 20.0
+
+    def test_eta_no_estimate(self):
+        cp = ChatProgress(1, 10, "Test Chat", estimated_total=0)
+        cp._start = time.monotonic() - 10.0
+        cp.update(500, 500)
+        assert cp.eta_seconds is None
+
+    def test_log_batch(self):
+        """log_batch should not raise."""
+        cp = ChatProgress(1, 10, "Test Chat", estimated_total=1000)
+        cp._start = time.monotonic() - 5.0
+        cp.update(100, 95)
+        cp.log_batch()  # Should not raise
+
+    def test_log_complete(self):
+        """log_complete should not raise."""
+        cp = ChatProgress(1, 10, "Test Chat", estimated_total=1000)
+        cp._start = time.monotonic() - 5.0
+        cp.update(1000, 950)
+        cp.log_complete()  # Should not raise
+
+
+class TestPassProgress:
+    def test_initial_state(self):
+        pp = PassProgress(estimated_total=10000, total_chats=10)
+        assert pp.processed == 0
+        assert pp.stored == 0
+        assert pp.chats_completed == 0
+
+    def test_update_from_chat(self):
+        pp = PassProgress(estimated_total=10000, total_chats=10)
+
+        cp1 = ChatProgress(1, 10, "Chat A", estimated_total=5000)
+        cp1.update(3000, 2800)
+
+        cp2 = ChatProgress(2, 10, "Chat B", estimated_total=5000)
+        cp2.update(2000, 1900)
+
+        pp.update_from_chat(cp1)
+        assert pp.processed == 3000
+        assert pp.stored == 2800
+        assert pp.chats_completed == 1
+
+        pp.update_from_chat(cp2)
+        assert pp.processed == 5000
+        assert pp.stored == 4700
+        assert pp.chats_completed == 2
+
+    def test_eta(self):
+        pp = PassProgress(estimated_total=10000, total_chats=10)
+        pp._start = time.monotonic() - 10.0
+        pp.processed = 5000  # directly set for simplicity
+        eta = pp.eta_seconds
+        # 5000 remaining / 500 msg/s = ~10s
+        assert eta is not None
+        assert 5.0 < eta < 20.0
+
+    def test_log_pass_progress(self):
+        """log_pass_progress should not raise."""
+        pp = PassProgress(estimated_total=10000, total_chats=10)
+        pp._start = time.monotonic() - 5.0
+        pp.processed = 2500
+        pp.chats_completed = 3
+        pp.log_pass_progress()  # Should not raise
+
+
+# ---------------------------------------------------------------------------
 # sync_once
 # ---------------------------------------------------------------------------
 
@@ -90,9 +289,14 @@ class TestSyncOnce:
         mock_msg.sender = mock_sender
         mock_msg.to_dict.return_value = {"id": 100}
 
+        # Mock TotalList for pre-scan
+        mock_total_list = MagicMock()
+        mock_total_list.total = 100
+
         # Mock client
         mock_client = MagicMock()
         mock_client.get_dialogs = AsyncMock(return_value=[mock_dialog])
+        mock_client.get_messages = AsyncMock(return_value=mock_total_list)
         mock_client.iter_messages = MagicMock(return_value=self._iter_messages([mock_msg]))
 
         # Mock store
@@ -117,6 +321,8 @@ class TestSyncOnce:
         assert count == 1
         mock_store.store_messages_batch.assert_called_once()
         mock_store.update_chat_metadata.assert_called_once()
+        # Verify pre-scan was called
+        mock_client.get_messages.assert_called_once_with(mock_dialog, limit=0)
 
     @pytest.mark.asyncio
     async def test_sync_once_no_messages(self):
@@ -127,8 +333,13 @@ class TestSyncOnce:
         mock_dialog.id = 12345
         mock_dialog.title = "Empty Chat"
 
+        # Mock TotalList for pre-scan
+        mock_total_list = MagicMock()
+        mock_total_list.total = 50
+
         mock_client = MagicMock()
         mock_client.get_dialogs = AsyncMock(return_value=[mock_dialog])
+        mock_client.get_messages = AsyncMock(return_value=mock_total_list)
         mock_client.iter_messages = MagicMock(return_value=self._iter_messages([]))
 
         mock_store = AsyncMock()
@@ -169,3 +380,46 @@ class TestSyncOnce:
         )
 
         assert count == 0
+
+    @pytest.mark.asyncio
+    async def test_sync_once_prescan_failure_graceful(self):
+        """Pre-scan failure for a chat should not stop sync."""
+        from syncer.main import sync_once
+
+        mock_dialog = MagicMock()
+        mock_dialog.id = 12345
+        mock_dialog.title = "Test Chat"
+        mock_dialog.is_group = False
+        mock_dialog.is_channel = False
+
+        mock_msg = MagicMock()
+        mock_msg.id = 100
+        mock_msg.text = "Hello"
+        mock_msg.message = "Hello"
+        mock_msg.date = datetime(2024, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
+        mock_msg.sender = None
+        mock_msg.to_dict.return_value = {}
+
+        # Pre-scan raises but sync should still work
+        mock_client = MagicMock()
+        mock_client.get_dialogs = AsyncMock(return_value=[mock_dialog])
+        mock_client.get_messages = AsyncMock(side_effect=Exception("API error"))
+        mock_client.iter_messages = MagicMock(return_value=self._iter_messages([mock_msg]))
+
+        mock_store = AsyncMock()
+        mock_store.get_last_synced_id.return_value = None
+        mock_store.store_messages_batch.return_value = 1
+
+        mock_embedder = MagicMock()
+        mock_embedder.dimension = 384
+
+        mock_audit = AsyncMock()
+
+        config = {"syncer": {"batch_size": 100, "rate_limit_seconds": 0, "max_history_days": 0}}
+
+        with patch("syncer.main.rate_limit_delay", new_callable=AsyncMock):
+            count = await sync_once(
+                mock_client, mock_store, mock_embedder, mock_audit, config
+            )
+
+        assert count == 1
