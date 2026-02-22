@@ -72,7 +72,7 @@ batch_size = 100
 # Once a chat has been synced, subsequent passes use the last synced
 # message ID and this limit no longer applies.
 # Set to 0 to disable the limit and fetch all history.
-max_history_days = 365
+max_history_days = 90
 
 # Encrypt the Telethon session file at rest using Fernet (AES-128-CBC + HMAC).
 # The encryption key is stored in the system keychain, never on disk.

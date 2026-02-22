@@ -9,6 +9,7 @@
 #   telenad session        Create/recreate Telethon session
 #   telenad wipe           Destroy all credentials and state
 #   telenad status         Check service health
+#   telenad sync-status    Show sync progress (messages per chat, last activity)
 #   telenad logs [service] Tail service logs (syncer|querybot|both)
 #   telenad restart        Restart both services
 #   telenad stop           Stop both services
@@ -34,6 +35,7 @@ usage() {
     echo ""
     echo "Operations:"
     echo "  status         Show service health and key info"
+    echo "  sync-status    Show sync progress (messages per chat, last activity)"
     echo "  logs           Tail both service logs (Ctrl+C to stop)"
     echo "  logs syncer    Tail syncer logs only"
     echo "  logs querybot  Tail querybot logs only"
@@ -63,6 +65,10 @@ cmd_session() {
 cmd_wipe() {
     require_sudo "wipe"
     exec "${SCRIPT_DIR}/wipe-credentials.sh"
+}
+
+cmd_sync_status() {
+    exec "${SCRIPT_DIR}/sync-status.sh"
 }
 
 cmd_status() {
@@ -170,8 +176,9 @@ case "${COMMAND}" in
     setup)      cmd_setup ;;
     session)    cmd_session ;;
     wipe)       cmd_wipe ;;
-    status)     cmd_status ;;
-    logs)       cmd_logs "${2:-both}" ;;
+    status)      cmd_status ;;
+    sync-status) cmd_sync_status ;;
+    logs)        cmd_logs "${2:-both}" ;;
     restart)    cmd_restart ;;
     stop)       cmd_stop ;;
     start)      cmd_start ;;
