@@ -38,6 +38,8 @@ _SONNET_OUTPUT_COST_PER_M = 15.00
 
 # Haiku for fast/cheap intent extraction
 _INTENT_MODEL = "claude-haiku-4-5-20251001"
+_HAIKU_INPUT_COST_PER_M = 0.0  # set in config if you want precise cost estimates
+_HAIKU_OUTPUT_COST_PER_M = 0.0
 
 _INTENT_SYSTEM_PROMPT = """\
 You extract search parameters from questions about the user's Telegram messages.
@@ -82,10 +84,14 @@ class ClaudeAssistant:
         system_prompt_path: Path = Path("/etc/tg-assistant/system_prompt.md"),
         model: str = "claude-sonnet-4-5-20250929",
         max_queries_per_minute: int = 10,
+        haiku_input_cost_per_m: float = _HAIKU_INPUT_COST_PER_M,
+        haiku_output_cost_per_m: float = _HAIKU_OUTPUT_COST_PER_M,
     ) -> None:
         self._client = anthropic.AsyncAnthropic(api_key=api_key)
         self._model = model
         self._max_qpm = max_queries_per_minute
+        self._haiku_in_cost = haiku_input_cost_per_m
+        self._haiku_out_cost = haiku_output_cost_per_m
         self._system_prompt: Optional[str] = None
         self._system_prompt_path = system_prompt_path
 
@@ -157,6 +163,7 @@ class ClaudeAssistant:
 
         known_chat_ids = {c["chat_id"] for c in chat_list}
 
+        response = None
         try:
             response = await self._client.messages.create(
                 model=_INTENT_MODEL,
@@ -213,10 +220,11 @@ class ClaudeAssistant:
             KeyError, ValueError, IndexError,
         ) as exc:
             raw_resp = "<not received>"
-            try:
-                raw_resp = response.content[0].text[:200]
-            except Exception:
-                pass
+            if response and getattr(response, "content", None):
+                try:
+                    raw_resp = response.content[0].text[:200]
+                except Exception:
+                    pass
             logger.warning(
                 "Intent extraction failed (%s), using raw question as search terms. "
                 "Raw response: %s",
@@ -245,18 +253,18 @@ class ClaudeAssistant:
         if not results:
             return "(No relevant messages found in synced chats.)"
 
-        # Group by chat title, preserving insertion order
-        chat_groups: OrderedDict[str, List[SearchResult]] = OrderedDict()
+        # Group by chat_id + title to avoid collisions
+        chat_groups: OrderedDict[tuple[int, str], List[SearchResult]] = OrderedDict()
         for r in results:
             title = r.chat_title or "Unknown Chat"
-            chat_groups.setdefault(title, []).append(r)
+            chat_groups.setdefault((r.chat_id, title), []).append(r)
 
         parts: List[str] = [
             '<message_context source="synced_telegram_messages" trust_level="untrusted">\n'
         ]
         total_len = len(parts[0])
 
-        for chat_title, msgs in chat_groups.items():
+        for (_, chat_title), msgs in chat_groups.items():
             safe_title = ClaudeAssistant._escape_xml(chat_title)
             header = f"=== {safe_title} ===\n"
             if total_len + len(header) > max_chars:
@@ -326,8 +334,10 @@ class ClaudeAssistant:
 
     def get_usage_stats(self) -> Dict[str, Any]:
         """Return cumulative token usage and estimated cost."""
-        input_cost = (self._synthesis_input_tokens / 1_000_000) * _SONNET_INPUT_COST_PER_M
-        output_cost = (self._synthesis_output_tokens / 1_000_000) * _SONNET_OUTPUT_COST_PER_M
+        intent_input_cost = (self._intent_input_tokens / 1_000_000) * self._haiku_in_cost
+        intent_output_cost = (self._intent_output_tokens / 1_000_000) * self._haiku_out_cost
+        synthesis_input_cost = (self._synthesis_input_tokens / 1_000_000) * _SONNET_INPUT_COST_PER_M
+        synthesis_output_cost = (self._synthesis_output_tokens / 1_000_000) * _SONNET_OUTPUT_COST_PER_M
         return {
             "intent_input_tokens": self._intent_input_tokens,
             "intent_output_tokens": self._intent_output_tokens,
@@ -335,5 +345,8 @@ class ClaudeAssistant:
             "synthesis_output_tokens": self._synthesis_output_tokens,
             "input_tokens": self._intent_input_tokens + self._synthesis_input_tokens,
             "output_tokens": self._intent_output_tokens + self._synthesis_output_tokens,
-            "estimated_cost_usd": round(input_cost + output_cost, 4),
+            "estimated_cost_usd": round(
+                intent_input_cost + intent_output_cost + synthesis_input_cost + synthesis_output_cost,
+                4,
+            ),
         }

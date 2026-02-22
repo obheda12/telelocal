@@ -42,11 +42,6 @@ _UPSERT_CHAT_SQL = """
                   updated_at = NOW()
 """
 
-_UPDATE_EMBEDDING_SQL = """
-    UPDATE messages
-    SET embedding = $1
-    WHERE message_id = $2 AND chat_id = $3
-"""
 
 
 class MessageStore:
@@ -170,19 +165,6 @@ class MessageStore:
             chat_type,
             participant_count,
         )
-
-    async def update_message_embedding(
-        self,
-        message_id: int,
-        chat_id: int,
-        embedding: List[float],
-    ) -> None:
-        """Update embedding for a message (used by backfill scripts)."""
-        if self._embedding_dim and len(embedding) != self._embedding_dim:
-            raise ValueError(
-                f"Embedding dimension mismatch: got={len(embedding)} expected={self._embedding_dim}"
-            )
-        await self._pool.execute(_UPDATE_EMBEDDING_SQL, embedding, message_id, chat_id)
 
     async def get_sync_stats(self) -> Dict[str, Any]:
         """Return summary statistics for monitoring."""

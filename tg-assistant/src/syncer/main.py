@@ -58,8 +58,6 @@ def load_config(path: Path = _DEFAULT_CONFIG_PATH) -> Dict[str, Any]:
 
     # Validate required keys
     required = [
-        ("syncer", "api_id"),
-        ("syncer", "api_hash"),
         ("syncer", "session_path"),
         ("database",),
     ]
@@ -162,6 +160,7 @@ async def sync_once(
         batch: list[Dict[str, Any]] = []
         texts_for_embedding: list[str] = []
         new_count = 0
+        processed_count = 0
 
         async for msg in iterator:
             if cutoff and msg.date < cutoff:
@@ -198,6 +197,7 @@ async def sync_once(
 
             if len(batch) >= batch_size:
                 new_count += await _flush_batch(batch, texts_for_embedding)
+                processed_count += len(batch)
                 batch = []
                 texts_for_embedding = []
                 await rate_limit_delay(rate_seconds)
@@ -205,6 +205,7 @@ async def sync_once(
         # Flush remaining
         if batch:
             new_count += await _flush_batch(batch, texts_for_embedding)
+            processed_count += len(batch)
 
         total_new += new_count
 
@@ -228,7 +229,7 @@ async def sync_once(
                 "chat_id": chat_id,
                 "chat_title": chat_title,
                 "new_messages": new_count,
-                "batch_size": len(batch),
+                "messages_processed": processed_count,
             },
             success=True,
         )

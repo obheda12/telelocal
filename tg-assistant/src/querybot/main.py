@@ -142,6 +142,8 @@ def build_application(config: Dict[str, Any]) -> Application:
             api_key=claude_api_key,
             model=claude_config.get("model", "claude-sonnet-4-5-20250929"),
             max_queries_per_minute=config["querybot"].get("max_queries_per_minute", 20),
+            haiku_input_cost_per_m=claude_config.get("haiku_input_cost_per_m", 0.0),
+            haiku_output_cost_per_m=claude_config.get("haiku_output_cost_per_m", 0.0),
         )
 
         owner_id = config["querybot"]["owner_telegram_id"]

@@ -158,6 +158,11 @@ max_tokens = 4096
 # Avoid 0.0 (can cause repetition) or >0.7 (too creative for search).
 temperature = 0.3
 
+# Optional: price hints for intent extraction (Haiku) to compute cost estimates.
+# Set to current pricing if you want accurate totals.
+haiku_input_cost_per_m = 0.0
+haiku_output_cost_per_m = 0.0
+
 # Claude API key is stored in the system keychain.
 api_key_keychain_key = "tg-assistant-claude-api-key"
 

@@ -23,7 +23,6 @@ if str(SRC) not in sys.path:
 
 from shared.db import get_connection_pool
 from syncer.embeddings import create_embedding_provider
-from syncer.message_store import MessageStore
 
 logger = logging.getLogger("backfill.embeddings")
 
@@ -74,7 +73,16 @@ async def backfill(batch_size: int = 200) -> None:
             break
 
         for (message_id, chat_id, _), embedding in zip(rows, embeddings):
-            await store.update_message_embedding(message_id, chat_id, embedding)
+            if store._embedding_dim and len(embedding) != store._embedding_dim:
+                raise ValueError(
+                    f"Embedding dimension mismatch: got={len(embedding)} expected={store._embedding_dim}"
+                )
+            await pool.execute(
+                "UPDATE messages SET embedding = $1 WHERE message_id = $2 AND chat_id = $3",
+                embedding,
+                message_id,
+                chat_id,
+            )
 
         total += len(rows)
         logger.info("Backfilled %d embeddings", total)

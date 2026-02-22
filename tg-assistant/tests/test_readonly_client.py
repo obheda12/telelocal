@@ -302,7 +302,8 @@ class TestEdgeCases:
         client1 = ReadOnlyTelegramClient(mock_client)
         client2 = ReadOnlyTelegramClient(mock_client)
 
-        assert ALLOWED_METHODS is ALLOWED_METHODS
+        assert client1._allowed is client2._allowed
+        assert client1._allowed is ALLOWED_METHODS
 
     def test_allowed_methods_contains_expected_count(self):
         """
@@ -310,7 +311,7 @@ class TestEdgeCases:
         If this changes, it means someone added or removed a method --
         which should be a deliberate, reviewed change.
         """
-        expected_count = len(ALLOWED_METHODS)
+        expected_count = 11
         actual_count = len(ALLOWED_METHODS)
         assert actual_count == expected_count, (
             f"ALLOWED_METHODS has {actual_count} entries, expected {expected_count}. "
