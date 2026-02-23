@@ -51,51 +51,95 @@ It ingests messages from your Telegram account (within configured scope) into a 
 
 ## Architecture At A Glance
 
+Telelocal runs two core services inside one host boundary:
+
+1. `tg-syncer` ingests Telegram history (read-only) into a local DB.
+2. `tg-querybot` answers owner questions from that local DB and sends replies back in Telegram.
+
+### 1) System Overview
+
 ```mermaid
-flowchart TB
+flowchart LR
     U["Owner"]
-    TG["Telegram<br/>(MTProto + Bot API)"]
-
-    subgraph Host["Telelocal Host<br/>(trusted boundary)"]
-        S["tg-syncer<br/>(read-only ingest)"]
-        DB[("PostgreSQL + pgvector")]
-        Q["tg-querybot<br/>(owner-only query path)"]
-    end
-
+    TG["Telegram"]
     CL["Claude API"]
 
+    subgraph Host["Trusted boundary: Telelocal host"]
+        SY["tg-syncer<br/>read-only ingest"]
+        QB["tg-querybot<br/>owner-only bot"]
+        DB[("PostgreSQL + pgvector")]
+    end
+
+    TG -->|"MTProto messages"| SY
+    SY -->|"ingest writes"| DB
+
     U -->|"send query"| TG
-    TG -->|"MTProto message stream"| S
-    S -->|"ingest writes"| DB
-    TG -->|"Bot API updates"| Q
-    Q -->|"search/retrieve"| DB
-    Q -->|"top-K context for synthesis"| CL
-    Q -->|"reply via Bot API"| TG
+    TG -->|"Bot API update"| QB
+    QB -->|"search local corpus"| DB
+    QB -->|"top-K context only"| CL
+    CL -->|"answer draft"| QB
+    QB -->|"reply via Bot API"| TG
     TG -->|"deliver answer"| U
 ```
 
-**How to read this architecture:**
+### 2) Trust Boundaries
 
-- The host boundary is the trust anchor: data is ingested and stored locally first.
-- `tg-syncer` is the ingest path only.
-- `tg-querybot` is the owner-only query/response path.
-- Only scoped context is sent to Claude; the full corpus stays local.
+```mermaid
+flowchart LR
+    subgraph Trusted["Trusted: your host"]
+        SY["tg-syncer"]
+        QB["tg-querybot"]
+        DB[("Local PostgreSQL")]
+    end
 
-**Why it is designed this way:**
+    subgraph External["External systems"]
+        TG["Telegram"]
+        CL["Claude API"]
+        NET["Other internet hosts"]
+    end
 
-- Split ingest and query services to reduce blast radius on compromise.
-- Keep retrieval/ranking local to preserve local-first data ownership.
-- Apply least privilege per boundary (service users, DB roles, network egress rules).
-- Keep operations predictable with one CLI and explicit verification checks.
+    SY -->|"read-only Telegram access"| TG
+    QB -->|"bot traffic"| TG
+    QB -->|"scoped context only"| CL
+    SY -->|"write-limited DB role"| DB
+    QB -->|"read-only DB role"| DB
+    SY -. egress blocked .-> NET
+    QB -. egress blocked .-> NET
+```
 
-**Cross-cutting controls not shown in the diagram (for readability):**
+- Trust anchor: the local host and database.
+- Data leaves the host only on the query path, and only as scoped/top-K context.
+- `nftables` and systemd hardening enforce per-service network/process limits.
 
-- `LoadCredentialEncrypted` runtime credential injection.
-- nftables per-service outbound allowlists.
-- systemd hardening directives.
-- dual audit sinks (`/var/log/tg-assistant/audit.log` and `audit_log` table).
+### 3) Simple User Flow
 
-**Deeper architecture notes (components, boundaries, compromise containment):**
+```mermaid
+sequenceDiagram
+    autonumber
+    participant O as Owner
+    participant TG as Telegram
+    participant SY as tg-syncer
+    participant DB as Local DB
+    participant QB as tg-querybot
+    participant CL as Claude
+
+    loop background sync
+        SY->>TG: read new messages (read-only)
+        TG-->>SY: message stream
+        SY->>DB: upsert chats/messages
+    end
+
+    O->>TG: send question to bot
+    TG->>QB: deliver owner message
+    QB->>DB: retrieve relevant messages
+    DB-->>QB: ranked local context
+    QB->>CL: question + top-K snippets
+    CL-->>QB: synthesized answer
+    QB->>TG: send reply
+    TG-->>O: deliver answer
+```
+
+For deeper component and threat detail:
 
 - [Architecture reference](tg-assistant/docs/ARCHITECTURE.md)
 
