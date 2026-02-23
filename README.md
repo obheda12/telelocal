@@ -1,8 +1,6 @@
 # Telelocal
 
-Telelocal is a defense-in-depth, local-first Telegram assistant that syncs your Telegram messages (within your configured sync scope) to a local database and lets you query them through a private bot powered by Claude. Deployed on a Raspberry Pi for physical control over your data.
-
-Primary CLI: `telelocal`
+Telelocal is a defense-in-depth, local-first Telegram assistant that syncs your Telegram messages (within your configured sync scope) to a local database and lets you query them through a private bot. Deployed on a Raspberry Pi for physical control over your data. The ingestion of your messages via a telethon session also offers a more practical approach than adding a bot to all your chats and feeding an agent your credentials as is the case in implementations like OpenClaw. This is currently a POC so please feel free to add any suggestions!
 
 ## Why This Exists
 
