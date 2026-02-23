@@ -81,6 +81,10 @@ max_history_days = 30
 # Set to 0 to disable and sync all active chats.
 max_active_chats = 500
 
+# JSON file storing manually excluded chats (managed via `telenad manage-chats`).
+# This file is read by syncer each pass to skip selected chat IDs.
+excluded_chats_path = "/etc/tg-assistant/excluded_chats.json"
+
 # Optional pre-scan for per-chat message count estimates and ETA logging.
 # Disabling saves one extra Telegram API call per active chat each sync pass.
 enable_prescan_progress = false

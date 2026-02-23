@@ -524,6 +524,23 @@ phase_service_activation() {
     fi
 
     echo ""
+    read -rp "  Configure chat include/exclude list before first sync? [Y/n] " CONFIGURE_CHATS
+    echo ""
+    if [[ ! "${CONFIGURE_CHATS}" =~ ^[Nn] ]]; then
+        if [[ -x "${VENV_DIR}/bin/python3" ]]; then
+            log_info "Opening chat selector (checked = included, unchecked = excluded)..."
+            if PYTHONPATH="${INSTALL_DIR}/src" TG_ASSISTANT_CONFIG="${CONFIG_DIR}/settings.toml" \
+                "${VENV_DIR}/bin/python3" -m syncer.manage_chats; then
+                log_success "Chat include/exclude list saved"
+            else
+                log_warn "Chat selector failed; continuing with default include-all behavior"
+            fi
+        else
+            log_warn "Python venv not found at ${VENV_DIR}; skipping chat selector"
+        fi
+    fi
+
+    echo ""
     read -rp "  Start services now? [Y/n] " START_NOW
     echo ""
 
@@ -602,6 +619,7 @@ print_final_summary() {
     echo "  telenad status                           # Check service health"
     echo "  telenad sync-status                      # Sync progress per chat"
     echo "  telenad logs                             # Tail service logs"
+    echo "  telenad manage-chats                     # Include/exclude chats from sync"
     echo "  telenad update                           # Deploy latest code safely"
     echo "  telenad prune                            # Prune history to retention window"
     echo "  telenad restart                          # Restart after changes"

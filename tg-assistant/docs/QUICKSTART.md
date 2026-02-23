@@ -39,7 +39,7 @@ The setup script handles everything in order:
 4. **Configuration** -- injects your values into `settings.toml`
 5. **Telethon session** -- interactive login (phone, code, 2FA), encrypts and stores the session
 6. **Security verification** -- checks permissions, firewall, DB roles, encryption
-7. **Service activation** -- enables systemd services, optionally starts them
+7. **Service activation** -- optional chat include/exclude selector, enables and starts services
 
 ### Granular control
 
@@ -73,11 +73,13 @@ journalctl -u tg-querybot -f
 |-------------|------|
 | Configuration | `/etc/tg-assistant/settings.toml` |
 | System prompt | `/etc/tg-assistant/system_prompt.md` |
+| Chat exclusions | `/etc/tg-assistant/excluded_chats.json` |
 | Audit logs | `/var/log/tg-assistant/audit.log` |
 | Telethon session | `/var/lib/tg-syncer/` (encrypted, `0700`) |
 | Syncer service | `/etc/systemd/system/tg-syncer.service` |
 | Query bot service | `/etc/systemd/system/tg-querybot.service` |
 | API IP refresh timer | `/etc/systemd/system/tg-refresh-api-ipsets.timer` |
+| History prune timer | `/etc/systemd/system/tg-prune-history.timer` |
 | Firewall rules | `/etc/nftables.d/tg-assistant-firewall.conf` |
 
 ---
@@ -88,6 +90,7 @@ journalctl -u tg-querybot -f
 # Check service status
 systemctl status tg-syncer tg-querybot
 systemctl status tg-refresh-api-ipsets.timer
+systemctl status tg-prune-history.timer
 
 # View syncer logs (live)
 journalctl -u tg-syncer -f
@@ -103,6 +106,9 @@ tail -f /var/log/tg-assistant/audit.log
 
 # Restart after config change
 sudo systemctl restart tg-syncer tg-querybot
+
+# Update include/exclude chat list
+sudo telenad manage-chats
 
 # Monitor network traffic (30-second capture)
 sudo ./scripts/monitor-network.sh 30

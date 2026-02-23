@@ -13,7 +13,7 @@
 #   telenad status         Check service health
 #   telenad sync-status    Show sync progress (messages per chat, last activity)
 #   telenad benchmark      Measure ingestion + query latency
-#   telenad manage-chats   Interactively include/exclude chats from sync
+#   telenad manage-chats   Interactively include/exclude chats from sync (requires sudo)
 #   telenad logs [service] Tail service logs (syncer|querybot|both)
 #   telenad restart        Restart both services
 #   telenad stop           Stop both services
@@ -43,7 +43,7 @@ usage() {
     echo "  status         Show service health and key info"
     echo "  sync-status    Show sync progress (messages per chat, last activity)"
     echo "  benchmark      Measure ingestion + query latency"
-    echo "  manage-chats   Interactively include/exclude chats from sync"
+    echo "  manage-chats   Interactively include/exclude chats from sync (requires sudo)"
     echo "  logs           Tail both service logs (Ctrl+C to stop)"
     echo "  logs syncer    Tail syncer logs only"
     echo "  logs querybot  Tail querybot logs only"
@@ -94,7 +94,13 @@ cmd_benchmark() {
 }
 
 cmd_manage_chats() {
-    PYTHONPATH="${SCRIPT_DIR}/../src" python3 -m syncer.manage_chats "$@"
+    require_sudo "manage-chats"
+    local py_bin="${SCRIPT_DIR}/../venv/bin/python3"
+    if [[ ! -x "${py_bin}" ]]; then
+        py_bin="python3"
+    fi
+    PYTHONPATH="${SCRIPT_DIR}/../src" TG_ASSISTANT_CONFIG=/etc/tg-assistant/settings.toml \
+        "${py_bin}" -m syncer.manage_chats "$@"
 }
 
 cmd_status() {
@@ -207,7 +213,7 @@ case "${COMMAND}" in
     status)      cmd_status ;;
     sync-status)  cmd_sync_status ;;
     benchmark)    cmd_benchmark "${@:2}" ;;
-    manage-chats) cmd_manage_chats ;;
+    manage-chats) cmd_manage_chats "${@:2}" ;;
     logs)         cmd_logs "${2:-both}" ;;
     restart)    cmd_restart ;;
     stop)       cmd_stop ;;
