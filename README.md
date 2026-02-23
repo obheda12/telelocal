@@ -4,10 +4,6 @@ Telelocal is a local-first, security-first Telegram query assistant.
 
 It ingests messages from your Telegram account (within configured scope) into a local PostgreSQL database, then answers questions from that local index through a private bot interface.
 
-Primary CLI: `telelocal`
-
-Status: proof-of-concept, built for operators managing many active group chats.
-
 ---
 
 ## Table of Contents
