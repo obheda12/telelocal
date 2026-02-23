@@ -218,6 +218,7 @@ git pull
 
 # Deploy to /opt without deleting runtime assets (venv/models)
 sudo ./scripts/deploy-update.sh
+# or: sudo telenad update ~/telenad/tg-assistant
 
 # Re-verify security after updates
 sudo ./tests/security-verification.sh

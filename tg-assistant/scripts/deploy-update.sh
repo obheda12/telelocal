@@ -40,12 +40,26 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -z "${SOURCE_DIR}" ]]; then
-    SOURCE_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+    # Prefer the caller's current working tree when available.
+    if [[ -d "${PWD}/src" && -d "${PWD}/scripts" ]]; then
+        SOURCE_DIR="${PWD}"
+    else
+        SOURCE_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+    fi
 fi
 
 if [[ ! -d "${SOURCE_DIR}/src" ]]; then
     echo "Source directory invalid: ${SOURCE_DIR}" >&2
     echo "Expected ${SOURCE_DIR}/src to exist." >&2
+    exit 1
+fi
+
+REAL_SOURCE="$(realpath "${SOURCE_DIR}" 2>/dev/null || echo "${SOURCE_DIR}")"
+REAL_INSTALL="$(realpath "${INSTALL_DIR}" 2>/dev/null || echo "${INSTALL_DIR}")"
+if [[ "${REAL_SOURCE}" == "${REAL_INSTALL}" ]]; then
+    echo "[ERROR] Refusing self-copy: source resolves to ${REAL_SOURCE}" >&2
+    echo "Run from your git checkout, e.g.:" >&2
+    echo "  sudo telenad update ~/telenad/tg-assistant" >&2
     exit 1
 fi
 
