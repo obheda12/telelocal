@@ -8,6 +8,7 @@ from non-owner users.
 
 from __future__ import annotations
 
+import html
 import logging
 import re
 from functools import wraps
@@ -54,6 +55,10 @@ _DETAIL_ALIASES = {
     "detail": "detailed",
 }
 _FRESH_CHAT_CHOICES = {10, 25, 50}
+_WINDOW_DAY_RE = re.compile(
+    r"\b(?:(?:past|last)\s+)?(\d{1,3})\s*(day|days|d|week|weeks|w)\b",
+    re.IGNORECASE,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -200,6 +205,8 @@ def _sanitize_telegram_html(text: str) -> str:
     2. Escapes ``&``, ``<``, ``>`` in the remaining text.
     3. Restores the original tags from their placeholders.
     """
+    # Normalize pre-escaped entities so we don't double-escape "&lt;&gt;".
+    text = html.unescape(text or "")
     placeholders: list[tuple[str, str]] = []
 
     def _replace_tag(match: re.Match) -> str:
@@ -298,6 +305,117 @@ def _detail_params(
     if detail_mode == "detailed":
         return detailed_limit, detailed_ctx_chars, detailed_max_tokens
     return quick_limit, quick_ctx_chars, quick_max_tokens
+
+
+def _resolve_owner_mention_aliases(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> List[str]:
+    aliases = list(context.bot_data.get("owner_mention_aliases", []) or [])
+    username = (
+        (update.effective_user.username or "").strip()
+        if update.effective_user
+        else ""
+    )
+    if username:
+        aliases.append(f"@{username}")
+
+    # Deduplicate aliases while preserving order.
+    seen: set[str] = set()
+    normalized_aliases: List[str] = []
+    for alias in aliases:
+        value = alias.strip()
+        if not value:
+            continue
+        key = value.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized_aliases.append(value)
+    return normalized_aliases
+
+
+def _extract_mentions_window_days(question: str) -> int | None:
+    """Detect mention/reply triage requests from free text."""
+    q = " ".join((question or "").lower().split())
+    if not q:
+        return None
+
+    mention_hints = (
+        "my mentions",
+        "show me my mentions",
+        "mentions over",
+        "mentions in",
+        "mentions from",
+        "mention me",
+        "mentioned me",
+        "tagged me",
+        "who mentioned me",
+        "who tagged me",
+        "replied to me",
+        "replies to me",
+        "reply to me",
+    )
+    if not any(hint in q for hint in mention_hints):
+        return None
+
+    if any(token in q for token in ("today", "past day", "last day")):
+        return 1
+    if "yesterday" in q:
+        return 2
+    if any(token in q for token in ("past week", "last week", "this week")):
+        return 7
+    if any(token in q for token in ("past month", "last month", "this month")):
+        return 30
+
+    match = _WINDOW_DAY_RE.search(q)
+    if match:
+        amount = max(1, int(match.group(1)))
+        unit = match.group(2).lower()
+        days = amount * 7 if unit.startswith("w") else amount
+        return min(180, days)
+
+    # Mention triage intent with no explicit window -> sensible default.
+    return 7
+
+
+def _extract_open_questions_window_days(question: str) -> int | None:
+    """Detect free-text requests for unanswered/open questions."""
+    q = " ".join((question or "").lower().split())
+    if not q:
+        return None
+
+    open_question_hints = (
+        "open question",
+        "open questions",
+        "unanswered question",
+        "unanswered questions",
+        "questions unanswered",
+        "pending question",
+        "pending questions",
+        "questions need reply",
+        "questions needing reply",
+    )
+    if not any(hint in q for hint in open_question_hints):
+        return None
+
+    if any(token in q for token in ("today", "past day", "last day")):
+        return 1
+    if "yesterday" in q:
+        return 2
+    if any(token in q for token in ("past week", "last week", "this week")):
+        return 7
+    if any(token in q for token in ("past month", "last month", "this month")):
+        return 30
+
+    match = _WINDOW_DAY_RE.search(q)
+    if match:
+        amount = max(1, int(match.group(1)))
+        unit = match.group(2).lower()
+        days = amount * 7 if unit.startswith("w") else amount
+        return min(180, days)
+
+    return 1
 
 
 async def _reply_chunks(
@@ -407,6 +525,7 @@ async def handle_help(
         "  /help  - This help text\n"
         "  /stats - Sync and usage statistics\n\n"
         "  /mentions [1d|3d|1w] [quick|detailed] - Items likely needing your reply\n"
+        "  /bd [1d|3d|1w] [quick|detailed] - Likely unanswered open questions\n"
         "  /summary  [1d|3d|1w] [quick|detailed] - Cross-chat time-window recap\n"
         "  /fresh    [10|25|50] [quick|detailed] - Snapshot of freshest chats\n"
         "  /more - Continue the previous long response\n\n"
@@ -415,6 +534,7 @@ async def handle_help(
         "synced Telegram messages and answer using Claude.\n\n"
         "Tips for effective queries:\n"
         '  - Mentions triage: "/mentions 1d quick"\n'
+        '  - Open questions: "/bd 3d quick"\n'
         '  - Daily recap: "/summary 1d quick"\n'
         '  - Freshest chats: "/fresh 25 quick"\n'
         '  - Be specific: "What did Alice say about the project deadline?"\n'
@@ -487,26 +607,7 @@ async def handle_mentions(
         return
 
     owner_id = int(context.bot_data.get("owner_id", 0))
-    aliases = list(context.bot_data.get("owner_mention_aliases", []) or [])
-    username = (
-        (update.effective_user.username or "").strip()
-        if update.effective_user
-        else ""
-    )
-    if username:
-        aliases.append(f"@{username}")
-    # Deduplicate aliases while preserving order
-    seen: set[str] = set()
-    normalized_aliases: List[str] = []
-    for alias in aliases:
-        value = alias.strip()
-        if not value:
-            continue
-        key = value.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        normalized_aliases.append(value)
+    normalized_aliases = _resolve_owner_mention_aliases(update, context)
 
     limit, context_max_chars, max_tokens = _detail_params(
         detail_mode,
@@ -555,6 +656,72 @@ async def handle_mentions(
             "detail_mode": detail_mode,
             "results_count": len(results),
             "alias_count": len(normalized_aliases),
+        },
+        success=True,
+    )
+
+
+@owner_only
+async def handle_bd(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle `/bd` unanswered-question triage command."""
+    search: MessageSearch = context.bot_data["search"]
+    llm: ClaudeAssistant = context.bot_data["llm"]
+    audit: AuditLogger = context.bot_data["audit"]
+
+    days, detail_mode, parse_err = _parse_window_and_detail_args(
+        context.args or [],
+        default_days=1,
+    )
+    if parse_err:
+        await update.message.reply_text(
+            f"{parse_err}\nUsage: /bd [1d|3d|1w] [quick|detailed]"
+        )
+        return
+
+    owner_id = int(context.bot_data.get("owner_id", 0))
+    limit, context_max_chars, max_tokens = _detail_params(
+        detail_mode,
+        quick_limit=80,
+        detailed_limit=160,
+        quick_ctx_chars=12000,
+        detailed_ctx_chars=22000,
+        quick_max_tokens=1200,
+        detailed_max_tokens=2600,
+    )
+    results = await search.open_questions_needing_reply(
+        owner_id=owner_id,
+        days_back=days,
+        limit=limit,
+    )
+    if not results:
+        await update.message.reply_text(
+            f"No likely-open unanswered questions found in the last {days} day(s)."
+        )
+        return
+
+    prompt = (
+        f"Create a {detail_mode} briefing of likely unanswered questions from the last {days} day(s). "
+        "These are questions that appear not to have a reply from me yet. "
+        "Use sections: <b>Need My Reply</b>, <b>Could Wait</b>, <b>Low Priority</b>. "
+        "For each item include chat, sender, timestamp, and the key question text."
+    )
+    answer = await llm.query(
+        prompt,
+        results,
+        context_max_chars=context_max_chars,
+        max_tokens_override=max_tokens,
+    )
+    await _reply_answer(update, context, answer)
+
+    await audit.log(
+        "querybot",
+        "command_bd",
+        {
+            "days_back": days,
+            "detail_mode": detail_mode,
+            "results_count": len(results),
         },
         success=True,
     )
@@ -714,6 +881,7 @@ async def handle_message(
 
     Flow:
         0. Validate user input (length, null bytes, whitespace).
+        0.5 Route mentions/open-question triage prompts to dedicated pipelines.
         1. Fetch chat list (cached) for intent extraction context.
         2. Use Haiku to parse the question into structured filters.
         3. Run filtered search using extracted intent.
@@ -736,6 +904,114 @@ async def handle_message(
         return
     # New question supersedes any leftover /more backlog.
     context.user_data.pop(_PENDING_RESPONSE_CHUNKS_KEY, None)
+
+    # 0.5 Natural-language mentions/replies triage mode.
+    mention_days = _extract_mentions_window_days(question)
+    if mention_days is not None:
+        detail_mode = "detailed" if "detail" in question.lower() else "quick"
+        owner_id = int(context.bot_data.get("owner_id", 0))
+        aliases = _resolve_owner_mention_aliases(update, context)
+        limit, context_max_chars, max_tokens = _detail_params(
+            detail_mode,
+            quick_limit=80,
+            detailed_limit=160,
+            quick_ctx_chars=12000,
+            detailed_ctx_chars=22000,
+            quick_max_tokens=1200,
+            detailed_max_tokens=2600,
+        )
+        mention_results = await search.mentions_needing_attention(
+            owner_id=owner_id,
+            mention_aliases=aliases,
+            days_back=mention_days,
+            limit=limit,
+        )
+        if not mention_results:
+            await update.message.reply_text(
+                f"No mention or reply-to-you items found in the last {mention_days} day(s)."
+            )
+            return
+
+        prompt = (
+            f"Create a {detail_mode} triage briefing for the last {mention_days} day(s). "
+            "These messages are likely direct mentions or replies to me. "
+            "Prioritize what needs my action. "
+            "Use sections: "
+            "<b>Act Now</b>, <b>Reply Soon</b>, <b>FYI</b>. "
+            "For each item include chat, sender, and timestamp. "
+            "If a section has no items, state 'none'."
+        )
+        answer = await llm.query(
+            prompt,
+            mention_results,
+            context_max_chars=context_max_chars,
+            max_tokens_override=max_tokens,
+        )
+        await _reply_answer(update, context, answer)
+        await audit.log(
+            "querybot",
+            "query_mentions",
+            {
+                "question_length": len(question),
+                "days_back": mention_days,
+                "detail_mode": detail_mode,
+                "results_count": len(mention_results),
+                "alias_count": len(aliases),
+            },
+            success=True,
+        )
+        return
+
+    # 0.6 Natural-language unanswered/open-questions mode.
+    bd_days = _extract_open_questions_window_days(question)
+    if bd_days is not None:
+        detail_mode = "detailed" if "detail" in question.lower() else "quick"
+        owner_id = int(context.bot_data.get("owner_id", 0))
+        limit, context_max_chars, max_tokens = _detail_params(
+            detail_mode,
+            quick_limit=80,
+            detailed_limit=160,
+            quick_ctx_chars=12000,
+            detailed_ctx_chars=22000,
+            quick_max_tokens=1200,
+            detailed_max_tokens=2600,
+        )
+        open_questions = await search.open_questions_needing_reply(
+            owner_id=owner_id,
+            days_back=bd_days,
+            limit=limit,
+        )
+        if not open_questions:
+            await update.message.reply_text(
+                f"No likely-open unanswered questions found in the last {bd_days} day(s)."
+            )
+            return
+
+        prompt = (
+            f"Create a {detail_mode} briefing of likely unanswered questions from the last {bd_days} day(s). "
+            "These are questions that appear not to have a reply from me yet. "
+            "Use sections: <b>Need My Reply</b>, <b>Could Wait</b>, <b>Low Priority</b>. "
+            "For each item include chat, sender, timestamp, and the key question text."
+        )
+        answer = await llm.query(
+            prompt,
+            open_questions,
+            context_max_chars=context_max_chars,
+            max_tokens_override=max_tokens,
+        )
+        await _reply_answer(update, context, answer)
+        await audit.log(
+            "querybot",
+            "query_bd",
+            {
+                "question_length": len(question),
+                "days_back": bd_days,
+                "detail_mode": detail_mode,
+                "results_count": len(open_questions),
+            },
+            success=True,
+        )
+        return
 
     # 1. Get chat list + extract intent
     max_intent_chats = context.bot_data.get("max_intent_chats")

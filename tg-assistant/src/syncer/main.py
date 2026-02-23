@@ -40,6 +40,7 @@ from shared.secrets import get_secret, decrypt_session_file
 
 logger = logging.getLogger("syncer.main")
 _VALID_CHAT_TYPES = {"group", "channel", "user"}
+_HARD_MAX_ACTIVE_CHATS = 250
 
 # Default paths — overridable via settings.toml
 _DEFAULT_CONFIG_PATH = Path(
@@ -331,7 +332,7 @@ async def sync_once(
     batch_size = syncer_config.get("batch_size", 100)
     rate_seconds = syncer_config.get("rate_limit_seconds", 2)
     max_history_days = syncer_config.get("max_history_days", 365)
-    max_active_chats = syncer_config.get("max_active_chats", 500)
+    max_active_chats = syncer_config.get("max_active_chats", _HARD_MAX_ACTIVE_CHATS)
     enable_prescan_progress = syncer_config.get("enable_prescan_progress", False)
     store_raw_json = syncer_config.get("store_raw_json", False)
     idle_chat_delay_seconds = syncer_config.get("idle_chat_delay_seconds", 0.1)
@@ -351,8 +352,15 @@ async def sync_once(
     try:
         max_active_chats = int(max_active_chats)
     except (TypeError, ValueError):
-        max_active_chats = 500
+        max_active_chats = _HARD_MAX_ACTIVE_CHATS
     max_active_chats = max(0, max_active_chats)
+    if max_active_chats > _HARD_MAX_ACTIVE_CHATS:
+        logger.info(
+            "max_active_chats=%d exceeds hard cap %d; clamping.",
+            max_active_chats,
+            _HARD_MAX_ACTIVE_CHATS,
+        )
+        max_active_chats = _HARD_MAX_ACTIVE_CHATS
     try:
         progress_heartbeat_seconds = float(progress_heartbeat_seconds)
     except (TypeError, ValueError):

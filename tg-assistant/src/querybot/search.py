@@ -30,6 +30,7 @@ logger = logging.getLogger("querybot.search")
 
 # Cache TTL for chat list (seconds) — chats don't change often
 _CHAT_CACHE_TTL = 300
+_MAX_FRESHEST_CHATS = 250
 
 
 @dataclass
@@ -73,17 +74,35 @@ class MessageSearch:
         *,
         hybrid_min_terms: int = 2,
         hybrid_min_term_length: int = 3,
+        max_fresh_chats: int = _MAX_FRESHEST_CHATS,
     ) -> None:
         self._pool = pool
         self._embedder = embedding_provider
         self._hybrid_min_terms = max(1, hybrid_min_terms)
         self._hybrid_min_term_length = max(1, hybrid_min_term_length)
+        self._max_fresh_chats = max(1, int(max_fresh_chats))
         # Chat list cache
         self._chat_cache: Optional[List[Dict[str, Any]]] = None
         self._chat_cache_time: float = 0.0
         # Query-embedding cache for repeated prompts.
         self._embedding_cache: "OrderedDict[str, List[float]]" = OrderedDict()
         self._embedding_cache_max = 256
+
+    def _fresh_chats_cte_sql(self) -> str:
+        """Return the CTE SQL used to limit results to freshest chats."""
+        return (
+            "fresh_chats AS ("
+            "SELECT m.chat_id "
+            "FROM messages m "
+            "GROUP BY m.chat_id "
+            "ORDER BY MAX(m.timestamp) DESC "
+            f"LIMIT {self._max_fresh_chats}"
+            ")"
+        )
+
+    @staticmethod
+    def _fresh_chats_condition(alias: str = "m") -> str:
+        return f"{alias}.chat_id IN (SELECT chat_id FROM fresh_chats)"
 
     def _should_use_hybrid(self, search_terms: str) -> bool:
         """Use vector+FTS only for multi-term queries where it adds value."""
@@ -161,7 +180,7 @@ class MessageSearch:
             )
 
         params: List[Any] = [search_terms, str(query_embedding)]
-        conditions: List[str] = []
+        conditions: List[str] = [self._fresh_chats_condition("m")]
         self._append_filter_conditions(
             params,
             conditions,
@@ -188,7 +207,8 @@ class MessageSearch:
         limit_idx = len(params)
 
         sql = f"""
-            WITH q AS (
+            WITH {self._fresh_chats_cte_sql()},
+            q AS (
                 SELECT plainto_tsquery('english', $1) AS query_en,
                        plainto_tsquery('simple', $1) AS query_simple
             ),
@@ -261,6 +281,7 @@ class MessageSearch:
         params: List[Any] = [search_terms]
         fts_idx = len(params)
         conditions: List[str] = [
+            self._fresh_chats_condition("m"),
             "("
             f"m.text_search_vector @@ plainto_tsquery('english', ${fts_idx}) "
             "OR "
@@ -287,6 +308,7 @@ class MessageSearch:
         params.append(limit)
         limit_idx = len(params)
         sql = f"""
+            WITH {self._fresh_chats_cte_sql()}
             SELECT m.message_id, m.chat_id, c.title, m.sender_name,
                    m.reply_to_msg_id, m.thread_top_msg_id, m.is_topic_message,
                    m.timestamp, m.text,
@@ -311,7 +333,9 @@ class MessageSearch:
             return self._chat_cache[:limit] if limit and limit > 0 else self._chat_cache
 
         rows = await self._pool.fetch(
-            "SELECT chat_id, title, chat_type FROM chats ORDER BY updated_at DESC NULLS LAST, title"
+            "SELECT chat_id, title, chat_type FROM chats "
+            "ORDER BY updated_at DESC NULLS LAST, title "
+            f"LIMIT {self._max_fresh_chats}"
         )
         self._chat_cache = [dict(r) for r in rows]
         self._chat_cache_time = time.monotonic()
@@ -361,7 +385,7 @@ class MessageSearch:
             )
 
         params: list = []
-        conditions: list = []
+        conditions: list = [self._fresh_chats_condition("m")]
         self._append_filter_conditions(
             params,
             conditions,
@@ -380,6 +404,7 @@ class MessageSearch:
         limit_idx = len(params)
 
         sql = f"""
+            WITH {self._fresh_chats_cte_sql()}
             SELECT m.message_id, m.chat_id, c.title, m.sender_name,
                    m.reply_to_msg_id, m.thread_top_msg_id, m.is_topic_message,
                    m.timestamp, m.text,
@@ -406,7 +431,7 @@ class MessageSearch:
         This powers "summarize freshest chats" style requests where breadth
         across chats is more important than per-message relevance ranking.
         """
-        chat_limit = max(1, int(chat_limit))
+        chat_limit = min(self._max_fresh_chats, max(1, int(chat_limit)))
         per_chat_messages = max(1, int(per_chat_messages))
 
         params: List[Any] = [chat_limit, per_chat_messages]
@@ -470,7 +495,10 @@ class MessageSearch:
         days_back = max(1, int(days_back))
 
         params: List[Any] = [int(owner_id)]
-        conditions: List[str] = ["m.sender_id IS DISTINCT FROM $1"]
+        conditions: List[str] = [
+            self._fresh_chats_condition("m"),
+            "m.sender_id IS DISTINCT FROM $1",
+        ]
 
         cutoff = datetime.now(timezone.utc) - timedelta(days=days_back)
         params.append(cutoff)
@@ -502,6 +530,7 @@ class MessageSearch:
         limit_idx = len(params)
 
         sql = f"""
+            WITH {self._fresh_chats_cte_sql()}
             SELECT m.message_id, m.chat_id, c.title, m.sender_name,
                    m.reply_to_msg_id, m.thread_top_msg_id, m.is_topic_message,
                    m.timestamp, m.text,
@@ -513,6 +542,59 @@ class MessageSearch:
             LIMIT ${limit_idx}
         """
 
+        rows = await self._pool.fetch(sql, *params)
+        return self._rows_to_results(rows)
+
+    async def open_questions_needing_reply(
+        self,
+        *,
+        owner_id: int,
+        days_back: int = 1,
+        limit: int = 120,
+    ) -> List[SearchResult]:
+        """Return recent question messages that appear unanswered by the owner.
+
+        A question is considered "likely unanswered" when:
+          - it contains a question mark,
+          - the sender is not the owner,
+          - there is no later owner reply directly to that message, and
+          - there is no later owner message in the same thread (forum topics).
+        """
+        limit = max(1, int(limit))
+        days_back = max(1, int(days_back))
+
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days_back)
+        params: List[Any] = [int(owner_id), cutoff, limit]
+
+        sql = f"""
+            WITH {self._fresh_chats_cte_sql()}
+            SELECT q.message_id, q.chat_id, c.title, q.sender_name,
+                   q.reply_to_msg_id, q.thread_top_msg_id, q.is_topic_message,
+                   q.timestamp, q.text,
+                   1.0 AS score
+            FROM messages q
+            JOIN chats c ON c.chat_id = q.chat_id
+            WHERE {self._fresh_chats_condition("q")}
+              AND q.sender_id IS DISTINCT FROM $1
+              AND q.timestamp >= $2
+              AND COALESCE(q.text, '') ~ '\\?'
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM messages r
+                  WHERE r.chat_id = q.chat_id
+                    AND r.sender_id = $1
+                    AND r.timestamp > q.timestamp
+                    AND (
+                        r.reply_to_msg_id = q.message_id
+                        OR (
+                            q.thread_top_msg_id IS NOT NULL
+                            AND r.thread_top_msg_id = q.thread_top_msg_id
+                        )
+                    )
+              )
+            ORDER BY q.timestamp DESC, q.message_id DESC
+            LIMIT $3
+        """
         rows = await self._pool.fetch(sql, *params)
         return self._rows_to_results(rows)
 
@@ -531,7 +613,8 @@ class MessageSearch:
         syntax from user input — prevents injection via crafted operators).
         """
         rows = await self._pool.fetch(
-            """
+            f"""
+            WITH {self._fresh_chats_cte_sql()}
             SELECT m.message_id, m.chat_id, c.title, m.sender_name,
                    m.reply_to_msg_id, m.thread_top_msg_id, m.is_topic_message,
                    m.timestamp, m.text,
@@ -543,8 +626,11 @@ class MessageSearch:
             JOIN chats c ON c.chat_id = m.chat_id,
                  plainto_tsquery('english', $1) query,
                  plainto_tsquery('simple', $1) query_simple
-            WHERE m.text_search_vector @@ query
-               OR m.text_search_vector_simple @@ query_simple
+            WHERE (
+                m.text_search_vector @@ query
+                OR m.text_search_vector_simple @@ query_simple
+            )
+              AND {self._fresh_chats_condition("m")}
             ORDER BY score DESC
             LIMIT $2
             """,
@@ -569,7 +655,8 @@ class MessageSearch:
         query_embedding = await self._get_query_embedding(query)
 
         rows = await self._pool.fetch(
-            """
+            f"""
+            WITH {self._fresh_chats_cte_sql()}
             SELECT m.message_id, m.chat_id, c.title, m.sender_name,
                    m.reply_to_msg_id, m.thread_top_msg_id, m.is_topic_message,
                    m.timestamp, m.text,
@@ -577,6 +664,7 @@ class MessageSearch:
             FROM messages m
             JOIN chats c ON c.chat_id = m.chat_id
             WHERE m.embedding IS NOT NULL
+              AND {self._fresh_chats_condition("m")}
             ORDER BY m.embedding <=> $1::vector
             LIMIT $2
             """,

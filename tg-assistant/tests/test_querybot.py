@@ -7,11 +7,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from querybot.handlers import (
+    _extract_mentions_window_days,
+    _extract_open_questions_window_days,
     _parse_fresh_args,
     _parse_window_and_detail_args,
     _get_sync_status_context,
     _sanitize_telegram_html,
     _split_message,
+    handle_bd,
     handle_fresh,
     handle_message,
     handle_mentions,
@@ -122,6 +125,11 @@ class TestSanitizeTelegramHtml:
         """Anchor tags with href should be fully preserved."""
         text = '<a href="https://example.com/a?b=1&c=2">click</a>'
         assert _sanitize_telegram_html(text) == text
+
+    def test_preescaped_angle_entities_not_double_escaped(self):
+        """Already-escaped chat titles like '&lt;&gt;' should render correctly."""
+        text = "Engineering &lt;&gt; Acme"
+        assert _sanitize_telegram_html(text) == "Engineering &lt;&gt; Acme"
 
 
 # ---------------------------------------------------------------------------
@@ -244,6 +252,24 @@ class TestCommandArgParsing:
         _, _, err = _parse_fresh_args(["11"])
         assert err is not None
 
+    def test_extract_mentions_window_days_week(self):
+        days = _extract_mentions_window_days("show me my mentions over the past week")
+        assert days == 7
+
+    def test_extract_mentions_window_days_none(self):
+        days = _extract_mentions_window_days("summarize my project updates")
+        assert days is None
+
+    def test_extract_open_questions_window_days(self):
+        days = _extract_open_questions_window_days(
+            "Are there any open questions unanswered over the past 3d?"
+        )
+        assert days == 3
+
+    def test_extract_open_questions_window_days_none(self):
+        days = _extract_open_questions_window_days("show me my mentions")
+        assert days is None
+
 
 # ---------------------------------------------------------------------------
 # handle_message flow (intent extraction → filtered search → Claude)
@@ -271,6 +297,7 @@ def _make_handler_context(
     mock_search.full_text_search.return_value = fallback_results or []
     mock_search.recent_chat_summary_context.return_value = search_results or []
     mock_search.mentions_needing_attention.return_value = search_results or []
+    mock_search.open_questions_needing_reply.return_value = search_results or []
 
     mock_llm = AsyncMock()
     mock_llm.extract_query_intent.return_value = intent or QueryIntent(
@@ -544,6 +571,62 @@ class TestHandleMessage:
         mock_search.filtered_search.assert_not_called()
         mock_llm.query.assert_called_once()
 
+    @pytest.mark.asyncio
+    async def test_mentions_free_text_routes_to_mentions_pipeline(self):
+        result = SearchResult(
+            message_id=1,
+            chat_id=1,
+            chat_title="Ops Chat",
+            sender_name="Alice",
+            timestamp="2024-01-15T10:00:00Z",
+            text="@owner can you review this?",
+            score=1.0,
+        )
+        update, context, mock_search, mock_llm, mock_audit = _make_handler_context(
+            search_results=[result],
+            llm_answer="Act Now: ...",
+        )
+        update.message.text = "show me my mentions over the past week"
+        update.effective_user.username = "owner"
+
+        await handle_message(update, context)
+
+        mock_search.mentions_needing_attention.assert_called_once_with(
+            owner_id=12345,
+            mention_aliases=["@owner"],
+            days_back=7,
+            limit=80,
+        )
+        mock_llm.extract_query_intent.assert_not_called()
+        assert mock_audit.log.call_args[0][1] == "query_mentions"
+
+    @pytest.mark.asyncio
+    async def test_open_questions_free_text_routes_to_bd_pipeline(self):
+        result = SearchResult(
+            message_id=1,
+            chat_id=1,
+            chat_title="Ops Chat",
+            sender_name="Alice",
+            timestamp="2024-01-15T10:00:00Z",
+            text="Can you confirm the rollout?",
+            score=1.0,
+        )
+        update, context, mock_search, mock_llm, mock_audit = _make_handler_context(
+            search_results=[result],
+            llm_answer="Need My Reply: ...",
+        )
+        update.message.text = "are there open questions unanswered over the past week?"
+
+        await handle_message(update, context)
+
+        mock_search.open_questions_needing_reply.assert_called_once_with(
+            owner_id=12345,
+            days_back=7,
+            limit=80,
+        )
+        mock_llm.extract_query_intent.assert_not_called()
+        assert mock_audit.log.call_args[0][1] == "query_bd"
+
 
 # ---------------------------------------------------------------------------
 # Command handlers (/mentions, /summary, /fresh, /more)
@@ -577,6 +660,36 @@ class TestScaffoldCommandHandlers:
         assert llm_kwargs["context_max_chars"] == 12000
         assert llm_kwargs["max_tokens_override"] == 1200
         assert mock_audit.log.call_args[0][1] == "command_mentions"
+
+    @pytest.mark.asyncio
+    async def test_bd_command_pipeline(self):
+        result = SearchResult(
+            message_id=1,
+            chat_id=1,
+            chat_title="Ops Chat",
+            sender_name="Alice",
+            timestamp="2024-01-15T10:00:00Z",
+            text="Can you confirm the rollout?",
+            score=1.0,
+        )
+        update, context, mock_search, mock_llm, mock_audit = _make_handler_context(
+            search_results=[result],
+            llm_answer="Need My Reply: ...",
+        )
+        context.args = ["3d", "quick"]
+
+        await handle_bd(update, context)
+
+        mock_search.open_questions_needing_reply.assert_called_once_with(
+            owner_id=12345,
+            days_back=3,
+            limit=80,
+        )
+        mock_llm.query.assert_called_once()
+        llm_kwargs = mock_llm.query.call_args.kwargs
+        assert llm_kwargs["context_max_chars"] == 12000
+        assert llm_kwargs["max_tokens_override"] == 1200
+        assert mock_audit.log.call_args[0][1] == "command_bd"
 
     @pytest.mark.asyncio
     async def test_summary_command_uses_time_window(self):

@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Dict
 
 import toml
-from telegram import BotCommand, Update
+from telegram import BotCommand, BotCommandScopeAllPrivateChats, Update
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -29,6 +29,7 @@ from telegram.ext import (
 )
 
 from querybot.handlers import (
+    handle_bd,
     handle_fresh,
     handle_help,
     handle_message,
@@ -211,15 +212,19 @@ def build_application(config: Dict[str, Any]) -> Application:
 
         # Surface the primary UX commands directly in Telegram's command menu.
         try:
+            commands = [
+                BotCommand("summary", "Time-window recap (1d, 3d, 1w)"),
+                BotCommand("mentions", "Items likely needing your reply"),
+                BotCommand("bd", "Likely unanswered open questions"),
+                BotCommand("fresh", "Snapshot of freshest chats"),
+                BotCommand("more", "Continue previous long response"),
+                BotCommand("stats", "Sync and usage statistics"),
+                BotCommand("help", "Show command usage"),
+            ]
+            await app.bot.set_my_commands(commands)
             await app.bot.set_my_commands(
-                [
-                    BotCommand("summary", "Time-window recap (1d, 3d, 1w)"),
-                    BotCommand("mentions", "Items likely needing your reply"),
-                    BotCommand("fresh", "Snapshot of freshest chats"),
-                    BotCommand("more", "Continue previous long response"),
-                    BotCommand("stats", "Sync and usage statistics"),
-                    BotCommand("help", "Show command usage"),
-                ]
+                commands,
+                scope=BotCommandScopeAllPrivateChats(),
             )
         except Exception:
             logger.warning("Failed to set bot command menu", exc_info=True)
@@ -242,6 +247,7 @@ def build_application(config: Dict[str, Any]) -> Application:
     app.add_handler(CommandHandler("help", handle_help, filters=owner_filter))
     app.add_handler(CommandHandler("stats", handle_stats, filters=owner_filter))
     app.add_handler(CommandHandler("mentions", handle_mentions, filters=owner_filter))
+    app.add_handler(CommandHandler("bd", handle_bd, filters=owner_filter))
     app.add_handler(CommandHandler("summary", handle_summary, filters=owner_filter))
     app.add_handler(CommandHandler("fresh", handle_fresh, filters=owner_filter))
     app.add_handler(CommandHandler("more", handle_more, filters=owner_filter))

@@ -203,7 +203,8 @@ class TestFilteredSearchOptimized:
         mock_embedder.generate_embedding.assert_called_once_with("launch update")
         mock_pool.fetch.assert_called_once()
         sql = mock_pool.fetch.call_args[0][0]
-        assert "WITH q AS" in sql
+        assert "WITH fresh_chats AS" in sql
+        assert "q AS" in sql
         assert "FROM candidates k" in sql
 
     @pytest.mark.asyncio
@@ -298,6 +299,8 @@ class TestChatListCaching:
         assert len(first) == 2
         assert len(second) == 1
         mock_pool.fetch.assert_called_once()
+        sql = mock_pool.fetch.call_args[0][0]
+        assert "LIMIT 250" in sql
 
 
 class TestEmbeddingCaching:
@@ -363,6 +366,23 @@ class TestRecentChatSummaryContext:
         assert "WITH freshest AS" in sql
         assert "ROW_NUMBER() OVER" in sql
 
+    @pytest.mark.asyncio
+    async def test_recent_chat_summary_context_caps_chat_limit(self):
+        mock_pool = MagicMock()
+        mock_pool.fetch = AsyncMock(return_value=[])
+        mock_embedder = MagicMock()
+        mock_embedder.dimension = 384
+
+        search = MessageSearch(mock_pool, mock_embedder)
+        await search.recent_chat_summary_context(
+            chat_limit=500,
+            per_chat_messages=2,
+            days_back=30,
+        )
+
+        params = mock_pool.fetch.call_args[0][1:]
+        assert params[0] == 250
+
 
 class TestMentionsNeedingAttention:
     @pytest.mark.asyncio
@@ -385,3 +405,25 @@ class TestMentionsNeedingAttention:
         sql = mock_pool.fetch.call_args[0][0]
         assert "reply_to_msg_id" in sql
         assert "ILIKE" in sql
+
+
+class TestOpenQuestionsNeedingReply:
+    @pytest.mark.asyncio
+    async def test_open_questions_query_uses_reply_gap_heuristic(self):
+        mock_pool = MagicMock()
+        mock_pool.fetch = AsyncMock(return_value=[])
+        mock_embedder = MagicMock()
+        mock_embedder.dimension = 384
+
+        search = MessageSearch(mock_pool, mock_embedder)
+        results = await search.open_questions_needing_reply(
+            owner_id=123,
+            days_back=3,
+            limit=50,
+        )
+
+        assert results == []
+        mock_pool.fetch.assert_called_once()
+        sql = mock_pool.fetch.call_args[0][0]
+        assert "COALESCE(q.text, '') ~ '\\?'" in sql
+        assert "r.reply_to_msg_id = q.message_id" in sql

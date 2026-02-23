@@ -692,6 +692,59 @@ class TestSyncOnce:
         )
 
     @pytest.mark.asyncio
+    async def test_sync_once_clamps_configured_max_active_chats_to_hard_limit(self):
+        """Configured max_active_chats above the hard cap should clamp to 250."""
+        from syncer.main import _HARD_MAX_ACTIVE_CHATS, sync_once
+
+        dialog = MagicMock()
+        dialog.id = 111
+        dialog.title = "Newest"
+        dialog.is_group = False
+        dialog.is_channel = False
+        dialog.date = datetime.now(timezone.utc)
+
+        msg = MagicMock()
+        msg.id = 500
+        msg.text = "hello"
+        msg.message = "hello"
+        msg.date = datetime.now(timezone.utc)
+        msg.sender = None
+        msg.to_dict.return_value = {}
+
+        mock_client = MagicMock()
+        mock_client.get_dialogs = AsyncMock(return_value=[dialog])
+        mock_client.iter_messages = MagicMock(return_value=self._iter_messages([msg]))
+
+        mock_store = AsyncMock()
+        mock_store.get_last_synced_id.return_value = None
+        mock_store.store_messages_batch.return_value = 1
+
+        mock_embedder = MagicMock()
+        mock_embedder.dimension = 0
+        mock_audit = AsyncMock()
+
+        config = {
+            "syncer": {
+                "batch_size": 100,
+                "rate_limit_seconds": 0,
+                "max_history_days": 0,
+                "max_active_chats": 999,
+            }
+        }
+
+        with patch("syncer.main.rate_limit_delay", new_callable=AsyncMock):
+            count = await sync_once(
+                mock_client, mock_store, mock_embedder, mock_audit, config
+            )
+
+        assert count == 1
+        start_call = next(
+            call for call in mock_audit.log.call_args_list
+            if call.args[1] == "sync_pass_start"
+        )
+        assert start_call.args[2]["max_active_chats"] == _HARD_MAX_ACTIVE_CHATS
+
+    @pytest.mark.asyncio
     async def test_sync_once_filters_chat_types(self):
         """sync_once should auto-skip non-group chats when include_chat_types is group-only."""
         from syncer.main import sync_once
