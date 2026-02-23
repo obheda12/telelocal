@@ -92,47 +92,9 @@ flowchart TB
 - systemd hardening directives.
 - dual audit sinks (`/var/log/tg-assistant/audit.log` and `audit_log` table).
 
-Deeper architecture notes (components, boundaries, compromise containment):
+**Deeper architecture notes (components, boundaries, compromise containment):**
 
 - `tg-assistant/docs/ARCHITECTURE.md`
-
----
-
-## Design Priorities
-
-### 1. Local Data Plane
-
-- Telegram messages are synced into local Postgres first.
-- Query-time filtering/ranking runs locally.
-- Only the selected top-K context is sent to Claude for synthesis.
-
-### 2. Security-First Boundaries
-
-- Syncer and querybot run as separate system users.
-- Distinct DB roles enforce least privilege.
-- Per-process nftables egress policy constrains outbound traffic.
-- Secrets are loaded via `systemd` credentials and encrypted at rest.
-
-### 3. Operator Simplicity
-
-- One setup flow: `./scripts/setup.sh`
-- One CLI: `telelocal`
-- Central scope control: chat types + exclusions + caps
-
----
-
-## Why Not Bot-Per-Chat Workflows
-
-Bot API-first tools (including OpenClaw-style patterns) commonly require adding a bot to every chat you want indexed. That is operationally expensive for high-chat-count users and easy to drift (new chats are missed until manually added).
-
-Telelocal chooses account-level read-only ingestion via Telethon, then local indexing.
-
-| Aspect | Bot-Per-Chat Pattern | Telelocal |
-|---|---|---|
-| Coverage model | Manual bot membership per chat | Central sync scope from account dialogs |
-| Operations | Ongoing per-chat administration | One scope policy + optional exclusions |
-| Freshness consistency | Depends on bot placement discipline | Freshest-first sync loop across configured scope |
-| Security model | Bot token centered | Session + host hardening + role/network isolation |
 
 ---
 
@@ -157,17 +119,6 @@ Security in Telelocal is layered, not single-control:
 - Credentials are injected via `LoadCredentialEncrypted=` and decrypted only for service runtime.
 - Querybot egress is DNS-refreshed IP-set based (`api.telegram.org`, `api.anthropic.com`), and syncer egress is limited to Telegram MTProto ranges.
 - DB role split enforces least privilege (`syncer_role` write-limited for ingestion path; `querybot_role` read-only on message corpus).
-
-
-### Threat snapshot
-
-| Threat | Severity | Primary mitigation |
-|---|---|---|
-| Telethon session theft | Critical | Encrypted session at rest + service isolation + key separation |
-| Unintended Telegram writes | Critical | Read-only allowlist wrapper (default deny) |
-| Data exfiltration from compromised service | High | Per-service nftables egress policy |
-| Unauthorized bot use | High | Owner-only filtering + handler checks |
-| Prompt injection via synced content | Medium | Untrusted-context prompt design + scoped retrieval + no write path |
 
 ---
 
@@ -277,22 +228,6 @@ Operator-focused bot prompts:
 
 ---
 
-## Performance Tuning For Large Accounts
-
-If your primary goal is faster ingestion and usable freshness:
-
-1. Set `syncer.max_active_chats` (for example, `500`) to cap each pass to freshest chats.
-2. Keep `syncer.max_history_days` bounded (for example, `30`) for initial chat sync depth.
-3. Narrow `syncer.include_chat_types` (for example, group-focused).
-4. Keep `syncer.defer_embeddings = true` to decouple write path from embedding throughput.
-5. Tune `querybot.max_intent_chats` to lower intent latency/cost for very large chat lists.
-
-Benchmark helper:
-
-- `./scripts/benchmark-pipeline.sh`
-
----
-
 ## Repository Layout
 
 ```text
@@ -315,20 +250,20 @@ tg-assistant/
 
 ### High-value assets and actors
 
-Highest-value assets:
+**Highest-value assets:**
 
 - Telethon session + session encryption key (account-level impact if misused)
 - bot token and Claude API key
 - local message corpus and audit logs
 
-Most relevant threat actors:
+**Most relevant threat actors:**
 
 - opportunistic internet attacker
 - targeted attacker
 - malicious chat participant (prompt injection path)
 - compromised dependency (in-process code execution)
 
-Key threat snapshot:
+**Key threats:**
 
 | Threat | Severity | Primary controls |
 |---|---|---|
@@ -338,19 +273,19 @@ Key threat snapshot:
 | Unauthorized bot access | High | owner-only filter + handler guard |
 | Prompt injection in synced content | Medium | untrusted-context prompt design, scoped retrieval, no direct write path |
 
-Accepted-risk realities:
+**Accepted-risks:**
 
 - root/kernel compromise remains high impact,
 - prompt injection risk is reduced but not eliminated,
 - scoped/top-K context still leaves host for Claude synthesis.
 
-Operating assumptions:
+**Operating assumptions:**
 
 - host patching is maintained,
 - systemd/nftables policy remains intact after updates,
 - DNS resolvers used for dynamic API allowlists are trustworthy.
 
-Threat model references:
+**Threat model references:**
 
 - concise STRIDE summary: `tg-assistant/docs/THREAT_MODEL.md`
 - full model, assumptions, and incident playbook: `tg-assistant/docs/SECURITY_MODEL.md`
