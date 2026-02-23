@@ -6,6 +6,7 @@
 #
 # Usage:
 #   telenad setup          Full guided deployment
+#   telenad update         Deploy latest checked-out code to /opt safely
 #   telenad session        Create/recreate Telethon session
 #   telenad wipe           Destroy all credentials and state
 #   telenad status         Check service health
@@ -32,6 +33,7 @@ usage() {
     echo ""
     echo "Setup & teardown:"
     echo "  setup          Full guided deployment (requires sudo)"
+    echo "  update         Deploy latest code to /opt safely (requires sudo)"
     echo "  session        Create or recreate Telethon session (requires sudo)"
     echo "  wipe           Destroy all credentials, sessions, and state (requires sudo)"
     echo ""
@@ -64,6 +66,11 @@ cmd_setup() {
 cmd_session() {
     require_sudo "session"
     exec "${SCRIPT_DIR}/setup-telethon-session.sh"
+}
+
+cmd_update() {
+    require_sudo "update"
+    exec "${SCRIPT_DIR}/deploy-update.sh"
 }
 
 cmd_wipe() {
@@ -159,9 +166,9 @@ cmd_logs() {
 
 cmd_restart() {
     require_sudo "restart"
-    systemctl restart tg-syncer tg-querybot
-    echo "Restarted tg-syncer and tg-querybot"
-    sleep 2
+    systemctl restart --no-block tg-syncer tg-querybot
+    echo "Restart requested for tg-syncer and tg-querybot (non-blocking)"
+    sleep 1
     cmd_status
 }
 
@@ -186,6 +193,7 @@ COMMAND="${1:-}"
 
 case "${COMMAND}" in
     setup)      cmd_setup ;;
+    update)     cmd_update ;;
     session)    cmd_session ;;
     wipe)       cmd_wipe ;;
     status)      cmd_status ;;

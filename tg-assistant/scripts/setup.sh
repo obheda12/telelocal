@@ -602,6 +602,7 @@ print_final_summary() {
     echo "  telenad status                           # Check service health"
     echo "  telenad sync-status                      # Sync progress per chat"
     echo "  telenad logs                             # Tail service logs"
+    echo "  telenad update                           # Deploy latest code safely"
     echo "  telenad restart                          # Restart after changes"
     echo "  telenad session                          # Recreate Telethon session"
     echo ""

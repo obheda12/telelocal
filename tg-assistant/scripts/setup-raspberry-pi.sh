@@ -728,7 +728,8 @@ deploy_application() {
             log_success "Permissions verified on ${INSTALL_DIR}/src"
         fi
     elif [[ -d "${PROJECT_ROOT}/src" ]]; then
-        cp -r "${PROJECT_ROOT}/src" "${INSTALL_DIR}/src"
+        rm -rf "${INSTALL_DIR}/src"
+        cp -a "${PROJECT_ROOT}/src" "${INSTALL_DIR}/src"
         chown -R root:root "${INSTALL_DIR}/src"
         chmod -R 755 "${INSTALL_DIR}/src"
         log_success "Application source deployed to ${INSTALL_DIR}/src"
@@ -744,7 +745,8 @@ deploy_application() {
 
     # Deploy scripts and install CLI
     if [[ "${REAL_PROJECT}" != "${REAL_INSTALL}" && -d "${PROJECT_ROOT}/scripts" ]]; then
-        cp -r "${PROJECT_ROOT}/scripts" "${INSTALL_DIR}/scripts"
+        rm -rf "${INSTALL_DIR}/scripts"
+        cp -a "${PROJECT_ROOT}/scripts" "${INSTALL_DIR}/scripts"
     fi
     if [[ -d "${INSTALL_DIR}/scripts" ]]; then
         chmod +x "${INSTALL_DIR}/scripts/"*.sh "${INSTALL_DIR}/scripts/telenad" 2>/dev/null || true

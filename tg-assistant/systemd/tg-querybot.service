@@ -75,6 +75,8 @@ LoadCredentialEncrypted=tg-assistant-claude-api-key:/etc/credstore.encrypted/tg-
 # -----------------------------------------------------------------------------
 Restart=on-failure
 RestartSec=10
+# Bound stop latency so restart/upgrade workflows don't block for long.
+TimeoutStopSec=20s
 
 # -----------------------------------------------------------------------------
 # SECURITY HARDENING

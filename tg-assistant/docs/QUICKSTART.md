@@ -204,19 +204,18 @@ sudo ls -la /var/lib/tg-syncer/
 ## Updating
 
 ```bash
-cd ~/tg-assistant
+cd ~/telenad/tg-assistant
 git pull
 
-# Update Python dependencies
-source /opt/tg-assistant/venv/bin/activate
-pip install -r requirements.txt
-
-# Restart services
-sudo systemctl restart tg-syncer tg-querybot
+# Deploy to /opt without deleting runtime assets (venv/models)
+sudo ./scripts/deploy-update.sh
 
 # Re-verify security after updates
 sudo ./tests/security-verification.sh
 ```
+
+Avoid `rsync --delete` directly into `/opt/tg-assistant` unless you exclude
+`venv` and `models`, otherwise services may fail to start.
 
 ### Optional: backfill embeddings
 

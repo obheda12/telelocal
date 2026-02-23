@@ -82,6 +82,9 @@ LoadCredentialEncrypted=tg-assistant-api-hash:/etc/credstore.encrypted/tg-assist
 # -----------------------------------------------------------------------------
 Restart=on-failure
 RestartSec=10
+# Keep stop latency bounded during long Telegram API calls so restart commands
+# remain responsive. The service handles SIGTERM gracefully where possible.
+TimeoutStopSec=25s
 
 # -----------------------------------------------------------------------------
 # SECURITY HARDENING
