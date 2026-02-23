@@ -81,22 +81,6 @@ flowchart LR
     NFT --> Q
 ```
 
-Trust interpretation:
-
-- Trusted: local host controls and local database.
-- Semi-trusted: Telegram transport and content source.
-- Untrusted for control purposes: external message content and internet-facing dependencies.
-- Data minimization: only scoped top-K context leaves host per query.
-
-Security layering summary:
-
-```mermaid
-flowchart LR
-    A["Host hardening<br/>(systemd sandbox + users)"] --> B["Network control<br/>(nftables per service UID)"]
-    B --> C["App controls<br/>(read-only wrapper + owner-only handlers)"]
-    C --> D["Data controls<br/>(DB roles + scoped retrieval + audit)"]
-```
-
 Deeper architecture notes (components, boundaries, compromise containment):
 
 - `tg-assistant/docs/ARCHITECTURE.md`
