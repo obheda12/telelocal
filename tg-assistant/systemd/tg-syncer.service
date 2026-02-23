@@ -26,6 +26,9 @@ Documentation=file:///opt/tg-assistant/docs/QUICKSTART.md
 After=network-online.target postgresql.service
 Requires=postgresql.service
 Wants=network-online.target
+# After 5 failures within 5 minutes, stop trying (likely a config issue)
+StartLimitBurst=5
+StartLimitIntervalSec=300
 
 [Service]
 Type=simple
@@ -79,9 +82,6 @@ LoadCredentialEncrypted=tg-assistant-api-hash:/etc/credstore.encrypted/tg-assist
 # -----------------------------------------------------------------------------
 Restart=on-failure
 RestartSec=10
-# After 5 failures within 5 minutes, stop trying (likely a config issue)
-StartLimitBurst=5
-StartLimitIntervalSec=300
 
 # -----------------------------------------------------------------------------
 # SECURITY HARDENING

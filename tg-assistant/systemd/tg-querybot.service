@@ -26,6 +26,8 @@ Documentation=file:///opt/tg-assistant/docs/QUICKSTART.md
 After=network-online.target postgresql.service tg-syncer.service
 Requires=postgresql.service
 Wants=network-online.target
+StartLimitBurst=5
+StartLimitIntervalSec=300
 
 [Service]
 Type=simple
@@ -73,8 +75,6 @@ LoadCredentialEncrypted=tg-assistant-claude-api-key:/etc/credstore.encrypted/tg-
 # -----------------------------------------------------------------------------
 Restart=on-failure
 RestartSec=10
-StartLimitBurst=5
-StartLimitIntervalSec=300
 
 # -----------------------------------------------------------------------------
 # SECURITY HARDENING

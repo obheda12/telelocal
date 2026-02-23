@@ -20,6 +20,7 @@ import os
 import random
 import signal
 import sys
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict
@@ -86,7 +87,8 @@ async def rate_limit_delay(seconds: float = 1.0) -> None:
     Args:
         seconds: Minimum delay between consecutive API calls.
     """
-    await asyncio.sleep(seconds + random.uniform(0.1, 1.5))
+    delay = max(0.0, seconds) + random.uniform(0.1, 1.5)
+    await _sleep_with_shutdown(delay)
 
 
 # ---------------------------------------------------------------------------
@@ -114,6 +116,9 @@ async def prescan_dialogs(
     counts: Dict[int, int] = {}
 
     for dialog in dialogs:
+        if _shutdown_event.is_set():
+            logger.info("Pre-scan interrupted by shutdown request.")
+            break
         try:
             result = await client.get_messages(dialog, limit=0)
             total = getattr(result, "total", 0) or 0
@@ -123,7 +128,10 @@ async def prescan_dialogs(
                 "Pre-scan failed for chat %s", dialog.id, exc_info=True
             )
             counts[dialog.id] = 0
-        await asyncio.sleep(0.5)
+        if _shutdown_event.is_set():
+            logger.info("Pre-scan interrupted by shutdown request.")
+            break
+        await _sleep_with_shutdown(0.5)
 
     grand_total = sum(counts.values())
     logger.info(
@@ -295,6 +303,10 @@ async def sync_once(
     use_vectors = embedder.dimension is not None and embedder.dimension > 0
 
     total_new = 0
+    if _shutdown_event.is_set():
+        logger.info("Shutdown already requested; skipping sync pass start.")
+        return total_new
+
     embedding_worker: DeferredEmbeddingWorker | None = None
     if use_vectors and defer_embeddings:
         embedding_worker = DeferredEmbeddingWorker(
@@ -411,6 +423,9 @@ async def sync_once(
     if enable_prescan_progress:
         msg_counts = await prescan_dialogs(client, active_dialogs)
         grand_total = sum(msg_counts.values())
+        if _shutdown_event.is_set():
+            logger.info("Shutdown requested during pre-scan; ending sync pass early.")
+            return total_new
     else:
         msg_counts = {d.id: 0 for d in active_dialogs}
         grand_total = 0
@@ -433,6 +448,14 @@ async def sync_once(
         logger.debug("MessageStore.get_last_synced_ids unavailable; using per-chat lookup")
 
     for chat_idx, dialog in enumerate(active_dialogs):
+        if _shutdown_event.is_set():
+            logger.info(
+                "Shutdown requested; stopping sync pass after %d/%d chats.",
+                chat_idx,
+                active_count,
+            )
+            break
+
         chat_id = dialog.id
         chat_title = getattr(dialog, "title", None) or getattr(dialog, "name", str(chat_id))
         estimated = msg_counts.get(chat_id, 0)
@@ -476,6 +499,14 @@ async def sync_once(
         processed_count = 0
 
         async for msg in iterator:
+            if _shutdown_event.is_set():
+                logger.info(
+                    "Shutdown requested while syncing chat %s (%s); flushing partial batch.",
+                    chat_id,
+                    chat_title,
+                )
+                break
+
             msg_date = msg.date
             if msg_date and msg_date.tzinfo is None:
                 msg_date = msg_date.replace(tzinfo=timezone.utc)
@@ -615,6 +646,9 @@ async def sync_once(
 
         # Keep idle chat probes fast; full delay only when data was processed.
         await rate_limit_delay(rate_seconds if processed_count > 0 else idle_chat_delay_seconds)
+        if _shutdown_event.is_set():
+            logger.info("Shutdown requested during inter-chat delay; ending sync pass.")
+            break
 
     if embedding_worker is not None:
         embed_stats = await embedding_worker.close()
@@ -638,7 +672,22 @@ async def sync_once(
 # Graceful shutdown
 # ---------------------------------------------------------------------------
 
-_shutdown_event: asyncio.Event = asyncio.Event()
+_shutdown_event: threading.Event = threading.Event()
+
+
+async def _sleep_with_shutdown(seconds: float) -> bool:
+    """Sleep for up to ``seconds`` while remaining responsive to shutdown."""
+    if _shutdown_event.is_set():
+        return True
+
+    remaining = max(0.0, seconds)
+    while remaining > 0:
+        if _shutdown_event.is_set():
+            return True
+        tick = min(0.5, remaining)
+        await asyncio.sleep(tick)
+        remaining -= tick
+    return _shutdown_event.is_set()
 
 
 def _handle_signal(sig: int, frame: Any) -> None:
@@ -727,12 +776,7 @@ async def main() -> None:
                     )
 
                 # Wait for the next cycle or a shutdown signal
-                try:
-                    await asyncio.wait_for(
-                        _shutdown_event.wait(), timeout=sync_interval
-                    )
-                except asyncio.TimeoutError:
-                    pass  # normal — timeout means it's time to sync again
+                await _sleep_with_shutdown(sync_interval)
     finally:
         if audit is not None:
             try:

@@ -92,10 +92,11 @@ idle_chat_delay_seconds = 0.1
 log_batch_progress = false
 
 # Optional: decouple ingest from embedding generation.
-# false (default): generate embeddings inline before insert (simple, consistent)
-# true: store messages first, then backfill embeddings in a background worker
-# while sync continues. This improves ingest throughput on busy accounts.
-defer_embeddings = false
+# false: generate embeddings inline before insert (simple, consistent)
+# true (default): store messages first, then backfill embeddings in a
+# background worker while sync continues. This improves ingest throughput
+# and avoids blocking initial sync on local embedding throughput.
+defer_embeddings = true
 
 # Deferred embedding worker batch size (only used when defer_embeddings=true).
 # Larger values improve embedding throughput; smaller values reduce latency.
@@ -219,9 +220,9 @@ provider = "local"
 local_model = "all-MiniLM-L6-v2"
 local_dimensions = 384
 
-# Inference backend: "onnx" for ONNX Runtime (2-5x faster on ARM64),
-# "torch" for standard PyTorch.  Falls back to torch if ONNX unavailable.
-backend = "onnx"
+# Inference backend: "torch" is the safest default across Raspberry Pi
+# variants. "onnx" can be faster but may crash on some ARM environments.
+backend = "torch"
 
 # =============================================================================
 # SECURITY

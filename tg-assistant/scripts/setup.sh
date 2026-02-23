@@ -590,7 +590,7 @@ print_final_summary() {
     echo "  - systemd services enabled"
     echo ""
     echo -e "${BOLD}Next:${NC}"
-    echo "  1. The syncer is now pulling your last 90 days of messages."
+    echo "  1. The syncer is now pulling messages using your configured max_history_days window."
     echo "     Initial sync takes 10-30 minutes depending on history size."
     echo "     Monitor progress with: telenad sync-status"
     echo "  2. You can message the bot right away — it will tell you when"

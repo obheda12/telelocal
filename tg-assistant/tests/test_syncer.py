@@ -488,6 +488,29 @@ class TestSyncOnce:
         assert count == 0
 
     @pytest.mark.asyncio
+    async def test_sync_once_skips_when_shutdown_requested(self):
+        """sync_once should return immediately when shutdown is already requested."""
+        from syncer.main import _shutdown_event, sync_once
+
+        mock_client = AsyncMock()
+        mock_store = AsyncMock()
+        mock_embedder = MagicMock()
+        mock_embedder.dimension = 384
+        mock_audit = AsyncMock()
+        config = {"syncer": {"batch_size": 100}}
+
+        _shutdown_event.set()
+        try:
+            count = await sync_once(
+                mock_client, mock_store, mock_embedder, mock_audit, config
+            )
+        finally:
+            _shutdown_event.clear()
+
+        assert count == 0
+        mock_client.get_dialogs.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_sync_once_prescan_failure_graceful(self):
         """Pre-scan failure for a chat should not stop sync."""
         from syncer.main import sync_once
@@ -778,6 +801,34 @@ class TestSyncOnce:
         assert msg_dict["reply_to_msg_id"] == 88
         assert msg_dict["thread_top_msg_id"] == 77
         assert msg_dict["is_topic_message"] is True
+
+    @pytest.mark.asyncio
+    async def test_prescan_interrupts_on_shutdown(self):
+        """prescan_dialogs should stop quickly after shutdown is requested."""
+        from syncer.main import _shutdown_event, prescan_dialogs
+
+        dialog_1 = MagicMock()
+        dialog_1.id = 111
+        dialog_2 = MagicMock()
+        dialog_2.id = 222
+
+        first_total = MagicMock()
+        first_total.total = 10
+
+        async def _get_messages(dialog, limit=0):
+            if dialog.id == 111:
+                _shutdown_event.set()
+            return first_total
+
+        mock_client = MagicMock()
+        mock_client.get_messages = AsyncMock(side_effect=_get_messages)
+
+        try:
+            counts = await prescan_dialogs(mock_client, [dialog_1, dialog_2])
+        finally:
+            _shutdown_event.clear()
+
+        assert counts == {111: 10}
 
 
 # ---------------------------------------------------------------------------
