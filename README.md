@@ -190,7 +190,7 @@ sequenceDiagram
     QB-->>TG: Reply to owner
 ```
 
-Ingestion behavior (current design):
+**Ingestion behavior (current design):**
 
 - Freshest-first dialog ordering
 - Activity window filter via `syncer.max_history_days`
@@ -198,20 +198,20 @@ Ingestion behavior (current design):
 - Chat-type scope via `syncer.include_chat_types`
 - Optional deferred embeddings (`syncer.defer_embeddings = true`)
 
-Ingestion security properties:
+**Ingestion security properties:**
 
 - Messages are pulled via a read-only wrapper path (default deny on unknown Telethon methods).
 - Sync runs under dedicated user + service sandbox.
 - Sync egress is constrained to Telegram ranges at kernel level.
 - Stored corpus is immediately subject to DB role separation.
 
-Query behavior (current design):
+**Query behavior (current design):**
 
 - Intent extraction narrows scope (chats, terms, time range)
 - Hybrid retrieval (FTS + vector) with lexical gate for short queries
 - Fallback path when scoped retrieval is empty
 
-Query security properties:
+**Query security properties:**
 
 - Non-owner requests are silently ignored.
 - Retrieval is scoped before synthesis to reduce cloud payload.
