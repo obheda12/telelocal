@@ -27,20 +27,21 @@ It ingests messages from your Telegram account (within configured scope) into a 
 
 ## What This Project Is For
 
-Telelocal exists for a specific workflow:
+**Telelocal exists for a specific workflow:**
 
 - You have many Telegram chats (especially groups) with different contexts.
 - Important asks and decisions get buried quickly.
 - You need fast cross-chat retrieval and summaries.
 - You want to keep your searchable corpus local, with strict security boundaries.
 
-Typical questions:
+**Typical questions:**
 
 > "What needs my attention from the past 24 hours?"
+> "Can you summarize all my recent chats for the past 3 days?"
 > "What did team X decide about pricing this week?"
 > "Show where I was mentioned and whether a response is needed."
 
-Core intent:
+**Core intent:**
 
 - Local-first data ownership
 - Security-first isolation and credential handling
