@@ -51,35 +51,46 @@ Core intent:
 ## Architecture At A Glance
 
 ```mermaid
-flowchart LR
-    subgraph Owner["Owner"]
-        U["Telegram user"]
-    end
+flowchart TB
+    U["Owner"]
+    TG["Telegram<br/>(MTProto + Bot API)"]
 
     subgraph Host["Telelocal Host (trusted boundary)"]
-        S["tg-syncer (read-only Telethon wrapper)"]
-        Q["tg-querybot (owner-only bot handler)"]
+        S["tg-syncer<br/>(read-only ingest)"]
         DB[("PostgreSQL + pgvector")]
-        CRED["systemd credential runtime mount"]
-        NFT["nftables per-service egress policy"]
+        Q["tg-querybot<br/>(owner-only query path)"]
     end
 
-    subgraph External["External systems"]
-        TG["Telegram (MTProto + Bot API)"]
-        CL["Claude API"]
-    end
+    CL["Claude API"]
 
-    U -->|"query via bot"| TG
-    TG --> Q
-    Q --> DB
-    Q --> CL
-    TG --> S
-    S --> DB
-    CRED --> S
-    CRED --> Q
-    NFT --> S
-    NFT --> Q
+    U -->|"send query"| TG
+    TG -->|"MTProto message stream"| S
+    S -->|"ingest writes"| DB
+    TG -->|"Bot API updates"| Q
+    Q -->|"search/retrieve"| DB
+    Q -->|"top-K context for synthesis"| CL
 ```
+
+**How to read this architecture:**
+
+- The host boundary is the trust anchor: data is ingested and stored locally first.
+- `tg-syncer` is the ingest path only.
+- `tg-querybot` is the owner-only query/response path.
+- Only scoped context is sent to Claude; the full corpus stays local.
+
+**Why it is designed this way:**
+
+- Split ingest and query services to reduce blast radius on compromise.
+- Keep retrieval/ranking local to preserve local-first data ownership.
+- Apply least privilege per boundary (service users, DB roles, network egress rules).
+- Keep operations predictable with one CLI and explicit verification checks.
+
+**Cross-cutting controls not shown in the diagram (for readability):**
+
+- `LoadCredentialEncrypted` runtime credential injection.
+- nftables per-service outbound allowlists.
+- systemd hardening directives.
+- dual audit sinks (`/var/log/tg-assistant/audit.log` and `audit_log` table).
 
 Deeper architecture notes (components, boundaries, compromise containment):
 
