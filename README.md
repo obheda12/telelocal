@@ -12,7 +12,35 @@ Managing many Telegram groups, channels, and conversations means important messa
 > "Summarize the discussion in the engineering group this week"
 > "Find all messages mentioning the budget deadline"
 
-The architecture uses Telethon (MTProto User API) to sync messages from your included chats (groups/channels/DMs per setup + exclusions) without requiring bot membership in each chat.
+Core design intent:
+- **Local-first**: ingest once into your own local datastore, then query locally.
+- **Security-first**: minimize secret exposure and enforce strict process/network boundaries.
+- **Convenience at scale**: avoid per-chat bot administration when you have many chats.
+
+### Why This Instead Of Bot-Per-Chat Workflows
+
+Some Bot API-first tools (including OpenClaw-style setups) often require adding a bot to each chat you want indexed. That can be impractical for operators with hundreds of client/group conversations and creates operational drift (new chats not covered until manually added).
+
+Telelocal uses a read-only Telethon syncer under your own account session to ingest from your configured scope, then serves queries from local Postgres.
+
+```mermaid
+flowchart LR
+    subgraph A["Bot-per-chat model"]
+        A1["Add bot to chat A"] --> A4["Index chat A"]
+        A2["Add bot to chat B"] --> A5["Index chat B"]
+        A3["Add bot to chat N"] --> A6["Index chat N"]
+    end
+
+    subgraph B["Telelocal model"]
+        B1["Read-only Telethon syncer"] --> B2["Local Postgres index"]
+        B2 --> B3["Query bot answers"]
+    end
+```
+
+Net effect:
+- fewer manual steps to maintain coverage,
+- better freshness consistency across many chats,
+- tighter security controls around a single local ingestion pipeline.
 
 ---
 
@@ -337,6 +365,7 @@ Details: [`tg-assistant/docs/TELETHON_HARDENING.md`](tg-assistant/docs/TELETHON_
 | Aspect | Bot API | Telethon / MTProto |
 |--------|---------|-------------------|
 | **Message access** | Only chats where bot is added | User account chats within configured sync scope |
+| **Operational burden** | Add/manage bot membership per chat | Configure sync scope once, then manage centrally |
 | **Authentication** | Bot token | User session (phone + 2FA) |
 | **Session risk** | Token leak = bot compromise | Session leak = **full account compromise** |
 | **Read-only enforcement** | Config-level method blocking | Code-level allowlist wrapper |
