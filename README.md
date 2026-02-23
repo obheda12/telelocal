@@ -94,7 +94,7 @@ flowchart TB
 
 **Deeper architecture notes (components, boundaries, compromise containment):**
 
-- `tg-assistant/docs/ARCHITECTURE.md`
+- [Architecture reference](tg-assistant/docs/ARCHITECTURE.md)
 
 ---
 
@@ -200,7 +200,7 @@ sudo ./tests/security-verification.sh
 
 For full deployment details and troubleshooting:
 
-- `tg-assistant/docs/QUICKSTART.md`
+- [Quick Start guide](tg-assistant/docs/QUICKSTART.md)
 
 ---
 
@@ -282,11 +282,11 @@ If compromise is suspected:
 
 ## Documentation Map
 
-- Deployment + troubleshooting: `tg-assistant/docs/QUICKSTART.md`
-- Architecture reference: `tg-assistant/docs/ARCHITECTURE.md`
-- Threat model snapshot: `tg-assistant/docs/THREAT_MODEL.md`
-- Telethon hardening details: `tg-assistant/docs/TELETHON_HARDENING.md`
-- Full security model and attack trees: `tg-assistant/docs/SECURITY_MODEL.md`
+- Deployment + troubleshooting: [tg-assistant/docs/QUICKSTART.md](tg-assistant/docs/QUICKSTART.md)
+- Architecture reference: [tg-assistant/docs/ARCHITECTURE.md](tg-assistant/docs/ARCHITECTURE.md)
+- Threat model snapshot: [tg-assistant/docs/THREAT_MODEL.md](tg-assistant/docs/THREAT_MODEL.md)
+- Telethon hardening details: [tg-assistant/docs/TELETHON_HARDENING.md](tg-assistant/docs/TELETHON_HARDENING.md)
+- Full security model and attack trees: [tg-assistant/docs/SECURITY_MODEL.md](tg-assistant/docs/SECURITY_MODEL.md)
 
 ---
 
