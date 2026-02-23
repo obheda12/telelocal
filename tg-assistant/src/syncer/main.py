@@ -39,6 +39,7 @@ from shared.db import get_connection_pool, init_database
 from shared.secrets import get_secret, decrypt_session_file
 
 logger = logging.getLogger("syncer.main")
+_VALID_CHAT_TYPES = {"group", "channel", "user"}
 
 # Default paths — overridable via settings.toml
 _DEFAULT_CONFIG_PATH = Path(
@@ -90,6 +91,46 @@ async def rate_limit_delay(seconds: float = 1.0) -> None:
     """
     delay = max(0.0, seconds) + random.uniform(0.1, 1.5)
     await _sleep_with_shutdown(delay)
+
+
+def _get_dialog_chat_type(dialog: Any) -> str:
+    """Classify a Telethon dialog into ``group``, ``channel``, or ``user``."""
+    if bool(getattr(dialog, "is_group", False)):
+        return "group"
+    if bool(getattr(dialog, "is_channel", False)):
+        return "channel"
+    return "user"
+
+
+def _normalize_include_chat_types(value: Any) -> set[str]:
+    """Normalize ``syncer.include_chat_types`` to a validated set.
+
+    Missing/invalid values default to all chat types for backwards compatibility.
+    """
+    if value is None:
+        return set(_VALID_CHAT_TYPES)
+
+    if isinstance(value, str):
+        raw_items = [part.strip() for part in value.split(",")]
+    elif isinstance(value, (list, tuple, set)):
+        raw_items = [str(part).strip() for part in value]
+    else:
+        logger.warning(
+            "Invalid include_chat_types config type (%s); defaulting to all types",
+            type(value).__name__,
+        )
+        return set(_VALID_CHAT_TYPES)
+
+    normalized = {
+        item.lower() for item in raw_items
+        if item and item.lower() in _VALID_CHAT_TYPES
+    }
+    if not normalized:
+        logger.warning(
+            "include_chat_types has no valid values; defaulting to all types"
+        )
+        return set(_VALID_CHAT_TYPES)
+    return normalized
 
 
 # ---------------------------------------------------------------------------
@@ -297,6 +338,9 @@ async def sync_once(
     log_batch_progress = syncer_config.get("log_batch_progress", False)
     progress_heartbeat_seconds = syncer_config.get("progress_heartbeat_seconds", 30)
     defer_embeddings = syncer_config.get("defer_embeddings", False)
+    include_chat_types = _normalize_include_chat_types(
+        syncer_config.get("include_chat_types")
+    )
     embedding_update_batch_size = max(
         1, int(syncer_config.get("embedding_update_batch_size", batch_size))
     )
@@ -397,6 +441,22 @@ async def sync_once(
         len(active_dialogs), total_dialogs, max_history_days,
     )
 
+    # Auto-filter by chat type (e.g., group-only ingestion).
+    chat_type_filtered_count = 0
+    if include_chat_types != _VALID_CHAT_TYPES:
+        before_type_filter = len(active_dialogs)
+        active_dialogs = [
+            d for d in active_dialogs
+            if _get_dialog_chat_type(d) in include_chat_types
+        ]
+        chat_type_filtered_count = before_type_filter - len(active_dialogs)
+        logger.info(
+            "Chat-type filter applied: include=%s, filtered_out=%d, remaining=%d",
+            ",".join(sorted(include_chat_types)),
+            chat_type_filtered_count,
+            len(active_dialogs),
+        )
+
     # Apply manual exclusions from excluded_chats.json
     excluded_ids = load_excluded_ids(config)
     excluded_count = 0
@@ -435,6 +495,8 @@ async def sync_once(
         {
             "total_dialogs": total_dialogs,
             "active_dialogs": len(active_dialogs),
+            "include_chat_types": sorted(include_chat_types),
+            "chat_type_filtered_count": chat_type_filtered_count,
             "excluded_count": excluded_count,
             "max_history_days": max_history_days,
             "max_active_chats": max_active_chats,
@@ -668,11 +730,7 @@ async def sync_once(
             pass_progress.log_pass_progress()
 
         # Determine chat type
-        chat_type = "user"
-        if hasattr(dialog, "is_group") and dialog.is_group:
-            chat_type = "group"
-        elif hasattr(dialog, "is_channel") and dialog.is_channel:
-            chat_type = "channel"
+        chat_type = _get_dialog_chat_type(dialog)
 
         await store.update_chat_metadata(
             chat_id=chat_id,

@@ -84,12 +84,16 @@ class ClaudeAssistant:
         system_prompt_path: Path = Path("/etc/tg-assistant/system_prompt.md"),
         model: str = "claude-sonnet-4-5-20250929",
         max_queries_per_minute: int = 10,
+        max_tokens: int = 4096,
+        temperature: float = 0.3,
         haiku_input_cost_per_m: float = _HAIKU_INPUT_COST_PER_M,
         haiku_output_cost_per_m: float = _HAIKU_OUTPUT_COST_PER_M,
     ) -> None:
         self._client = anthropic.AsyncAnthropic(api_key=api_key)
         self._model = model
         self._max_qpm = max_queries_per_minute
+        self._max_tokens = max(256, int(max_tokens))
+        self._temperature = float(temperature)
         self._haiku_in_cost = haiku_input_cost_per_m
         self._haiku_out_cost = haiku_output_cost_per_m
         self._system_prompt: Optional[str] = None
@@ -315,6 +319,7 @@ class ClaudeAssistant:
         context_results: List[SearchResult],
         *,
         context_max_chars: int = 8000,
+        max_tokens_override: Optional[int] = None,
     ) -> str:
         """Send a question with context to Claude and return the response.
 
@@ -333,11 +338,19 @@ class ClaudeAssistant:
         except (TypeError, ValueError):
             context_max_chars = 8000
         context_max_chars = max(2000, context_max_chars)
+        if max_tokens_override is None:
+            max_tokens = self._max_tokens
+        else:
+            try:
+                max_tokens = max(256, int(max_tokens_override))
+            except (TypeError, ValueError):
+                max_tokens = self._max_tokens
         context = self._format_context(context_results, max_chars=context_max_chars)
 
         response = await self._client.messages.create(
             model=self._model,
-            max_tokens=4096,
+            max_tokens=max_tokens,
+            temperature=self._temperature,
             system=system_prompt,
             messages=[
                 {

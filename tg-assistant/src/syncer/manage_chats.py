@@ -7,8 +7,9 @@ Runnable as::
     python -m syncer.manage_chats          # from src/
     telenad manage-chats                   # via CLI wrapper
 
-Reads chats from the PostgreSQL ``chats`` table (no Telegram connection
-needed) and writes exclusions to ``config/excluded_chats.json``.
+Fetches chats from Telegram using the existing encrypted session when
+available (falls back to PostgreSQL ``chats`` table), then writes
+exclusions to ``config/excluded_chats.json``.
 """
 
 from __future__ import annotations
@@ -34,6 +35,7 @@ except ModuleNotFoundError:  # pragma: no cover - fallback for older local envs
     import tomli as tomllib
 
 logger = logging.getLogger("syncer.manage_chats")
+_VALID_CHAT_TYPES = {"group", "channel", "user"}
 
 # Re-use load_config from syncer.main to keep config handling consistent.
 # Imported lazily to avoid circular issues at module level.
@@ -115,6 +117,45 @@ def save_excluded_chats(config: Dict[str, Any], excluded: dict[int, str]) -> Pat
     payload = {"excluded": {str(k): v for k, v in sorted(excluded.items())}}
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return path
+
+
+def compute_keyword_excluded_ids(chats: list[dict], keyword: str) -> set[int]:
+    """Return chat IDs to exclude when title does not match *keyword*.
+
+    Matching is case-insensitive and uses substring semantics.
+    Empty keyword => no automatic exclusions.
+    """
+    needle = (keyword or "").strip().lower()
+    if not needle:
+        return set()
+
+    excluded: set[int] = set()
+    for chat in chats:
+        chat_id = int(chat.get("chat_id"))
+        title = str(chat.get("title") or "").lower()
+        if needle not in title:
+            excluded.add(chat_id)
+    return excluded
+
+
+def resolve_include_chat_types(config: Dict[str, Any]) -> set[str]:
+    """Resolve sync-eligible chat types from config.
+
+    Missing/invalid values default to all types for backwards compatibility.
+    """
+    raw = config.get("syncer", {}).get("include_chat_types")
+    if raw is None:
+        return set(_VALID_CHAT_TYPES)
+
+    if isinstance(raw, str):
+        items = [part.strip().lower() for part in raw.split(",")]
+    elif isinstance(raw, (list, tuple, set)):
+        items = [str(part).strip().lower() for part in raw]
+    else:
+        return set(_VALID_CHAT_TYPES)
+
+    resolved = {item for item in items if item in _VALID_CHAT_TYPES}
+    return resolved or set(_VALID_CHAT_TYPES)
 
 
 # ---------------------------------------------------------------------------
@@ -251,8 +292,41 @@ async def interactive_main() -> None:
         print("Check credentials/session and try again.")
         sys.exit(1)
 
+    include_chat_types = resolve_include_chat_types(config)
+    if include_chat_types != _VALID_CHAT_TYPES:
+        before = len(chats)
+        chats = [
+            c for c in chats
+            if (str(c.get("chat_type") or "user").lower() in include_chat_types)
+        ]
+        hidden = before - len(chats)
+        print(
+            "Applying include_chat_types filter "
+            f"({', '.join(sorted(include_chat_types))}); hidden {hidden} chat(s)."
+        )
+        if not chats:
+            print("No chats remain after chat-type filtering.")
+            print("Adjust syncer.include_chat_types in settings.toml and retry.")
+            sys.exit(1)
+
     # Load current exclusions
     current_excluded = load_excluded_ids(config)
+    keyword = (
+        await inquirer.text(
+            message=(
+                "Optional keyword include filter "
+                "(non-matching chats start unchecked/excluded):"
+            ),
+            default="",
+        ).execute_async()
+    ).strip()
+    keyword_excluded = compute_keyword_excluded_ids(chats, keyword)
+    if keyword:
+        print(
+            f'Keyword "{keyword}" pre-excludes {len(keyword_excluded)} chat(s); '
+            "you can still toggle any chat manually."
+        )
+        print()
 
     # Newest chats first for faster triage when there are many.
     def _sort_key(chat: dict) -> tuple[float, str]:
@@ -280,7 +354,10 @@ async def interactive_main() -> None:
         choices.append({
             "name": label,
             "value": chat_id,
-            "enabled": chat_id not in current_excluded,
+            "enabled": (
+                chat_id not in current_excluded
+                and chat_id not in keyword_excluded
+            ),
         })
 
     print()

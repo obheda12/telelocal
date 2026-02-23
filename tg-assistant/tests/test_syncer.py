@@ -692,6 +692,74 @@ class TestSyncOnce:
         )
 
     @pytest.mark.asyncio
+    async def test_sync_once_filters_chat_types(self):
+        """sync_once should auto-skip non-group chats when include_chat_types is group-only."""
+        from syncer.main import sync_once
+
+        group_dialog = MagicMock()
+        group_dialog.id = 111
+        group_dialog.title = "Group Chat"
+        group_dialog.is_group = True
+        group_dialog.is_channel = False
+        group_dialog.date = datetime.now(timezone.utc)
+
+        user_dialog = MagicMock()
+        user_dialog.id = 222
+        user_dialog.title = "DM Chat"
+        user_dialog.is_group = False
+        user_dialog.is_channel = False
+        user_dialog.date = datetime.now(timezone.utc)
+
+        channel_dialog = MagicMock()
+        channel_dialog.id = 333
+        channel_dialog.title = "News Channel"
+        channel_dialog.is_group = False
+        channel_dialog.is_channel = True
+        channel_dialog.date = datetime.now(timezone.utc)
+
+        msg = MagicMock()
+        msg.id = 500
+        msg.text = "hello"
+        msg.message = "hello"
+        msg.date = datetime.now(timezone.utc)
+        msg.sender = None
+        msg.to_dict.return_value = {}
+
+        mock_client = MagicMock()
+        mock_client.get_dialogs = AsyncMock(
+            return_value=[group_dialog, user_dialog, channel_dialog]
+        )
+        mock_client.iter_messages = MagicMock(return_value=self._iter_messages([msg]))
+
+        mock_store = AsyncMock()
+        mock_store.get_last_synced_id.return_value = None
+        mock_store.store_messages_batch.return_value = 1
+
+        mock_embedder = MagicMock()
+        mock_embedder.dimension = 0
+        mock_audit = AsyncMock()
+
+        config = {
+            "syncer": {
+                "batch_size": 100,
+                "rate_limit_seconds": 0,
+                "max_history_days": 0,
+                "include_chat_types": ["group"],
+            }
+        }
+
+        with patch("syncer.main.rate_limit_delay", new_callable=AsyncMock):
+            count = await sync_once(
+                mock_client, mock_store, mock_embedder, mock_audit, config
+            )
+
+        assert count == 1
+        mock_client.iter_messages.assert_called_once_with(group_dialog, reverse=False)
+        mock_store.update_chat_metadata.assert_called_once_with(
+            chat_id=111, title="Group Chat", chat_type="group",
+        )
+
+    @pytest.mark.asyncio
     async def test_sync_once_includes_dialog_without_date(self):
         """Dialogs without a .date attribute should be included (conservative)."""
         from syncer.main import sync_once
@@ -967,3 +1035,39 @@ class TestSaveExcludedChats:
         data = json.loads(json_path.read_text())
         assert "111" in data["excluded"]
         assert data["excluded"]["111"] == "Chat A"
+
+
+class TestKeywordExclusions:
+    def test_compute_keyword_excluded_ids(self):
+        """Chats without the keyword should be auto-excluded."""
+        from syncer.manage_chats import compute_keyword_excluded_ids
+
+        chats = [
+            {"chat_id": 1, "title": "Alpha Squad"},
+            {"chat_id": 2, "title": "Beta Ops"},
+            {"chat_id": 3, "title": "alpha project"},
+        ]
+        excluded = compute_keyword_excluded_ids(chats, "alpha")
+        assert excluded == {2}
+
+    def test_compute_keyword_excluded_ids_blank_keyword(self):
+        """Blank keyword should not auto-exclude anything."""
+        from syncer.manage_chats import compute_keyword_excluded_ids
+
+        chats = [{"chat_id": 1, "title": "Any Chat"}]
+        excluded = compute_keyword_excluded_ids(chats, "   ")
+        assert excluded == set()
+
+
+class TestResolveIncludeChatTypes:
+    def test_resolve_include_chat_types_from_list(self):
+        from syncer.manage_chats import resolve_include_chat_types
+
+        config = {"syncer": {"include_chat_types": ["group"]}}
+        assert resolve_include_chat_types(config) == {"group"}
+
+    def test_resolve_include_chat_types_default_all(self):
+        from syncer.manage_chats import resolve_include_chat_types
+
+        config = {"syncer": {}}
+        assert resolve_include_chat_types(config) == {"group", "channel", "user"}

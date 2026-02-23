@@ -452,6 +452,70 @@ class MessageSearch:
         rows = await self._pool.fetch(sql, *params)
         return self._rows_to_results(rows)
 
+    async def mentions_needing_attention(
+        self,
+        *,
+        owner_id: int,
+        mention_aliases: Optional[List[str]] = None,
+        days_back: int = 1,
+        limit: int = 80,
+    ) -> List[SearchResult]:
+        """Return recent messages that likely need owner attention.
+
+        Matches:
+          - replies to the owner's messages
+          - explicit textual aliases (e.g. @username)
+        """
+        limit = max(1, int(limit))
+        days_back = max(1, int(days_back))
+
+        params: List[Any] = [int(owner_id)]
+        conditions: List[str] = ["m.sender_id IS DISTINCT FROM $1"]
+
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days_back)
+        params.append(cutoff)
+        conditions.append(f"m.timestamp >= ${len(params)}")
+
+        reply_to_owner_clause = (
+            "EXISTS ("
+            "SELECT 1 FROM messages p "
+            "WHERE p.chat_id = m.chat_id "
+            "AND p.message_id = m.reply_to_msg_id "
+            "AND p.sender_id = $1"
+            ")"
+        )
+
+        mention_aliases = [a.strip() for a in (mention_aliases or []) if a and a.strip()]
+        mention_text_clause = "FALSE"
+        if mention_aliases:
+            alias_clauses: List[str] = []
+            for alias in mention_aliases:
+                escaped = alias.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                params.append(f"%{escaped}%")
+                alias_clauses.append(
+                    f"COALESCE(m.text, '') ILIKE ${len(params)} ESCAPE '\\\\'"
+                )
+            mention_text_clause = "(" + " OR ".join(alias_clauses) + ")"
+
+        conditions.append(f"({reply_to_owner_clause} OR {mention_text_clause})")
+        params.append(limit)
+        limit_idx = len(params)
+
+        sql = f"""
+            SELECT m.message_id, m.chat_id, c.title, m.sender_name,
+                   m.reply_to_msg_id, m.thread_top_msg_id, m.is_topic_message,
+                   m.timestamp, m.text,
+                   1.0 AS score
+            FROM messages m
+            JOIN chats c ON c.chat_id = m.chat_id
+            WHERE {' AND '.join(conditions)}
+            ORDER BY m.timestamp DESC, m.message_id DESC
+            LIMIT ${limit_idx}
+        """
+
+        rows = await self._pool.fetch(sql, *params)
+        return self._rows_to_results(rows)
+
     # ------------------------------------------------------------------
     # Full-text search (PostgreSQL tsvector / tsquery)
     # ------------------------------------------------------------------

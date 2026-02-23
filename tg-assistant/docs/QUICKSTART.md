@@ -56,6 +56,13 @@ sudo ./scripts/setup-telethon-session.sh # Session creation only
 
 Message your bot on Telegram. Ask a question about your chats.
 
+Recommended bot command patterns:
+- `/mentions 1d quick` -- triage what likely needs your reply today
+- `/summary 1d quick` -- high-level daily recap
+- `/summary 1w detailed` -- weekly deeper recap
+- `/fresh 25 quick` -- snapshot of freshest chats
+- `/more` -- continue a long response
+
 ```bash
 # Check service status
 systemctl status tg-syncer tg-querybot
@@ -109,6 +116,8 @@ sudo systemctl restart tg-syncer tg-querybot
 
 # Update include/exclude chat list
 sudo telenad manage-chats
+# Tip: selector respects `syncer.include_chat_types`; you can also enter a
+# keyword first to pre-exclude non-matching chats.
 
 # Monitor network traffic (30-second capture)
 sudo ./scripts/monitor-network.sh 30
@@ -174,6 +183,7 @@ journalctl -u tg-syncer --since "1 hour ago" | grep -i flood
 - Keep `syncer.enable_prescan_progress = false` unless you need detailed ETA logs.
 - Set `syncer.max_active_chats = 500` (or lower) to focus ingest on freshest chats and reduce full-pass latency on large accounts.
 - Keep `syncer.max_history_days = 30` to bound initial per-chat fetch depth.
+- Keep `syncer.include_chat_types = ["group"]` to skip user/channel ingestion and focus throughput on group-chat context.
 - Keep `syncer.store_raw_json = false` unless you explicitly need full raw payloads.
 - For faster catch-up on many chats, keep a small `syncer.idle_chat_delay_seconds` (default `0.1`).
 - The syncer now batches per-chat high-water-mark lookups into one DB query per pass for lower latency on large chat counts.

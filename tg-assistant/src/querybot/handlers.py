@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import re
 from functools import wraps
-from typing import Any, Callable, Coroutine, List
+from typing import Any, Callable, Coroutine, List, Optional, Tuple
 
 from telegram import Update
 from telegram.constants import ParseMode
@@ -38,6 +38,22 @@ _RECENT_CHAT_LIMIT_RE = re.compile(
     r"\b(?:top\s+)?(\d{1,3})\s+(?:most\s+)?(?:fresh(?:est)?|recent|latest)\s+chats?\b",
     re.IGNORECASE,
 )
+_PENDING_RESPONSE_CHUNKS_KEY = "pending_response_chunks"
+_WINDOW_TO_DAYS = {
+    "1d": 1,
+    "24h": 1,
+    "3d": 3,
+    "72h": 3,
+    "1w": 7,
+    "7d": 7,
+}
+_DETAIL_ALIASES = {
+    "quick": "quick",
+    "brief": "quick",
+    "detailed": "detailed",
+    "detail": "detailed",
+}
+_FRESH_CHAT_CHOICES = {10, 25, 50}
 
 
 # ---------------------------------------------------------------------------
@@ -206,6 +222,130 @@ def _sanitize_telegram_html(text: str) -> str:
     return text
 
 
+def _parse_window_and_detail_args(
+    args: List[str],
+    *,
+    default_days: int,
+) -> Tuple[int, str, Optional[str]]:
+    """Parse command args into ``days`` and ``detail_mode``.
+
+    Accepted windows: ``1d``, ``3d``, ``1w`` (plus 24h/72h/7d aliases).
+    Accepted detail modes: ``quick`` or ``detailed``.
+    """
+    days = int(default_days)
+    detail_mode = "quick"
+    unknown: List[str] = []
+
+    for raw in args:
+        token = (raw or "").strip().lower()
+        if not token:
+            continue
+        if token in _WINDOW_TO_DAYS:
+            days = _WINDOW_TO_DAYS[token]
+            continue
+        if token in _DETAIL_ALIASES:
+            detail_mode = _DETAIL_ALIASES[token]
+            continue
+        unknown.append(raw)
+
+    if unknown:
+        return days, detail_mode, f"Unknown option(s): {' '.join(unknown)}"
+    return days, detail_mode, None
+
+
+def _parse_fresh_args(
+    args: List[str],
+    *,
+    default_count: int = 25,
+) -> Tuple[int, str, Optional[str]]:
+    """Parse `/fresh` args into ``chat_count`` and ``detail_mode``."""
+    chat_count = int(default_count)
+    detail_mode = "quick"
+    unknown: List[str] = []
+
+    for raw in args:
+        token = (raw or "").strip().lower()
+        if not token:
+            continue
+        if token in _DETAIL_ALIASES:
+            detail_mode = _DETAIL_ALIASES[token]
+            continue
+        if token.isdigit():
+            value = int(token)
+            if value in _FRESH_CHAT_CHOICES:
+                chat_count = value
+            else:
+                unknown.append(raw)
+            continue
+        unknown.append(raw)
+
+    if unknown:
+        return chat_count, detail_mode, f"Unknown option(s): {' '.join(unknown)}"
+    return chat_count, detail_mode, None
+
+
+def _detail_params(
+    detail_mode: str,
+    *,
+    quick_limit: int,
+    detailed_limit: int,
+    quick_ctx_chars: int,
+    detailed_ctx_chars: int,
+    quick_max_tokens: int,
+    detailed_max_tokens: int,
+) -> Tuple[int, int, int]:
+    """Return ``(result_limit, context_max_chars, max_tokens)`` by detail mode."""
+    if detail_mode == "detailed":
+        return detailed_limit, detailed_ctx_chars, detailed_max_tokens
+    return quick_limit, quick_ctx_chars, quick_max_tokens
+
+
+async def _reply_chunks(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    chunks: List[str],
+) -> None:
+    """Send chunked output, storing overflow for `/more`."""
+    if not chunks:
+        return
+
+    auto_chunks = context.bot_data.get("response_auto_chunks", 2)
+    try:
+        auto_chunks = int(auto_chunks)
+    except (TypeError, ValueError):
+        auto_chunks = 2
+    auto_chunks = max(1, min(4, auto_chunks))
+
+    to_send = chunks[:auto_chunks]
+    pending = chunks[auto_chunks:]
+
+    for chunk in to_send:
+        try:
+            await update.message.reply_text(chunk, parse_mode=ParseMode.HTML)
+        except Exception:
+            logger.debug("HTML parse failed for chunk, retrying as plain text")
+            await update.message.reply_text(chunk)
+
+    if pending:
+        context.user_data[_PENDING_RESPONSE_CHUNKS_KEY] = pending
+        await update.message.reply_text(
+            f"<i>{len(pending)} more part(s) available. Send /more to continue.</i>",
+            parse_mode=ParseMode.HTML,
+        )
+    else:
+        context.user_data.pop(_PENDING_RESPONSE_CHUNKS_KEY, None)
+
+
+async def _reply_answer(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    answer: str,
+) -> None:
+    """Sanitize, split, and send an assistant answer."""
+    chunks = _split_message(_sanitize_telegram_html(answer))
+    await _reply_chunks(update, context, chunks)
+
+
 async def _get_sync_status_context(pool: asyncpg.Pool) -> str:
     """Check message/chat counts and return a sync-aware no-results message.
 
@@ -266,10 +406,17 @@ async def handle_help(
         "  /start - Welcome message\n"
         "  /help  - This help text\n"
         "  /stats - Sync and usage statistics\n\n"
+        "  /mentions [1d|3d|1w] [quick|detailed] - Items likely needing your reply\n"
+        "  /summary  [1d|3d|1w] [quick|detailed] - Cross-chat time-window recap\n"
+        "  /fresh    [10|25|50] [quick|detailed] - Snapshot of freshest chats\n"
+        "  /more - Continue the previous long response\n\n"
         "How to use:\n"
         "  Just send me a question in plain text! I'll search your "
         "synced Telegram messages and answer using Claude.\n\n"
         "Tips for effective queries:\n"
+        '  - Mentions triage: "/mentions 1d quick"\n'
+        '  - Daily recap: "/summary 1d quick"\n'
+        '  - Freshest chats: "/fresh 25 quick"\n'
         '  - Be specific: "What did Alice say about the project deadline?"\n'
         '  - Ask for summaries: "Summarise the discussion in DevChat yesterday"\n'
         '  - Search by topic: "Find messages about Python deployment"\n'
@@ -316,6 +463,245 @@ async def handle_stats(
 
 
 # ---------------------------------------------------------------------------
+# Scaffolding command handlers (simple UX presets)
+# ---------------------------------------------------------------------------
+
+
+@owner_only
+async def handle_mentions(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle `/mentions` for attention triage."""
+    search: MessageSearch = context.bot_data["search"]
+    llm: ClaudeAssistant = context.bot_data["llm"]
+    audit: AuditLogger = context.bot_data["audit"]
+
+    days, detail_mode, parse_err = _parse_window_and_detail_args(
+        context.args or [],
+        default_days=1,
+    )
+    if parse_err:
+        await update.message.reply_text(
+            f"{parse_err}\nUsage: /mentions [1d|3d|1w] [quick|detailed]"
+        )
+        return
+
+    owner_id = int(context.bot_data.get("owner_id", 0))
+    aliases = list(context.bot_data.get("owner_mention_aliases", []) or [])
+    username = (
+        (update.effective_user.username or "").strip()
+        if update.effective_user
+        else ""
+    )
+    if username:
+        aliases.append(f"@{username}")
+    # Deduplicate aliases while preserving order
+    seen: set[str] = set()
+    normalized_aliases: List[str] = []
+    for alias in aliases:
+        value = alias.strip()
+        if not value:
+            continue
+        key = value.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized_aliases.append(value)
+
+    limit, context_max_chars, max_tokens = _detail_params(
+        detail_mode,
+        quick_limit=80,
+        detailed_limit=160,
+        quick_ctx_chars=12000,
+        detailed_ctx_chars=22000,
+        quick_max_tokens=1200,
+        detailed_max_tokens=2600,
+    )
+    results = await search.mentions_needing_attention(
+        owner_id=owner_id,
+        mention_aliases=normalized_aliases,
+        days_back=days,
+        limit=limit,
+    )
+
+    if not results:
+        await update.message.reply_text(
+            f"No mention or reply-to-you items found in the last {days} day(s)."
+        )
+        return
+
+    prompt = (
+        f"Create a {detail_mode} triage briefing for the last {days} day(s). "
+        "These messages are likely direct mentions or replies to me. "
+        "Prioritize what needs my action. "
+        "Use sections: "
+        "<b>Act Now</b>, <b>Reply Soon</b>, <b>FYI</b>. "
+        "For each item include chat, sender, and timestamp. "
+        "If a section has no items, state 'none'."
+    )
+    answer = await llm.query(
+        prompt,
+        results,
+        context_max_chars=context_max_chars,
+        max_tokens_override=max_tokens,
+    )
+    await _reply_answer(update, context, answer)
+
+    await audit.log(
+        "querybot",
+        "command_mentions",
+        {
+            "days_back": days,
+            "detail_mode": detail_mode,
+            "results_count": len(results),
+            "alias_count": len(normalized_aliases),
+        },
+        success=True,
+    )
+
+
+@owner_only
+async def handle_summary(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle `/summary` for time-window cross-chat recaps."""
+    search: MessageSearch = context.bot_data["search"]
+    llm: ClaudeAssistant = context.bot_data["llm"]
+    audit: AuditLogger = context.bot_data["audit"]
+
+    days, detail_mode, parse_err = _parse_window_and_detail_args(
+        context.args or [],
+        default_days=1,
+    )
+    if parse_err:
+        await update.message.reply_text(
+            f"{parse_err}\nUsage: /summary [1d|3d|1w] [quick|detailed]"
+        )
+        return
+
+    if detail_mode == "detailed":
+        chat_limit = 50
+        per_chat_messages = 3
+        context_max_chars = 24000
+        max_tokens = 2800
+    else:
+        chat_limit = 25
+        per_chat_messages = 2
+        context_max_chars = 14000
+        max_tokens = 1400
+
+    results = await search.recent_chat_summary_context(
+        chat_limit=chat_limit,
+        per_chat_messages=per_chat_messages,
+        days_back=days,
+    )
+    if not results:
+        no_results_msg = await _get_sync_status_context(search._pool)
+        await update.message.reply_text(no_results_msg)
+        return
+
+    prompt = (
+        f"Create a {detail_mode} summary for the last {days} day(s) across my chats. "
+        "Focus on what changed, key decisions, blockers, and action items for me. "
+        "Start with the highest-priority actions first, then major updates. "
+        "Include chat, sender, and time for each important point."
+    )
+    answer = await llm.query(
+        prompt,
+        results,
+        context_max_chars=context_max_chars,
+        max_tokens_override=max_tokens,
+    )
+    await _reply_answer(update, context, answer)
+
+    await audit.log(
+        "querybot",
+        "command_summary",
+        {
+            "days_back": days,
+            "detail_mode": detail_mode,
+            "chat_limit": chat_limit,
+            "per_chat_messages": per_chat_messages,
+            "results_count": len(results),
+        },
+        success=True,
+    )
+
+
+@owner_only
+async def handle_fresh(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle `/fresh` for freshest-chat snapshots."""
+    search: MessageSearch = context.bot_data["search"]
+    llm: ClaudeAssistant = context.bot_data["llm"]
+    audit: AuditLogger = context.bot_data["audit"]
+
+    chat_count, detail_mode, parse_err = _parse_fresh_args(
+        context.args or [],
+        default_count=25,
+    )
+    if parse_err:
+        await update.message.reply_text(
+            f"{parse_err}\nUsage: /fresh [10|25|50] [quick|detailed]"
+        )
+        return
+
+    per_chat_messages, context_max_chars, max_tokens = (
+        (4, 32000, 3600)
+        if detail_mode == "detailed"
+        else (2, 22000, 1700)
+    )
+    results = await search.recent_chat_summary_context(
+        chat_limit=chat_count,
+        per_chat_messages=per_chat_messages,
+        days_back=30,
+    )
+    if not results:
+        no_results_msg = await _get_sync_status_context(search._pool)
+        await update.message.reply_text(no_results_msg)
+        return
+
+    prompt = (
+        f"Give me a {detail_mode} synopsis of my {chat_count} freshest chats. "
+        "For each chat, capture the current status, key updates, and whether I need to act. "
+        "Prioritize chats with actionable items first. "
+        "Keep each chat summary concise and include timestamps for important events."
+    )
+    answer = await llm.query(
+        prompt,
+        results,
+        context_max_chars=context_max_chars,
+        max_tokens_override=max_tokens,
+    )
+    await _reply_answer(update, context, answer)
+
+    await audit.log(
+        "querybot",
+        "command_fresh",
+        {
+            "chat_count": chat_count,
+            "detail_mode": detail_mode,
+            "per_chat_messages": per_chat_messages,
+            "results_count": len(results),
+        },
+        success=True,
+    )
+
+
+@owner_only
+async def handle_more(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle `/more` by sending the next chunk(s) of a long response."""
+    pending = context.user_data.get(_PENDING_RESPONSE_CHUNKS_KEY, [])
+    if not pending:
+        await update.message.reply_text("No pending response. Ask a new question first.")
+        return
+    await _reply_chunks(update, context, pending)
+
+
+# ---------------------------------------------------------------------------
 # Free-text message handler (the main query flow)
 # ---------------------------------------------------------------------------
 
@@ -348,6 +734,8 @@ async def handle_message(
     if not validation.valid:
         await update.message.reply_text(validation.error_message)
         return
+    # New question supersedes any leftover /more backlog.
+    context.user_data.pop(_PENDING_RESPONSE_CHUNKS_KEY, None)
 
     # 1. Get chat list + extract intent
     max_intent_chats = context.bot_data.get("max_intent_chats")
@@ -450,16 +838,8 @@ async def handle_message(
         context_max_chars=context_max_chars,
     )
 
-    # 6. Reply (split if > 4096 chars — Telegram message limit)
-    for chunk in _split_message(_sanitize_telegram_html(answer)):
-        try:
-            await update.message.reply_text(
-                chunk, parse_mode=ParseMode.HTML
-            )
-        except Exception:
-            # Claude may produce malformed HTML tags; fall back to plain text
-            logger.debug("HTML parse failed for chunk, retrying as plain text")
-            await update.message.reply_text(chunk)
+    # 6. Reply
+    await _reply_answer(update, context, answer)
 
     # 7. Audit (metadata only — never log message content)
     await audit.log(

@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Dict
 
 import toml
-from telegram import Update
+from telegram import BotCommand, Update
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -29,8 +29,12 @@ from telegram.ext import (
 )
 
 from querybot.handlers import (
+    handle_fresh,
     handle_help,
     handle_message,
+    handle_mentions,
+    handle_more,
+    handle_summary,
     handle_start,
     handle_stats,
     error_handler,
@@ -152,6 +156,8 @@ def build_application(config: Dict[str, Any]) -> Application:
             api_key=claude_api_key,
             model=claude_config.get("model", "claude-sonnet-4-5-20250929"),
             max_queries_per_minute=config["querybot"].get("max_queries_per_minute", 20),
+            max_tokens=claude_config.get("max_tokens", 4096),
+            temperature=claude_config.get("temperature", 0.3),
             haiku_input_cost_per_m=claude_config.get("haiku_input_cost_per_m", 0.0),
             haiku_output_cost_per_m=claude_config.get("haiku_output_cost_per_m", 0.0),
         )
@@ -171,6 +177,12 @@ def build_application(config: Dict[str, Any]) -> Application:
         recent_summary_context_max_chars = config["querybot"].get(
             "recent_summary_context_max_chars", 22000
         )
+        owner_mention_aliases = config["querybot"].get(
+            "owner_mention_aliases", []
+        )
+        response_auto_chunks = config["querybot"].get(
+            "response_auto_chunks", 2
+        )
 
         security_config = config.get("security", {})
         sanitizer = ContentSanitizer(
@@ -188,12 +200,29 @@ def build_application(config: Dict[str, Any]) -> Application:
         app.bot_data["recent_summary_max_chat_count"] = recent_summary_max_chat_count
         app.bot_data["recent_summary_per_chat_messages"] = recent_summary_per_chat_messages
         app.bot_data["recent_summary_context_max_chars"] = recent_summary_context_max_chars
+        app.bot_data["owner_mention_aliases"] = owner_mention_aliases
+        app.bot_data["response_auto_chunks"] = response_auto_chunks
         app.bot_data["search"] = search
         app.bot_data["llm"] = llm
         app.bot_data["audit"] = audit
         app.bot_data["pool"] = pool
         app.bot_data["sanitizer"] = sanitizer
         app.bot_data["input_validator"] = input_validator
+
+        # Surface the primary UX commands directly in Telegram's command menu.
+        try:
+            await app.bot.set_my_commands(
+                [
+                    BotCommand("summary", "Time-window recap (1d, 3d, 1w)"),
+                    BotCommand("mentions", "Items likely needing your reply"),
+                    BotCommand("fresh", "Snapshot of freshest chats"),
+                    BotCommand("more", "Continue previous long response"),
+                    BotCommand("stats", "Sync and usage statistics"),
+                    BotCommand("help", "Show command usage"),
+                ]
+            )
+        except Exception:
+            logger.warning("Failed to set bot command menu", exc_info=True)
 
     async def _post_shutdown(app: Application) -> None:
         audit = app.bot_data.get("audit")
@@ -212,6 +241,10 @@ def build_application(config: Dict[str, Any]) -> Application:
     app.add_handler(CommandHandler("start", handle_start, filters=owner_filter))
     app.add_handler(CommandHandler("help", handle_help, filters=owner_filter))
     app.add_handler(CommandHandler("stats", handle_stats, filters=owner_filter))
+    app.add_handler(CommandHandler("mentions", handle_mentions, filters=owner_filter))
+    app.add_handler(CommandHandler("summary", handle_summary, filters=owner_filter))
+    app.add_handler(CommandHandler("fresh", handle_fresh, filters=owner_filter))
+    app.add_handler(CommandHandler("more", handle_more, filters=owner_filter))
     app.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND & owner_filter,

@@ -7,10 +7,16 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from querybot.handlers import (
+    _parse_fresh_args,
+    _parse_window_and_detail_args,
     _get_sync_status_context,
     _sanitize_telegram_html,
     _split_message,
+    handle_fresh,
     handle_message,
+    handle_mentions,
+    handle_more,
+    handle_summary,
     handle_start,
     owner_only,
 )
@@ -199,6 +205,47 @@ class TestOwnerOnlyDecorator:
 
 
 # ---------------------------------------------------------------------------
+# Command argument parsing
+# ---------------------------------------------------------------------------
+
+
+class TestCommandArgParsing:
+    def test_parse_window_and_detail_defaults(self):
+        days, detail_mode, err = _parse_window_and_detail_args([], default_days=1)
+        assert days == 1
+        assert detail_mode == "quick"
+        assert err is None
+
+    def test_parse_window_and_detail_values(self):
+        days, detail_mode, err = _parse_window_and_detail_args(
+            ["1w", "detailed"], default_days=1
+        )
+        assert days == 7
+        assert detail_mode == "detailed"
+        assert err is None
+
+    def test_parse_window_and_detail_invalid(self):
+        _, _, err = _parse_window_and_detail_args(["bad"], default_days=1)
+        assert err is not None
+
+    def test_parse_fresh_defaults(self):
+        count, detail_mode, err = _parse_fresh_args([])
+        assert count == 25
+        assert detail_mode == "quick"
+        assert err is None
+
+    def test_parse_fresh_values(self):
+        count, detail_mode, err = _parse_fresh_args(["50", "detailed"])
+        assert count == 50
+        assert detail_mode == "detailed"
+        assert err is None
+
+    def test_parse_fresh_invalid(self):
+        _, _, err = _parse_fresh_args(["11"])
+        assert err is not None
+
+
+# ---------------------------------------------------------------------------
 # handle_message flow (intent extraction → filtered search → Claude)
 # ---------------------------------------------------------------------------
 
@@ -223,6 +270,7 @@ def _make_handler_context(
     mock_search.filtered_search.return_value = search_results or []
     mock_search.full_text_search.return_value = fallback_results or []
     mock_search.recent_chat_summary_context.return_value = search_results or []
+    mock_search.mentions_needing_attention.return_value = search_results or []
 
     mock_llm = AsyncMock()
     mock_llm.extract_query_intent.return_value = intent or QueryIntent(
@@ -250,7 +298,11 @@ def _make_handler_context(
         "recent_summary_max_chat_count": 75,
         "recent_summary_per_chat_messages": 2,
         "recent_summary_context_max_chars": 22000,
+        "response_auto_chunks": 2,
+        "owner_mention_aliases": ["@owner"],
     }
+    context.user_data = {}
+    context.args = []
 
     return update, context, mock_search, mock_llm, mock_audit
 
@@ -491,6 +543,110 @@ class TestHandleMessage:
         )
         mock_search.filtered_search.assert_not_called()
         mock_llm.query.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Command handlers (/mentions, /summary, /fresh, /more)
+# ---------------------------------------------------------------------------
+
+
+class TestScaffoldCommandHandlers:
+    @pytest.mark.asyncio
+    async def test_mentions_command_pipeline(self):
+        result = SearchResult(
+            message_id=1,
+            chat_id=1,
+            chat_title="Ops Chat",
+            sender_name="Alice",
+            timestamp="2024-01-15T10:00:00Z",
+            text="@owner can you review this?",
+            score=1.0,
+        )
+        update, context, mock_search, mock_llm, mock_audit = _make_handler_context(
+            search_results=[result],
+            llm_answer="Act Now: ...",
+        )
+        context.args = ["1d", "quick"]
+        update.effective_user.username = "owner"
+
+        await handle_mentions(update, context)
+
+        mock_search.mentions_needing_attention.assert_called_once()
+        mock_llm.query.assert_called_once()
+        llm_kwargs = mock_llm.query.call_args.kwargs
+        assert llm_kwargs["context_max_chars"] == 12000
+        assert llm_kwargs["max_tokens_override"] == 1200
+        assert mock_audit.log.call_args[0][1] == "command_mentions"
+
+    @pytest.mark.asyncio
+    async def test_summary_command_uses_time_window(self):
+        result = SearchResult(
+            message_id=1,
+            chat_id=1,
+            chat_title="Ops Chat",
+            sender_name="Alice",
+            timestamp="2024-01-15T10:00:00Z",
+            text="Status update",
+            score=1.0,
+        )
+        update, context, mock_search, mock_llm, mock_audit = _make_handler_context(
+            search_results=[result],
+            llm_answer="Summary",
+        )
+        context.args = ["3d", "detailed"]
+
+        await handle_summary(update, context)
+
+        mock_search.recent_chat_summary_context.assert_called_once_with(
+            chat_limit=50,
+            per_chat_messages=3,
+            days_back=3,
+        )
+        llm_kwargs = mock_llm.query.call_args.kwargs
+        assert llm_kwargs["context_max_chars"] == 24000
+        assert llm_kwargs["max_tokens_override"] == 2800
+        assert mock_audit.log.call_args[0][1] == "command_summary"
+
+    @pytest.mark.asyncio
+    async def test_fresh_command_uses_requested_chat_count(self):
+        result = SearchResult(
+            message_id=1,
+            chat_id=1,
+            chat_title="Ops Chat",
+            sender_name="Alice",
+            timestamp="2024-01-15T10:00:00Z",
+            text="Status update",
+            score=1.0,
+        )
+        update, context, mock_search, mock_llm, mock_audit = _make_handler_context(
+            search_results=[result],
+            llm_answer="Fresh summary",
+        )
+        context.args = ["50", "quick"]
+
+        await handle_fresh(update, context)
+
+        mock_search.recent_chat_summary_context.assert_called_once_with(
+            chat_limit=50,
+            per_chat_messages=2,
+            days_back=30,
+        )
+        llm_kwargs = mock_llm.query.call_args.kwargs
+        assert llm_kwargs["context_max_chars"] == 22000
+        assert llm_kwargs["max_tokens_override"] == 1700
+        assert mock_audit.log.call_args[0][1] == "command_fresh"
+
+    @pytest.mark.asyncio
+    async def test_more_command_sends_pending_chunks(self):
+        update, context, _, _, _ = _make_handler_context()
+        context.user_data["pending_response_chunks"] = ["part1", "part2", "part3"]
+        context.bot_data["response_auto_chunks"] = 2
+
+        await handle_more(update, context)
+
+        # Two parts sent plus the continuation hint.
+        assert update.message.reply_text.call_count == 3
+        assert context.user_data["pending_response_chunks"] == ["part3"]
 
 
 # ---------------------------------------------------------------------------

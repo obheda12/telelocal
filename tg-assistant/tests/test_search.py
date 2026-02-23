@@ -362,3 +362,26 @@ class TestRecentChatSummaryContext:
         sql = mock_pool.fetch.call_args[0][0]
         assert "WITH freshest AS" in sql
         assert "ROW_NUMBER() OVER" in sql
+
+
+class TestMentionsNeedingAttention:
+    @pytest.mark.asyncio
+    async def test_mentions_query_uses_reply_or_alias_match(self):
+        mock_pool = MagicMock()
+        mock_pool.fetch = AsyncMock(return_value=[])
+        mock_embedder = MagicMock()
+        mock_embedder.dimension = 384
+
+        search = MessageSearch(mock_pool, mock_embedder)
+        results = await search.mentions_needing_attention(
+            owner_id=123,
+            mention_aliases=["@owner"],
+            days_back=1,
+            limit=50,
+        )
+
+        assert results == []
+        mock_pool.fetch.assert_called_once()
+        sql = mock_pool.fetch.call_args[0][0]
+        assert "reply_to_msg_id" in sql
+        assert "ILIKE" in sql

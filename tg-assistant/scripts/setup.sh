@@ -528,7 +528,7 @@ phase_service_activation() {
     echo ""
     if [[ ! "${CONFIGURE_CHATS}" =~ ^[Nn] ]]; then
         if [[ -x "${VENV_DIR}/bin/python3" ]]; then
-            log_info "Opening chat selector (checked = included, unchecked = excluded)..."
+            log_info "Opening chat selector (supports keyword pre-filter; checked = included)..."
             if PYTHONPATH="${INSTALL_DIR}/src" TG_ASSISTANT_CONFIG="${CONFIG_DIR}/settings.toml" \
                 "${VENV_DIR}/bin/python3" -m syncer.manage_chats; then
                 log_success "Chat include/exclude list saved"

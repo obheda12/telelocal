@@ -81,6 +81,12 @@ max_history_days = 30
 # Set to 0 to disable and sync all active chats.
 max_active_chats = 500
 
+# Chat types to include in ingestion.
+# Default is group-only to auto-exclude direct user chats and broadcast channels.
+# Valid values: "group", "channel", "user"
+# The manage-chats selector only shows chats matching these types.
+include_chat_types = ["group"]
+
 # JSON file storing manually excluded chats (managed via `telenad manage-chats`).
 # This file is read by syncer each pass to skip selected chat IDs.
 excluded_chats_path = "/etc/tg-assistant/excluded_chats.json"
@@ -187,6 +193,14 @@ max_queries_per_minute = 20
 # More context = better answers but higher token cost and latency.
 # 50 messages is a good balance for summarization tasks.
 max_context_messages = 50
+
+# Number of chunks to send automatically when a response exceeds Telegram's
+# 4096-character limit. Remaining chunks are available via /more.
+response_auto_chunks = 2
+
+# Optional aliases used by /mentions to detect textual pings in addition to
+# reply-to-owner detection. Include "@username" forms if needed.
+owner_mention_aliases = []
 
 # Defaults for "summarize freshest chats" requests.
 # The handler can detect prompts like "synopsis of the 50 freshest chats"
