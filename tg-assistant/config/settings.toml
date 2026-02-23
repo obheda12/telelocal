@@ -188,6 +188,14 @@ max_queries_per_minute = 20
 # 50 messages is a good balance for summarization tasks.
 max_context_messages = 50
 
+# Defaults for "summarize freshest chats" requests.
+# The handler can detect prompts like "synopsis of the 50 freshest chats"
+# and switch to chat-breadth mode.
+recent_summary_default_chat_count = 20
+recent_summary_max_chat_count = 75
+recent_summary_per_chat_messages = 2
+recent_summary_context_max_chars = 22000
+
 # Maximum number of chat entries to include in intent extraction prompts.
 # Lower values reduce Haiku latency/token cost when you have many chats.
 # Set to 0 to include all chats.

@@ -181,6 +181,7 @@ journalctl -u tg-syncer --since "1 hour ago" | grep -i flood
 - Tune `querybot.hybrid_min_terms` / `querybot.hybrid_min_term_length` to skip vector work on short keyword queries and reduce p95 latency.
 - If you have hundreds of chats, tune `querybot.max_intent_chats` (default `200`) to reduce intent extraction latency/cost.
 - For the fastest ingest on large/busy accounts, enable `syncer.defer_embeddings = true` to decouple message writes from embedding generation.
+- For cross-chat recaps, ask queries like `"quick synopsis of the 50 freshest chats"` (breadth mode, bounded by querybot recent-summary settings).
 - Retention pruning runs hourly via `tg-prune-history.timer`; run `sudo telenad prune` manually if needed.
 - Use `./scripts/benchmark-pipeline.sh` after changes and compare p95 latency before/after.
 

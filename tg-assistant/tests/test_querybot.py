@@ -222,6 +222,7 @@ def _make_handler_context(
     ]
     mock_search.filtered_search.return_value = search_results or []
     mock_search.full_text_search.return_value = fallback_results or []
+    mock_search.recent_chat_summary_context.return_value = search_results or []
 
     mock_llm = AsyncMock()
     mock_llm.extract_query_intent.return_value = intent or QueryIntent(
@@ -245,6 +246,10 @@ def _make_handler_context(
         "audit": mock_audit,
         "sanitizer": mock_sanitizer,
         "input_validator": mock_validator,
+        "recent_summary_default_chat_count": 20,
+        "recent_summary_max_chat_count": 75,
+        "recent_summary_per_chat_messages": 2,
+        "recent_summary_context_max_chars": 22000,
     }
 
     return update, context, mock_search, mock_llm, mock_audit
@@ -458,6 +463,34 @@ class TestHandleMessage:
         audit_details = mock_audit.log.call_args[0][2]
         assert "injection_warnings_count" in audit_details
         assert audit_details["injection_warnings_count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_recent_chat_summary_mode_uses_breadth_search(self):
+        """Freshest-chat synopsis prompts should use breadth mode across chats."""
+        result = SearchResult(
+            message_id=1,
+            chat_id=1,
+            chat_title="Chat",
+            sender_name="User",
+            timestamp="2024-01-15T10:00:00Z",
+            text="Latest update",
+            score=1.0,
+        )
+        update, context, mock_search, mock_llm, _ = _make_handler_context(
+            search_results=[result],
+            intent=QueryIntent(search_terms="synopsis"),  # should be ignored by breadth mode
+        )
+        update.message.text = "tell me a quick synopsis of the 50 freshest chats"
+
+        await handle_message(update, context)
+
+        mock_search.recent_chat_summary_context.assert_called_once_with(
+            chat_limit=50,
+            per_chat_messages=2,
+            days_back=30,
+        )
+        mock_search.filtered_search.assert_not_called()
+        mock_llm.query.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

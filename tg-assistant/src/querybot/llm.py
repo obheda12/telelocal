@@ -246,7 +246,11 @@ class ClaudeAssistant:
         return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
     @staticmethod
-    def _format_context(results: List[SearchResult], max_chars: int = 8000) -> str:
+    def _format_context(
+        results: List[SearchResult],
+        max_chars: int = 8000,
+        per_message_chars: int = 320,
+    ) -> str:
         """Format search results grouped by chat for better LLM comprehension.
 
         Groups messages by chat title, then lists them chronologically
@@ -279,6 +283,8 @@ class ClaudeAssistant:
             for r in msgs:
                 safe_sender = ClaudeAssistant._escape_xml(r.sender_name or "")
                 safe_text = ClaudeAssistant._escape_xml(r.text or "")
+                if per_message_chars > 0 and len(safe_text) > per_message_chars:
+                    safe_text = safe_text[: per_message_chars - 3].rstrip() + "..."
                 thread_tags: List[str] = []
                 if r.thread_top_msg_id is not None:
                     thread_tags.append(f"thread={r.thread_top_msg_id}")
@@ -307,6 +313,8 @@ class ClaudeAssistant:
         self,
         user_question: str,
         context_results: List[SearchResult],
+        *,
+        context_max_chars: int = 8000,
     ) -> str:
         """Send a question with context to Claude and return the response.
 
@@ -320,7 +328,12 @@ class ClaudeAssistant:
         await self._enforce_rate_limit()
 
         system_prompt = self._load_system_prompt()
-        context = self._format_context(context_results)
+        try:
+            context_max_chars = int(context_max_chars)
+        except (TypeError, ValueError):
+            context_max_chars = 8000
+        context_max_chars = max(2000, context_max_chars)
+        context = self._format_context(context_results, max_chars=context_max_chars)
 
         response = await self._client.messages.create(
             model=self._model,

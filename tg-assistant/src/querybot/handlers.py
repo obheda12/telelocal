@@ -34,6 +34,10 @@ HandlerFunc = Callable[
 
 # Telegram message length limit
 _TG_MAX_LEN = 4096
+_RECENT_CHAT_LIMIT_RE = re.compile(
+    r"\b(?:top\s+)?(\d{1,3})\s+(?:most\s+)?(?:fresh(?:est)?|recent|latest)\s+chats?\b",
+    re.IGNORECASE,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -110,6 +114,53 @@ def _split_message(text: str) -> List[str]:
         text = text[split_pos:].lstrip("\n")
 
     return chunks
+
+
+def _extract_recent_chat_summary_target(
+    question: str,
+    *,
+    default_count: int = 20,
+    max_count: int = 75,
+) -> int | None:
+    """Return requested chat count for "freshest chats" summary queries.
+
+    This detects high-level summary prompts like
+    "quick synopsis of the 50 freshest chats".
+    """
+    q = (question or "").lower()
+    if "chat" not in q:
+        return None
+
+    summary_hint = any(
+        hint in q for hint in (
+            "summary",
+            "summarize",
+            "synopsis",
+            "recap",
+            "briefing",
+            "overview",
+            "digest",
+            "what happened",
+        )
+    )
+    recency_hint = any(
+        hint in q for hint in (
+            "freshest chat",
+            "freshest chats",
+            "latest chat",
+            "latest chats",
+            "recent chat",
+            "recent chats",
+            "most recent chats",
+        )
+    )
+    if not (summary_hint and recency_hint):
+        return None
+
+    match = _RECENT_CHAT_LIMIT_RE.search(question)
+    count = int(match.group(1)) if match else int(default_count)
+    count = max(1, min(int(max_count), count))
+    return count
 
 
 # Regex matching Telegram-supported HTML tags that must be preserved.
@@ -221,7 +272,8 @@ async def handle_help(
         "Tips for effective queries:\n"
         '  - Be specific: "What did Alice say about the project deadline?"\n'
         '  - Ask for summaries: "Summarise the discussion in DevChat yesterday"\n'
-        '  - Search by topic: "Find messages about Python deployment"'
+        '  - Search by topic: "Find messages about Python deployment"\n'
+        '  - Cross-chat brief: "Quick synopsis of the 50 freshest chats"'
     )
     await update.message.reply_text(help_text)
 
@@ -307,20 +359,61 @@ async def handle_message(
     chat_list = await search.get_chat_list(limit=chat_list_limit)
     intent = await llm.extract_query_intent(question, chat_list)
 
-    # 2. Filtered search using extracted intent
-    # Use higher limit for browse queries (no search terms = summarize)
-    browse_limit = 50 if not intent.search_terms else 20
-    results = await search.filtered_search(
-        search_terms=intent.search_terms,
-        chat_ids=intent.chat_ids,
-        sender_name=intent.sender_name,
-        days_back=intent.days_back,
-        limit=browse_limit,
+    recent_summary_default = context.bot_data.get(
+        "recent_summary_default_chat_count", 20
     )
+    recent_summary_max = context.bot_data.get(
+        "recent_summary_max_chat_count", 75
+    )
+    recent_summary_per_chat_messages = context.bot_data.get(
+        "recent_summary_per_chat_messages", 2
+    )
+    recent_summary_context_max_chars = context.bot_data.get(
+        "recent_summary_context_max_chars", 22000
+    )
+    recent_chat_target = _extract_recent_chat_summary_target(
+        question,
+        default_count=recent_summary_default,
+        max_count=recent_summary_max,
+    )
+    try:
+        recent_summary_per_chat_messages = max(
+            1, int(recent_summary_per_chat_messages)
+        )
+    except (TypeError, ValueError):
+        recent_summary_per_chat_messages = 2
+    recent_summary_mode = (
+        recent_chat_target is not None
+        and not intent.chat_ids
+        and intent.sender_name is None
+    )
+
+    # 2. Filtered search using extracted intent
+    if recent_summary_mode:
+        days_back = intent.days_back if intent.days_back is not None else 30
+        results = await search.recent_chat_summary_context(
+            chat_limit=recent_chat_target,
+            per_chat_messages=recent_summary_per_chat_messages,
+            days_back=days_back,
+        )
+    else:
+        # Use higher limit for browse queries (no search terms = summarize)
+        browse_limit = 50 if not intent.search_terms else 20
+        results = await search.filtered_search(
+            search_terms=intent.search_terms,
+            chat_ids=intent.chat_ids,
+            sender_name=intent.sender_name,
+            days_back=intent.days_back,
+            limit=browse_limit,
+        )
 
     # 3. Fallback: if filtered search found nothing but had filters,
     #    try unfiltered FTS with the original question
-    if not results and (intent.chat_ids or intent.sender_name or intent.days_back):
+    if (
+        not results
+        and not recent_summary_mode
+        and (intent.chat_ids or intent.sender_name or intent.days_back)
+    ):
         logger.info("Filtered search empty, falling back to unfiltered FTS")
         results = await search.full_text_search(question)
 
@@ -331,6 +424,9 @@ async def handle_message(
 
     # 3.5. Enforce max context size (track truncation)
     max_ctx = context.bot_data.get("max_context_messages")
+    if recent_summary_mode and isinstance(max_ctx, int) and max_ctx > 0:
+        target_msgs = recent_chat_target * recent_summary_per_chat_messages
+        max_ctx = max(max_ctx, min(target_msgs, 400))
     context_truncated = False
     if isinstance(max_ctx, int) and max_ctx > 0 and len(results) > max_ctx:
         results = results[:max_ctx]
@@ -345,7 +441,14 @@ async def handle_message(
                 injection_warnings_count += len(scan.warnings)
 
     # 5. Ask Claude
-    answer = await llm.query(question, results)
+    context_max_chars = (
+        recent_summary_context_max_chars if recent_summary_mode else 8000
+    )
+    answer = await llm.query(
+        question,
+        results,
+        context_max_chars=context_max_chars,
+    )
 
     # 6. Reply (split if > 4096 chars — Telegram message limit)
     for chunk in _split_message(_sanitize_telegram_html(answer)):
@@ -372,6 +475,8 @@ async def handle_message(
             "injection_warnings_count": injection_warnings_count,
             "context_truncated": context_truncated,
             "max_context_messages": max_ctx,
+            "recent_summary_mode": recent_summary_mode,
+            "recent_summary_target_chats": recent_chat_target if recent_summary_mode else 0,
         },
         success=True,
     )

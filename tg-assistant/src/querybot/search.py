@@ -394,6 +394,64 @@ class MessageSearch:
         rows = await self._pool.fetch(sql, *params)
         return self._rows_to_results(rows)
 
+    async def recent_chat_summary_context(
+        self,
+        *,
+        chat_limit: int = 20,
+        per_chat_messages: int = 2,
+        days_back: Optional[int] = 30,
+    ) -> List[SearchResult]:
+        """Return recent messages grouped from the freshest chats.
+
+        This powers "summarize freshest chats" style requests where breadth
+        across chats is more important than per-message relevance ranking.
+        """
+        chat_limit = max(1, int(chat_limit))
+        per_chat_messages = max(1, int(per_chat_messages))
+
+        params: List[Any] = [chat_limit, per_chat_messages]
+        freshness_condition = ""
+        message_condition = ""
+        if days_back is not None and days_back > 0:
+            cutoff = datetime.now(timezone.utc) - timedelta(days=days_back)
+            params.append(cutoff)
+            cutoff_idx = len(params)
+            freshness_condition = f"AND m.timestamp >= ${cutoff_idx}"
+            message_condition = f"AND m.timestamp >= ${cutoff_idx}"
+
+        sql = f"""
+            WITH freshest AS (
+                SELECT m.chat_id, MAX(m.timestamp) AS last_ts
+                FROM messages m
+                WHERE TRUE {freshness_condition}
+                GROUP BY m.chat_id
+                ORDER BY last_ts DESC
+                LIMIT $1
+            ),
+            ranked AS (
+                SELECT m.message_id, m.chat_id, c.title, m.sender_name,
+                       m.reply_to_msg_id, m.thread_top_msg_id, m.is_topic_message,
+                       m.timestamp, m.text, f.last_ts,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY m.chat_id
+                           ORDER BY m.timestamp DESC, m.message_id DESC
+                       ) AS rn
+                FROM messages m
+                JOIN freshest f ON f.chat_id = m.chat_id
+                JOIN chats c ON c.chat_id = m.chat_id
+                WHERE TRUE {message_condition}
+            )
+            SELECT message_id, chat_id, title, sender_name,
+                   reply_to_msg_id, thread_top_msg_id, is_topic_message,
+                   timestamp, text,
+                   1.0 AS score
+            FROM ranked
+            WHERE rn <= $2
+            ORDER BY last_ts DESC, timestamp DESC
+        """
+        rows = await self._pool.fetch(sql, *params)
+        return self._rows_to_results(rows)
+
     # ------------------------------------------------------------------
     # Full-text search (PostgreSQL tsvector / tsquery)
     # ------------------------------------------------------------------

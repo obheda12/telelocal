@@ -339,3 +339,26 @@ class TestThreadMetadataMapping:
         assert result.reply_to_msg_id == 9
         assert result.thread_top_msg_id == 7
         assert result.is_topic_message is True
+
+
+class TestRecentChatSummaryContext:
+    @pytest.mark.asyncio
+    async def test_recent_chat_summary_context_runs_single_query(self):
+        """Should fetch breadth-first context across freshest chats in one SQL query."""
+        mock_pool = MagicMock()
+        mock_pool.fetch = AsyncMock(return_value=[])
+        mock_embedder = MagicMock()
+        mock_embedder.dimension = 384
+
+        search = MessageSearch(mock_pool, mock_embedder)
+        results = await search.recent_chat_summary_context(
+            chat_limit=50,
+            per_chat_messages=2,
+            days_back=30,
+        )
+
+        assert results == []
+        mock_pool.fetch.assert_called_once()
+        sql = mock_pool.fetch.call_args[0][0]
+        assert "WITH freshest AS" in sql
+        assert "ROW_NUMBER() OVER" in sql
