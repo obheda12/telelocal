@@ -129,7 +129,6 @@ class ReadOnlyTelegramClient:
             "__setattr__",
             "__delattr__",
             "__getattribute__",
-            "_state",
         }:
             return object.__getattribute__(self, name)
 

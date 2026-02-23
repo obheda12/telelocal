@@ -325,6 +325,11 @@ class TestEdgeCases:
         with pytest.raises(PermissionError, match="_client"):
             _ = readonly_client._client
 
+    def test_internal_state_accessor_is_blocked(self, readonly_client):
+        """Internal state helper should not be externally callable."""
+        with pytest.raises(PermissionError, match="_state"):
+            _ = readonly_client._state
+
     def test_dunder_dict_is_blocked(self, readonly_client):
         """Block __dict__ access to prevent introspection-based bypasses."""
         with pytest.raises(PermissionError, match="__dict__"):

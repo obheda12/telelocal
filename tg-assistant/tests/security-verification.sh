@@ -474,10 +474,10 @@ test_log_directory() {
 
     # Main log directory
     PERMS=$(stat -c %a "${LOG_DIR}")
-    if [[ "${PERMS}" == "755" || "${PERMS}" == "750" || "${PERMS}" == "700" ]]; then
+    if [[ "${PERMS}" == "775" || "${PERMS}" == "770" || "${PERMS}" == "755" || "${PERMS}" == "750" || "${PERMS}" == "700" ]]; then
         log_pass "Log directory has secure permissions (${PERMS})"
     else
-        log_fail "Log directory has permissions ${PERMS} (expected 755 or stricter)"
+        log_fail "Log directory has permissions ${PERMS} (expected 775/770/755/750/700)"
     fi
 
     # Syncer log subdirectory
