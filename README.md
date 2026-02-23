@@ -56,7 +56,7 @@ Telelocal runs two core services inside one host boundary:
 1. `tg-syncer` ingests Telegram history (read-only) into a local DB.
 2. `tg-querybot` answers owner questions from that local DB and sends replies back in Telegram.
 
-### 1) System Overview
+### System Overview
 
 ```mermaid
 flowchart LR
@@ -80,63 +80,6 @@ flowchart LR
     CL -->|"answer draft"| QB
     QB -->|"reply via Bot API"| TG
     TG -->|"deliver answer"| U
-```
-
-### 2) Trust Boundaries
-
-```mermaid
-flowchart LR
-    subgraph Trusted["Trusted: your host"]
-        SY["tg-syncer"]
-        QB["tg-querybot"]
-        DB[("Local PostgreSQL")]
-    end
-
-    subgraph External["External systems"]
-        TG["Telegram"]
-        CL["Claude API"]
-        NET["Other internet hosts"]
-    end
-
-    SY -->|"read-only Telegram access"| TG
-    QB -->|"bot traffic"| TG
-    QB -->|"scoped context only"| CL
-    SY -->|"write-limited DB role"| DB
-    QB -->|"read-only DB role"| DB
-    SY -. egress blocked .-> NET
-    QB -. egress blocked .-> NET
-```
-
-- Trust anchor: the local host and database.
-- Data leaves the host only on the query path, and only as scoped/top-K context.
-- `nftables` and systemd hardening enforce per-service network/process limits.
-
-### 3) Simple User Flow
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant O as Owner
-    participant TG as Telegram
-    participant SY as tg-syncer
-    participant DB as Local DB
-    participant QB as tg-querybot
-    participant CL as Claude
-
-    loop background sync
-        SY->>TG: read new messages (read-only)
-        TG-->>SY: message stream
-        SY->>DB: upsert chats/messages
-    end
-
-    O->>TG: send question to bot
-    TG->>QB: deliver owner message
-    QB->>DB: retrieve relevant messages
-    DB-->>QB: ranked local context
-    QB->>CL: question + top-K snippets
-    CL-->>QB: synthesized answer
-    QB->>TG: send reply
-    TG-->>O: deliver answer
 ```
 
 For deeper component and threat detail:
