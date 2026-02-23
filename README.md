@@ -153,14 +153,6 @@ Security in Telelocal is layered, not single-control:
 - Querybot egress is DNS-refreshed IP-set based (`api.telegram.org`, `api.anthropic.com`), and syncer egress is limited to Telegram MTProto ranges.
 - DB role split enforces least privilege (`syncer_role` write-limited for ingestion path; `querybot_role` read-only on message corpus).
 
-### Compromise blast radius (practical view)
-
-| If compromised | What attacker can likely do | What is constrained by design |
-|---|---|---|
-| `tg-querybot` process | Read queryable corpus + call allowed APIs | Cannot modify message corpus via DB role; cannot egress to arbitrary hosts via nftables |
-| `tg-syncer` process | Read Telegram data and write ingest path | Intended path is read-only wrapper; arbitrary code execution is still a high-risk scenario |
-| DB user `querybot_role` | Read messages/chats | Cannot write/delete/truncate messages |
-| Stolen encrypted credential files | Offline possession of blobs | Not directly usable without host/machine key and service context |
 
 ### Threat snapshot
 
@@ -171,23 +163,6 @@ Security in Telelocal is layered, not single-control:
 | Data exfiltration from compromised service | High | Per-service nftables egress policy |
 | Unauthorized bot use | High | Owner-only filtering + handler checks |
 | Prompt injection via synced content | Medium | Untrusted-context prompt design + scoped retrieval + no write path |
-
-### Security verification quick checks
-
-```bash
-# 1) Service and scope health
-telelocal status
-telelocal sync-status
-
-# 2) Security checks
-sudo ./tests/security-verification.sh
-
-# 3) Audit trail review
-tail -n 100 /var/log/tg-assistant/audit.log
-
-# 4) API allowlist refresh logs
-journalctl -u tg-refresh-api-ipsets.service -n 50 --no-pager
-```
 
 ---
 
