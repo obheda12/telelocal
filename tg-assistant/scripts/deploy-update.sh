@@ -75,13 +75,25 @@ if [[ -d "${INSTALL_DIR}/scripts" ]]; then
     ln -sf "${INSTALL_DIR}/scripts/telenad" /usr/local/bin/telenad
 fi
 
-for svc in tg-syncer.service tg-querybot.service tg-refresh-api-ipsets.service tg-refresh-api-ipsets.timer; do
+for svc in \
+    tg-syncer.service \
+    tg-querybot.service \
+    tg-refresh-api-ipsets.service \
+    tg-refresh-api-ipsets.timer \
+    tg-prune-history.service \
+    tg-prune-history.timer; do
     if [[ -f "${INSTALL_DIR}/systemd/${svc}" ]]; then
         install -m 0644 "${INSTALL_DIR}/systemd/${svc}" "/etc/systemd/system/${svc}"
     fi
 done
 
 systemctl daemon-reload
+
+for timer in tg-refresh-api-ipsets.timer tg-prune-history.timer; do
+    if systemctl enable --now "${timer}" >/dev/null 2>&1; then
+        echo "[OK] Enabled ${timer}"
+    fi
+done
 
 if [[ "${DO_RESTART}" == true ]]; then
     systemctl restart --no-block tg-syncer tg-querybot

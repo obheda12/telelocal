@@ -21,6 +21,7 @@ import random
 import signal
 import sys
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict
@@ -294,6 +295,7 @@ async def sync_once(
     store_raw_json = syncer_config.get("store_raw_json", False)
     idle_chat_delay_seconds = syncer_config.get("idle_chat_delay_seconds", 0.1)
     log_batch_progress = syncer_config.get("log_batch_progress", False)
+    progress_heartbeat_seconds = syncer_config.get("progress_heartbeat_seconds", 30)
     defer_embeddings = syncer_config.get("defer_embeddings", False)
     embedding_update_batch_size = max(
         1, int(syncer_config.get("embedding_update_batch_size", batch_size))
@@ -307,6 +309,11 @@ async def sync_once(
     except (TypeError, ValueError):
         max_active_chats = 500
     max_active_chats = max(0, max_active_chats)
+    try:
+        progress_heartbeat_seconds = float(progress_heartbeat_seconds)
+    except (TypeError, ValueError):
+        progress_heartbeat_seconds = 30.0
+    progress_heartbeat_seconds = max(0.0, progress_heartbeat_seconds)
 
     total_new = 0
     if _shutdown_event.is_set():
@@ -514,6 +521,8 @@ async def sync_once(
         texts_for_embedding: list[str] = []
         new_count = 0
         processed_count = 0
+        scanned_count = 0
+        last_heartbeat_at = time.monotonic()
 
         async for msg in iterator:
             if _shutdown_event.is_set():
@@ -530,6 +539,8 @@ async def sync_once(
 
             if cutoff and msg_date and msg_date < cutoff:
                 break
+
+            scanned_count += 1
 
             text = getattr(msg, "text", None) or getattr(msg, "message", None)
             sender_id = getattr(msg, "sender_id", None)
@@ -611,6 +622,32 @@ async def sync_once(
                     chat_progress.log_batch()
                 batch = []
                 texts_for_embedding = []
+
+            # Emit an in-flight heartbeat so status tools can distinguish
+            # long-running chat scans from stalled sync loops.
+            if progress_heartbeat_seconds > 0:
+                now = time.monotonic()
+                if (now - last_heartbeat_at) >= progress_heartbeat_seconds:
+                    elapsed = max(0.0, now - chat_progress._start)
+                    rate = (scanned_count / elapsed) if elapsed > 0 else 0.0
+                    await audit.log(
+                        "syncer",
+                        "sync_chat_progress",
+                        {
+                            "chat_id": chat_id,
+                            "chat_title": chat_title,
+                            "chat_index": chat_idx + 1,
+                            "total_chats": active_count,
+                            "messages_scanned": scanned_count,
+                            "messages_flushed": processed_count,
+                            "messages_buffered": len(batch),
+                            "new_messages": new_count,
+                            "elapsed_seconds": round(elapsed, 1),
+                            "rate_msg_per_sec": round(rate, 1),
+                        },
+                        success=True,
+                    )
+                    last_heartbeat_at = now
 
         # Flush remaining
         if batch:

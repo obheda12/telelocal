@@ -96,6 +96,10 @@ idle_chat_delay_seconds = 0.1
 # Emit per-batch progress logs (verbose).
 log_batch_progress = false
 
+# Emit in-flight audit heartbeat for long-running chat scans (seconds).
+# Set to 0 to disable heartbeat events.
+progress_heartbeat_seconds = 30
+
 # Optional: decouple ingest from embedding generation.
 # false: generate embeddings inline before insert (simple, consistent)
 # true (default): store messages first, then backfill embeddings in a

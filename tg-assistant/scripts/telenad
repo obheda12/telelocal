@@ -7,6 +7,7 @@
 # Usage:
 #   telenad setup          Full guided deployment
 #   telenad update         Deploy latest checked-out code to /opt safely
+#   telenad prune          Prune DB history older than configured window
 #   telenad session        Create/recreate Telethon session
 #   telenad wipe           Destroy all credentials and state
 #   telenad status         Check service health
@@ -34,6 +35,7 @@ usage() {
     echo "Setup & teardown:"
     echo "  setup          Full guided deployment (requires sudo)"
     echo "  update         Deploy latest code to /opt safely (requires sudo)"
+    echo "  prune          Prune DB history by retention window (requires sudo)"
     echo "  session        Create or recreate Telethon session (requires sudo)"
     echo "  wipe           Destroy all credentials, sessions, and state (requires sudo)"
     echo ""
@@ -76,6 +78,11 @@ cmd_update() {
 cmd_wipe() {
     require_sudo "wipe"
     exec "${SCRIPT_DIR}/wipe-credentials.sh"
+}
+
+cmd_prune() {
+    require_sudo "prune"
+    exec "${SCRIPT_DIR}/prune-history.sh"
 }
 
 cmd_sync_status() {
@@ -194,6 +201,7 @@ COMMAND="${1:-}"
 case "${COMMAND}" in
     setup)      cmd_setup ;;
     update)     cmd_update ;;
+    prune)      cmd_prune ;;
     session)    cmd_session ;;
     wipe)       cmd_wipe ;;
     status)      cmd_status ;;

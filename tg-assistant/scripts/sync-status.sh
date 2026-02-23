@@ -85,42 +85,49 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Current activity (from most recent sync_chat audit event)
+# Current activity (from most recent sync_chat* audit event)
 # ---------------------------------------------------------------------------
 echo ""
 echo -e "${BOLD}Current Activity${NC}"
 echo ""
 
 LATEST_CHAT_EVENT=$(db_query "
-SELECT details::text
+SELECT action || E'\t' || details::text || E'\t' ||
+       EXTRACT(EPOCH FROM (NOW() - timestamp))::int
 FROM audit_log
-WHERE service = 'syncer' AND action = 'sync_chat' AND success = true
+WHERE service = 'syncer'
+  AND action IN ('sync_chat', 'sync_chat_progress')
+  AND success = true
 ORDER BY timestamp DESC LIMIT 1;
 " 2>/dev/null || echo "")
 
 if [[ -n "${LATEST_CHAT_EVENT}" && "${LATEST_CHAT_EVENT}" != "" ]]; then
+    IFS=$'\t' read -r EVENT_ACTION EVENT_DETAILS EVENT_AGE <<< "${LATEST_CHAT_EVENT}"
+    if ! [[ "${EVENT_AGE:-}" =~ ^[0-9]+$ ]]; then
+        EVENT_AGE=999999
+    fi
+
     # Parse JSON fields using python3
-    CHAT_INDEX=$(echo "${LATEST_CHAT_EVENT}" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('chat_index','?'))" 2>/dev/null || echo "?")
-    TOTAL_CHATS=$(echo "${LATEST_CHAT_EVENT}" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('total_chats','?'))" 2>/dev/null || echo "?")
-    CHAT_TITLE=$(echo "${LATEST_CHAT_EVENT}" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('chat_title','unknown'))" 2>/dev/null || echo "unknown")
-    NEW_MSGS=$(echo "${LATEST_CHAT_EVENT}" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('new_messages',0))" 2>/dev/null || echo "0")
-    MSG_RATE=$(echo "${LATEST_CHAT_EVENT}" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('rate_msg_per_sec','n/a'))" 2>/dev/null || echo "n/a")
-    ELAPSED=$(echo "${LATEST_CHAT_EVENT}" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('elapsed_seconds','n/a'))" 2>/dev/null || echo "n/a")
+    CHAT_INDEX=$(echo "${EVENT_DETAILS}" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('chat_index','?'))" 2>/dev/null || echo "?")
+    TOTAL_CHATS=$(echo "${EVENT_DETAILS}" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('total_chats','?'))" 2>/dev/null || echo "?")
+    CHAT_TITLE=$(echo "${EVENT_DETAILS}" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('chat_title','unknown'))" 2>/dev/null || echo "unknown")
+    NEW_MSGS=$(echo "${EVENT_DETAILS}" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('new_messages',0))" 2>/dev/null || echo "0")
+    MSG_RATE=$(echo "${EVENT_DETAILS}" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('rate_msg_per_sec','n/a'))" 2>/dev/null || echo "n/a")
+    ELAPSED=$(echo "${EVENT_DETAILS}" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('elapsed_seconds','n/a'))" 2>/dev/null || echo "n/a")
+    SCANNED=$(echo "${EVENT_DETAILS}" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('messages_scanned','n/a'))" 2>/dev/null || echo "n/a")
 
     echo "  Last synced chat: ${CHAT_INDEX}/${TOTAL_CHATS} — ${CHAT_TITLE}"
     echo "  New messages:     ${NEW_MSGS}"
+    echo "  Messages scanned: ${SCANNED}"
     echo "  Rate:             ${MSG_RATE} msg/s"
     echo "  Elapsed:          ${ELAPSED}s"
+    echo "  Last event:       ${EVENT_ACTION} (${EVENT_AGE}s ago)"
 
-    # Check if sync is in progress (last event < 5min ago and not at final chat)
-    LAST_EVENT_AGE=$(db_query "
-    SELECT EXTRACT(EPOCH FROM (NOW() - MAX(timestamp)))::int
-    FROM audit_log
-    WHERE service = 'syncer' AND action = 'sync_chat';
-    " 2>/dev/null || echo "999999")
-
-    if [[ "${LAST_EVENT_AGE}" -lt 300 && "${CHAT_INDEX}" != "${TOTAL_CHATS}" ]]; then
+    # Check if sync is in progress.
+    if [[ "${EVENT_AGE}" -lt 180 && "${CHAT_INDEX}" != "${TOTAL_CHATS}" ]]; then
         echo -e "  State:            ${GREEN}Sync in progress${NC}"
+    elif [[ "${EVENT_AGE}" -lt 600 && "${CHAT_INDEX}" != "${TOTAL_CHATS}" ]]; then
+        echo -e "  State:            ${YELLOW}Slow / possible stall${NC}"
     else
         echo -e "  State:            ${BLUE}Idle${NC}"
     fi

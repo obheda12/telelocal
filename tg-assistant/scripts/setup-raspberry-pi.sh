@@ -386,7 +386,9 @@ deploy_systemd_services() {
         tg-syncer.service \
         tg-querybot.service \
         tg-refresh-api-ipsets.service \
-        tg-refresh-api-ipsets.timer; do
+        tg-refresh-api-ipsets.timer \
+        tg-prune-history.service \
+        tg-prune-history.timer; do
         if [[ -f "${SYSTEMD_SOURCE}/${SVC_FILE}" ]]; then
             cp "${SYSTEMD_SOURCE}/${SVC_FILE}" "/etc/systemd/system/${SVC_FILE}"
             log_success "Deployed ${SVC_FILE}"
@@ -753,11 +755,13 @@ deploy_application() {
         ln -sf "${INSTALL_DIR}/scripts/telenad" /usr/local/bin/telenad
         log_success "CLI installed: telenad"
 
-        if systemctl enable --now tg-refresh-api-ipsets.timer >/dev/null 2>&1; then
-            log_success "Enabled tg-refresh-api-ipsets.timer"
-        else
-            log_warn "Could not enable tg-refresh-api-ipsets.timer (enable manually if needed)"
-        fi
+        for timer in tg-refresh-api-ipsets.timer tg-prune-history.timer; do
+            if systemctl enable --now "${timer}" >/dev/null 2>&1; then
+                log_success "Enabled ${timer}"
+            else
+                log_warn "Could not enable ${timer} (enable manually if needed)"
+            fi
+        done
     fi
 }
 

@@ -167,6 +167,7 @@ journalctl -u tg-syncer --since "1 hour ago" | grep -i flood
 
 - Keep `syncer.enable_prescan_progress = false` unless you need detailed ETA logs.
 - Set `syncer.max_active_chats = 500` (or lower) to focus ingest on freshest chats and reduce full-pass latency on large accounts.
+- Keep `syncer.max_history_days = 30` to bound initial per-chat fetch depth.
 - Keep `syncer.store_raw_json = false` unless you explicitly need full raw payloads.
 - For faster catch-up on many chats, keep a small `syncer.idle_chat_delay_seconds` (default `0.1`).
 - The syncer now batches per-chat high-water-mark lookups into one DB query per pass for lower latency on large chat counts.
@@ -174,6 +175,7 @@ journalctl -u tg-syncer --since "1 hour ago" | grep -i flood
 - Tune `querybot.hybrid_min_terms` / `querybot.hybrid_min_term_length` to skip vector work on short keyword queries and reduce p95 latency.
 - If you have hundreds of chats, tune `querybot.max_intent_chats` (default `200`) to reduce intent extraction latency/cost.
 - For the fastest ingest on large/busy accounts, enable `syncer.defer_embeddings = true` to decouple message writes from embedding generation.
+- Retention pruning runs hourly via `tg-prune-history.timer`; run `sudo telenad prune` manually if needed.
 - Use `./scripts/benchmark-pipeline.sh` after changes and compare p95 latency before/after.
 
 ---

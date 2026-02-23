@@ -1,0 +1,19 @@
+[Unit]
+Description=Prune tg-assistant messages older than configured retention window
+After=postgresql.service
+Requires=postgresql.service
+ConditionPathExists=/opt/tg-assistant/scripts/prune-history.sh
+
+[Service]
+Type=oneshot
+User=postgres
+Group=postgres
+Environment=TG_ASSISTANT_CONFIG=/etc/tg-assistant/settings.toml
+ExecStart=/opt/tg-assistant/scripts/prune-history.sh
+
+# Minimal hardening for DB-maintenance task.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/etc/tg-assistant
