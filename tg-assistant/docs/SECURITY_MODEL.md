@@ -11,6 +11,8 @@ It describes:
 
 Related docs:
 
+- `ARCHITECTURE.md` (system boundaries and component responsibilities)
+- `THREAT_MODEL.md` (concise STRIDE summary)
 - `TELETHON_HARDENING.md` (Telethon-specific controls)
 - `QUICKSTART.md` (deployment + operational checks)
 - `../../README.md` (project overview)

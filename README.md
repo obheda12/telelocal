@@ -22,7 +22,8 @@ Status: proof-of-concept, built for operators managing many active group chats.
 - [Operational UX](#operational-ux)
 - [Performance Tuning For Large Accounts](#performance-tuning-for-large-accounts)
 - [Repository Layout](#repository-layout)
-- [Threats And Known Limits](#threats-and-known-limits)
+- [Threat Model And Known Limits](#threat-model-and-known-limits)
+- [Incident Response Quick Actions](#incident-response-quick-actions)
 - [Documentation Map](#documentation-map)
 - [License](#license)
 
@@ -112,6 +113,10 @@ flowchart LR
     B --> C["App controls<br/>(read-only wrapper + owner-only handlers)"]
     C --> D["Data controls<br/>(DB roles + scoped retrieval + audit)"]
 ```
+
+Deeper architecture notes (components, boundaries, compromise containment):
+
+- `tg-assistant/docs/ARCHITECTURE.md`
 
 ---
 
@@ -317,7 +322,7 @@ Benchmark helper:
 ```text
 tg-assistant/
   config/      # settings + system prompt
-  docs/        # quickstart, security model, hardening notes
+  docs/        # quickstart, architecture, threat/security model, hardening notes
   nftables/    # egress policy template
   scripts/     # setup, update, ops helpers
   src/
@@ -330,29 +335,69 @@ tg-assistant/
 
 ---
 
-## Threats And Known Limits
+## Threat Model And Known Limits
 
-Important realities:
+### High-value assets and actors
 
-- A stolen Telethon session is critical if decrypted and usable.
-- Root-level host compromise can still access runtime memory.
-- LLM prompt injection can degrade answer quality (even if write actions are blocked).
-- Claude receives selected context for each query (not full DB, but still cloud exposure).
+Highest-value assets:
 
-Risk posture note:
+- Telethon session + session encryption key (account-level impact if misused)
+- bot token and Claude API key
+- local message corpus and audit logs
 
-- Telelocal reduces attack surface and blast radius with layered controls.
-- It does not eliminate risk from full host compromise or kernel-level attacks.
+Most relevant threat actors:
 
-This README is a summary. Full threat trees, assumptions, and accepted risk live in:
+- opportunistic internet attacker
+- targeted attacker
+- malicious chat participant (prompt injection path)
+- compromised dependency (in-process code execution)
 
-- `tg-assistant/docs/SECURITY_MODEL.md`
+Key threat snapshot:
+
+| Threat | Severity | Primary controls |
+|---|---|---|
+| Telethon session theft/use | Critical | encrypted session at rest, credential isolation, host hardening |
+| Unintended Telegram writes | Critical | read-only Telethon wrapper allowlist (default deny) |
+| Exfiltration from compromised service | High | per-service nftables egress restrictions |
+| Unauthorized bot access | High | owner-only filter + handler guard |
+| Prompt injection in synced content | Medium | untrusted-context prompt design, scoped retrieval, no direct write path |
+
+Accepted-risk realities:
+
+- root/kernel compromise remains high impact,
+- prompt injection risk is reduced but not eliminated,
+- scoped/top-K context still leaves host for Claude synthesis.
+
+Operating assumptions:
+
+- host patching is maintained,
+- systemd/nftables policy remains intact after updates,
+- DNS resolvers used for dynamic API allowlists are trustworthy.
+
+Threat model references:
+
+- concise STRIDE summary: `tg-assistant/docs/THREAT_MODEL.md`
+- full model, assumptions, and incident playbook: `tg-assistant/docs/SECURITY_MODEL.md`
+
+---
+
+## Incident Response Quick Actions
+
+If compromise is suspected:
+
+1. Stop services: `sudo systemctl stop tg-syncer tg-querybot`
+2. Preserve logs: copy `/var/log/tg-assistant/audit.log` and relevant `journalctl` output
+3. Rotate/revoke: Telethon session, API ID/hash, bot token, Claude API key, session encryption key
+4. Re-run checks: `sudo ./tests/security-verification.sh`
+5. Recreate session and restart only after review
 
 ---
 
 ## Documentation Map
 
 - Deployment + troubleshooting: `tg-assistant/docs/QUICKSTART.md`
+- Architecture reference: `tg-assistant/docs/ARCHITECTURE.md`
+- Threat model snapshot: `tg-assistant/docs/THREAT_MODEL.md`
 - Telethon hardening details: `tg-assistant/docs/TELETHON_HARDENING.md`
 - Full security model and attack trees: `tg-assistant/docs/SECURITY_MODEL.md`
 

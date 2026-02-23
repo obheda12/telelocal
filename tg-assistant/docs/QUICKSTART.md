@@ -9,6 +9,8 @@ This guide is optimized for operators who want:
 For full threat analysis and control rationale, see:
 
 - `../../README.md`
+- `ARCHITECTURE.md`
+- `THREAT_MODEL.md`
 - `SECURITY_MODEL.md`
 - `TELETHON_HARDENING.md`
 
