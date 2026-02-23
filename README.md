@@ -256,13 +256,6 @@ tg-assistant/
 - bot token and Claude API key
 - local message corpus and audit logs
 
-**Most relevant threat actors:**
-
-- opportunistic internet attacker
-- targeted attacker
-- malicious chat participant (prompt injection path)
-- compromised dependency (in-process code execution)
-
 **Key threats:**
 
 | Threat | Severity | Primary controls |
@@ -272,23 +265,6 @@ tg-assistant/
 | Exfiltration from compromised service | High | per-service nftables egress restrictions |
 | Unauthorized bot access | High | owner-only filter + handler guard |
 | Prompt injection in synced content | Medium | untrusted-context prompt design, scoped retrieval, no direct write path |
-
-**Accepted-risks:**
-
-- root/kernel compromise remains high impact,
-- prompt injection risk is reduced but not eliminated,
-- scoped/top-K context still leaves host for Claude synthesis.
-
-**Operating assumptions:**
-
-- host patching is maintained,
-- systemd/nftables policy remains intact after updates,
-- DNS resolvers used for dynamic API allowlists are trustworthy.
-
-**Threat model references:**
-
-- concise STRIDE summary: `tg-assistant/docs/THREAT_MODEL.md`
-- full model, assumptions, and incident playbook: `tg-assistant/docs/SECURITY_MODEL.md`
 
 ---
 
