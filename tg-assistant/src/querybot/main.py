@@ -32,6 +32,7 @@ from querybot.handlers import (
     handle_bd,
     handle_fresh,
     handle_help,
+    handle_iam,
     handle_message,
     handle_mentions,
     handle_more,
@@ -195,6 +196,7 @@ def build_application(config: Dict[str, Any]) -> Application:
 
         # 4. Store in bot_data for handler access
         app.bot_data["owner_id"] = owner_id
+        app.bot_data["self_user_id"] = owner_id
         app.bot_data["max_context_messages"] = max_context_messages
         app.bot_data["max_intent_chats"] = max_intent_chats
         app.bot_data["recent_summary_default_chat_count"] = recent_summary_default_chat_count
@@ -213,6 +215,7 @@ def build_application(config: Dict[str, Any]) -> Application:
         # Surface the primary UX commands directly in Telegram's command menu.
         try:
             commands = [
+                BotCommand("iam", "Show/set owner identity binding"),
                 BotCommand("summary", "Time-window recap (1d, 3d, 1w)"),
                 BotCommand("mentions", "Items likely needing your reply"),
                 BotCommand("bd", "Likely unanswered open questions"),
@@ -244,6 +247,7 @@ def build_application(config: Dict[str, Any]) -> Application:
     owner_id = config["querybot"]["owner_telegram_id"]
     owner_filter = build_owner_filter(owner_id)
     app.add_handler(CommandHandler("start", handle_start, filters=owner_filter))
+    app.add_handler(CommandHandler("iam", handle_iam, filters=owner_filter))
     app.add_handler(CommandHandler("help", handle_help, filters=owner_filter))
     app.add_handler(CommandHandler("stats", handle_stats, filters=owner_filter))
     app.add_handler(CommandHandler("mentions", handle_mentions, filters=owner_filter))

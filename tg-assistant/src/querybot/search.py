@@ -44,6 +44,7 @@ class SearchResult:
     timestamp: str
     text: str
     score: float
+    sender_id: Optional[int] = None
     reply_to_msg_id: Optional[int] = None
     thread_top_msg_id: Optional[int] = None
     is_topic_message: bool = False
@@ -247,7 +248,7 @@ class MessageSearch:
                 UNION
                 SELECT message_id, chat_id FROM vec
             )
-            SELECT m.message_id, m.chat_id, c.title, m.sender_name,
+            SELECT m.message_id, m.chat_id, c.title, m.sender_name, m.sender_id,
                    m.reply_to_msg_id, m.thread_top_msg_id, m.is_topic_message,
                    m.timestamp, m.text,
                    (
@@ -309,7 +310,7 @@ class MessageSearch:
         limit_idx = len(params)
         sql = f"""
             WITH {self._fresh_chats_cte_sql()}
-            SELECT m.message_id, m.chat_id, c.title, m.sender_name,
+            SELECT m.message_id, m.chat_id, c.title, m.sender_name, m.sender_id,
                    m.reply_to_msg_id, m.thread_top_msg_id, m.is_topic_message,
                    m.timestamp, m.text,
                    {score_expr} AS score
@@ -405,7 +406,7 @@ class MessageSearch:
 
         sql = f"""
             WITH {self._fresh_chats_cte_sql()}
-            SELECT m.message_id, m.chat_id, c.title, m.sender_name,
+            SELECT m.message_id, m.chat_id, c.title, m.sender_name, m.sender_id,
                    m.reply_to_msg_id, m.thread_top_msg_id, m.is_topic_message,
                    m.timestamp, m.text,
                    {score_expr} AS score
@@ -454,7 +455,7 @@ class MessageSearch:
                 LIMIT $1
             ),
             ranked AS (
-                SELECT m.message_id, m.chat_id, c.title, m.sender_name,
+                SELECT m.message_id, m.chat_id, c.title, m.sender_name, m.sender_id,
                        m.reply_to_msg_id, m.thread_top_msg_id, m.is_topic_message,
                        m.timestamp, m.text, f.last_ts,
                        ROW_NUMBER() OVER (
@@ -466,7 +467,7 @@ class MessageSearch:
                 JOIN chats c ON c.chat_id = m.chat_id
                 WHERE TRUE {message_condition}
             )
-            SELECT message_id, chat_id, title, sender_name,
+            SELECT message_id, chat_id, title, sender_name, sender_id,
                    reply_to_msg_id, thread_top_msg_id, is_topic_message,
                    timestamp, text,
                    1.0 AS score
@@ -531,7 +532,7 @@ class MessageSearch:
 
         sql = f"""
             WITH {self._fresh_chats_cte_sql()}
-            SELECT m.message_id, m.chat_id, c.title, m.sender_name,
+            SELECT m.message_id, m.chat_id, c.title, m.sender_name, m.sender_id,
                    m.reply_to_msg_id, m.thread_top_msg_id, m.is_topic_message,
                    m.timestamp, m.text,
                    1.0 AS score
@@ -568,7 +569,7 @@ class MessageSearch:
 
         sql = f"""
             WITH {self._fresh_chats_cte_sql()}
-            SELECT q.message_id, q.chat_id, c.title, q.sender_name,
+            SELECT q.message_id, q.chat_id, c.title, q.sender_name, q.sender_id,
                    q.reply_to_msg_id, q.thread_top_msg_id, q.is_topic_message,
                    q.timestamp, q.text,
                    1.0 AS score
@@ -615,7 +616,7 @@ class MessageSearch:
         rows = await self._pool.fetch(
             f"""
             WITH {self._fresh_chats_cte_sql()}
-            SELECT m.message_id, m.chat_id, c.title, m.sender_name,
+            SELECT m.message_id, m.chat_id, c.title, m.sender_name, m.sender_id,
                    m.reply_to_msg_id, m.thread_top_msg_id, m.is_topic_message,
                    m.timestamp, m.text,
                    GREATEST(
@@ -657,7 +658,7 @@ class MessageSearch:
         rows = await self._pool.fetch(
             f"""
             WITH {self._fresh_chats_cte_sql()}
-            SELECT m.message_id, m.chat_id, c.title, m.sender_name,
+            SELECT m.message_id, m.chat_id, c.title, m.sender_name, m.sender_id,
                    m.reply_to_msg_id, m.thread_top_msg_id, m.is_topic_message,
                    m.timestamp, m.text,
                    1 - (m.embedding <=> $1::vector) AS score
@@ -751,12 +752,26 @@ class MessageSearch:
     @staticmethod
     def _rows_to_results(rows: list) -> List[SearchResult]:
         """Convert asyncpg rows to SearchResult objects."""
+        def _sender_id(row: Any) -> Optional[int]:
+            value: Any = None
+            try:
+                value = row["sender_id"]
+            except (KeyError, TypeError):
+                value = None
+            if value is None:
+                return None
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return None
+
         return [
             SearchResult(
                 message_id=row["message_id"],
                 chat_id=row["chat_id"],
                 chat_title=row["title"] or "",
                 sender_name=row["sender_name"] or "",
+                sender_id=_sender_id(row),
                 timestamp=row["timestamp"].isoformat() if row["timestamp"] else "",
                 text=row["text"] or "",
                 score=float(row["score"]),

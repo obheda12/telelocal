@@ -40,6 +40,7 @@ _RECENT_CHAT_LIMIT_RE = re.compile(
     re.IGNORECASE,
 )
 _PENDING_RESPONSE_CHUNKS_KEY = "pending_response_chunks"
+_LAST_RESPONSE_STATUS_KEY = "last_response_status"
 _WINDOW_TO_DAYS = {
     "1d": 1,
     "24h": 1,
@@ -335,6 +336,28 @@ def _resolve_owner_mention_aliases(
     return normalized_aliases
 
 
+def _resolve_owner_user_id(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> int:
+    """Resolve the owner identity used for mentions/self-reference grounding."""
+    override = context.bot_data.get("self_user_id")
+    if isinstance(override, int) and override > 0:
+        return override
+    if isinstance(override, str) and override.isdigit():
+        return int(override)
+
+    configured = context.bot_data.get("owner_id")
+    if isinstance(configured, int) and configured > 0:
+        return configured
+    if isinstance(configured, str) and configured.isdigit():
+        return int(configured)
+
+    if update.effective_user and update.effective_user.id:
+        return int(update.effective_user.id)
+    return 0
+
+
 def _extract_mentions_window_days(question: str) -> int | None:
     """Detect mention/reply triage requests from free text."""
     q = " ".join((question or "").lower().split())
@@ -446,12 +469,14 @@ async def _reply_chunks(
 
     if pending:
         context.user_data[_PENDING_RESPONSE_CHUNKS_KEY] = pending
+        context.user_data[_LAST_RESPONSE_STATUS_KEY] = "has_more"
         await update.message.reply_text(
             f"<i>{len(pending)} more part(s) available. Send /more to continue.</i>",
             parse_mode=ParseMode.HTML,
         )
     else:
         context.user_data.pop(_PENDING_RESPONSE_CHUNKS_KEY, None)
+        context.user_data[_LAST_RESPONSE_STATUS_KEY] = "complete"
 
 
 async def _reply_answer(
@@ -515,6 +540,76 @@ async def handle_start(
 
 
 @owner_only
+async def handle_iam(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Bind/display owner identity used for self-referential grounding."""
+    audit: AuditLogger = context.bot_data["audit"]
+    effective_id = int(update.effective_user.id) if update.effective_user else 0
+    args = context.args or []
+
+    if not args:
+        bound_id = _resolve_owner_user_id(update, context)
+        aliases = _resolve_owner_mention_aliases(update, context)
+        alias_text = ", ".join(aliases) if aliases else "(none)"
+        await update.message.reply_text(
+            "Current identity binding:\n"
+            f"  owner_user_id: {bound_id or '(unset)'}\n"
+            f"  aliases: {alias_text}\n\n"
+            "Usage: /iam [telegram_user_id] [@alias1 @alias2 ...]"
+        )
+        await audit.log(
+            "querybot",
+            "command_iam_show",
+            {"owner_user_id": bound_id, "alias_count": len(aliases)},
+            success=True,
+        )
+        return
+
+    idx = 0
+    bound_id = effective_id or _resolve_owner_user_id(update, context)
+    if args and args[0].isdigit():
+        bound_id = int(args[0])
+        idx = 1
+
+    alias_inputs = [a.strip() for a in args[idx:] if a and a.strip()]
+    if not alias_inputs:
+        alias_inputs = _resolve_owner_mention_aliases(update, context)
+
+    username = (
+        (update.effective_user.username or "").strip()
+        if update.effective_user
+        else ""
+    )
+    if username:
+        alias_inputs.append(f"@{username}")
+
+    seen: set[str] = set()
+    aliases: List[str] = []
+    for alias in alias_inputs:
+        key = alias.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        aliases.append(alias)
+
+    context.bot_data["self_user_id"] = bound_id
+    context.bot_data["owner_mention_aliases"] = aliases
+    alias_text = ", ".join(aliases) if aliases else "(none)"
+    await update.message.reply_text(
+        "Updated identity binding:\n"
+        f"  owner_user_id: {bound_id}\n"
+        f"  aliases: {alias_text}"
+    )
+    await audit.log(
+        "querybot",
+        "command_iam_set",
+        {"owner_user_id": bound_id, "alias_count": len(aliases)},
+        success=True,
+    )
+
+
+@owner_only
 async def handle_help(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
@@ -523,6 +618,7 @@ async def handle_help(
         "Available commands:\n"
         "  /start - Welcome message\n"
         "  /help  - This help text\n"
+        "  /iam   - Show/set owner identity binding\n"
         "  /stats - Sync and usage statistics\n\n"
         "  /mentions [1d|3d|1w] [quick|detailed] - Items likely needing your reply\n"
         "  /bd [1d|3d|1w] [quick|detailed] - Likely unanswered open questions\n"
@@ -533,6 +629,7 @@ async def handle_help(
         "  Just send me a question in plain text! I'll search your "
         "synced Telegram messages and answer using Claude.\n\n"
         "Tips for effective queries:\n"
+        '  - Identity binding: "/iam 123456789 @yourusername"\n'
         '  - Mentions triage: "/mentions 1d quick"\n'
         '  - Open questions: "/bd 3d quick"\n'
         '  - Daily recap: "/summary 1d quick"\n'
@@ -606,7 +703,7 @@ async def handle_mentions(
         )
         return
 
-    owner_id = int(context.bot_data.get("owner_id", 0))
+    owner_id = _resolve_owner_user_id(update, context)
     normalized_aliases = _resolve_owner_mention_aliases(update, context)
 
     limit, context_max_chars, max_tokens = _detail_params(
@@ -645,6 +742,8 @@ async def handle_mentions(
         results,
         context_max_chars=context_max_chars,
         max_tokens_override=max_tokens,
+        owner_user_id=owner_id,
+        owner_aliases=normalized_aliases,
     )
     await _reply_answer(update, context, answer)
 
@@ -680,7 +779,8 @@ async def handle_bd(
         )
         return
 
-    owner_id = int(context.bot_data.get("owner_id", 0))
+    owner_id = _resolve_owner_user_id(update, context)
+    owner_aliases = _resolve_owner_mention_aliases(update, context)
     limit, context_max_chars, max_tokens = _detail_params(
         detail_mode,
         quick_limit=80,
@@ -701,17 +801,23 @@ async def handle_bd(
         )
         return
 
+    total_candidates = len(results)
     prompt = (
         f"Create a {detail_mode} briefing of likely unanswered questions from the last {days} day(s). "
+        f"There are {total_candidates} candidate question messages in context. "
         "These are questions that appear not to have a reply from me yet. "
         "Use sections: <b>Need My Reply</b>, <b>Could Wait</b>, <b>Low Priority</b>. "
-        "For each item include chat, sender, timestamp, and the key question text."
+        "Include as many concrete items as possible (not just one), each with chat, sender, timestamp, "
+        "and key question text. If you cannot list everything due length, add a final line saying "
+        "'More items not shown'."
     )
     answer = await llm.query(
         prompt,
         results,
         context_max_chars=context_max_chars,
         max_tokens_override=max_tokens,
+        owner_user_id=owner_id,
+        owner_aliases=owner_aliases,
     )
     await _reply_answer(update, context, answer)
 
@@ -773,11 +879,15 @@ async def handle_summary(
         "Start with the highest-priority actions first, then major updates. "
         "Include chat, sender, and time for each important point."
     )
+    owner_id = _resolve_owner_user_id(update, context)
+    owner_aliases = _resolve_owner_mention_aliases(update, context)
     answer = await llm.query(
         prompt,
         results,
         context_max_chars=context_max_chars,
         max_tokens_override=max_tokens,
+        owner_user_id=owner_id,
+        owner_aliases=owner_aliases,
     )
     await _reply_answer(update, context, answer)
 
@@ -835,11 +945,15 @@ async def handle_fresh(
         "Prioritize chats with actionable items first. "
         "Keep each chat summary concise and include timestamps for important events."
     )
+    owner_id = _resolve_owner_user_id(update, context)
+    owner_aliases = _resolve_owner_mention_aliases(update, context)
     answer = await llm.query(
         prompt,
         results,
         context_max_chars=context_max_chars,
         max_tokens_override=max_tokens,
+        owner_user_id=owner_id,
+        owner_aliases=owner_aliases,
     )
     await _reply_answer(update, context, answer)
 
@@ -863,7 +977,15 @@ async def handle_more(
     """Handle `/more` by sending the next chunk(s) of a long response."""
     pending = context.user_data.get(_PENDING_RESPONSE_CHUNKS_KEY, [])
     if not pending:
-        await update.message.reply_text("No pending response. Ask a new question first.")
+        status = context.user_data.get(_LAST_RESPONSE_STATUS_KEY)
+        if status == "complete":
+            await update.message.reply_text(
+                "No pending response. That was the full previous response. "
+                "For deeper coverage, rerun with detailed mode "
+                "(e.g. /bd 3d detailed or /mentions 1w detailed)."
+            )
+        else:
+            await update.message.reply_text("No pending response. Ask a new question first.")
         return
     await _reply_chunks(update, context, pending)
 
@@ -904,12 +1026,13 @@ async def handle_message(
         return
     # New question supersedes any leftover /more backlog.
     context.user_data.pop(_PENDING_RESPONSE_CHUNKS_KEY, None)
+    context.user_data.pop(_LAST_RESPONSE_STATUS_KEY, None)
 
     # 0.5 Natural-language mentions/replies triage mode.
     mention_days = _extract_mentions_window_days(question)
     if mention_days is not None:
         detail_mode = "detailed" if "detail" in question.lower() else "quick"
-        owner_id = int(context.bot_data.get("owner_id", 0))
+        owner_id = _resolve_owner_user_id(update, context)
         aliases = _resolve_owner_mention_aliases(update, context)
         limit, context_max_chars, max_tokens = _detail_params(
             detail_mode,
@@ -946,6 +1069,8 @@ async def handle_message(
             mention_results,
             context_max_chars=context_max_chars,
             max_tokens_override=max_tokens,
+            owner_user_id=owner_id,
+            owner_aliases=aliases,
         )
         await _reply_answer(update, context, answer)
         await audit.log(
@@ -966,7 +1091,8 @@ async def handle_message(
     bd_days = _extract_open_questions_window_days(question)
     if bd_days is not None:
         detail_mode = "detailed" if "detail" in question.lower() else "quick"
-        owner_id = int(context.bot_data.get("owner_id", 0))
+        owner_id = _resolve_owner_user_id(update, context)
+        owner_aliases = _resolve_owner_mention_aliases(update, context)
         limit, context_max_chars, max_tokens = _detail_params(
             detail_mode,
             quick_limit=80,
@@ -987,17 +1113,23 @@ async def handle_message(
             )
             return
 
+        total_candidates = len(open_questions)
         prompt = (
             f"Create a {detail_mode} briefing of likely unanswered questions from the last {bd_days} day(s). "
+            f"There are {total_candidates} candidate question messages in context. "
             "These are questions that appear not to have a reply from me yet. "
             "Use sections: <b>Need My Reply</b>, <b>Could Wait</b>, <b>Low Priority</b>. "
-            "For each item include chat, sender, timestamp, and the key question text."
+            "Include as many concrete items as possible (not just one), each with chat, sender, timestamp, "
+            "and key question text. If you cannot list everything due length, add a final line saying "
+            "'More items not shown'."
         )
         answer = await llm.query(
             prompt,
             open_questions,
             context_max_chars=context_max_chars,
             max_tokens_override=max_tokens,
+            owner_user_id=owner_id,
+            owner_aliases=owner_aliases,
         )
         await _reply_answer(update, context, answer)
         await audit.log(
@@ -1108,10 +1240,14 @@ async def handle_message(
     context_max_chars = (
         recent_summary_context_max_chars if recent_summary_mode else 8000
     )
+    owner_id = _resolve_owner_user_id(update, context)
+    owner_aliases = _resolve_owner_mention_aliases(update, context)
     answer = await llm.query(
         question,
         results,
         context_max_chars=context_max_chars,
+        owner_user_id=owner_id,
+        owner_aliases=owner_aliases,
     )
 
     # 6. Reply

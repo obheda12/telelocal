@@ -254,6 +254,7 @@ class ClaudeAssistant:
         results: List[SearchResult],
         max_chars: int = 8000,
         per_message_chars: int = 320,
+        owner_user_id: Optional[int] = None,
     ) -> str:
         """Format search results grouped by chat for better LLM comprehension.
 
@@ -290,6 +291,10 @@ class ClaudeAssistant:
                 if per_message_chars > 0 and len(safe_text) > per_message_chars:
                     safe_text = safe_text[: per_message_chars - 3].rstrip() + "..."
                 thread_tags: List[str] = []
+                if r.sender_id is not None:
+                    thread_tags.append(f"sender_id={r.sender_id}")
+                if owner_user_id is not None and r.sender_id == owner_user_id:
+                    thread_tags.append("owner_message=true")
                 if r.thread_top_msg_id is not None:
                     thread_tags.append(f"thread={r.thread_top_msg_id}")
                 if r.reply_to_msg_id is not None:
@@ -320,6 +325,8 @@ class ClaudeAssistant:
         *,
         context_max_chars: int = 8000,
         max_tokens_override: Optional[int] = None,
+        owner_user_id: Optional[int] = None,
+        owner_aliases: Optional[List[str]] = None,
     ) -> str:
         """Send a question with context to Claude and return the response.
 
@@ -345,7 +352,26 @@ class ClaudeAssistant:
                 max_tokens = max(256, int(max_tokens_override))
             except (TypeError, ValueError):
                 max_tokens = self._max_tokens
-        context = self._format_context(context_results, max_chars=context_max_chars)
+        context = self._format_context(
+            context_results,
+            max_chars=context_max_chars,
+            owner_user_id=owner_user_id,
+        )
+        identity_lines: List[str] = []
+        if owner_user_id is not None:
+            identity_lines.append(f"- owner_telegram_user_id: {owner_user_id}")
+        aliases = [a.strip() for a in (owner_aliases or []) if a and a.strip()]
+        if aliases:
+            identity_lines.append(f"- owner_aliases: {', '.join(aliases)}")
+        identity_block = ""
+        if identity_lines:
+            identity_block = (
+                "Owner identity (for pronoun grounding):\n"
+                + "\n".join(identity_lines)
+                + "\n"
+                + "- In the user's requests, 'I/me/my/myself' refers to the owner.\n"
+                + "- In context rows, owner_message=true marks the owner's own messages.\n\n"
+            )
 
         response = await self._client.messages.create(
             model=self._model,
@@ -355,7 +381,11 @@ class ClaudeAssistant:
             messages=[
                 {
                     "role": "user",
-                    "content": f"Context:\n{context}\n\nQuestion: {user_question}",
+                    "content": (
+                        f"{identity_block}"
+                        f"Context:\n{context}\n\n"
+                        f"Question: {user_question}"
+                    ),
                 }
             ],
         )

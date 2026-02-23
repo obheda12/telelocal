@@ -16,6 +16,7 @@ from querybot.handlers import (
     _split_message,
     handle_bd,
     handle_fresh,
+    handle_iam,
     handle_message,
     handle_mentions,
     handle_more,
@@ -634,6 +635,19 @@ class TestHandleMessage:
 
 
 class TestScaffoldCommandHandlers:
+    @pytest.mark.asyncio
+    async def test_iam_command_sets_identity_binding(self):
+        update, context, _, _, mock_audit = _make_handler_context()
+        update.effective_user.username = "owner"
+        context.args = ["12345", "@boss"]
+
+        await handle_iam(update, context)
+
+        assert context.bot_data["self_user_id"] == 12345
+        assert "@boss" in context.bot_data["owner_mention_aliases"]
+        assert "@owner" in context.bot_data["owner_mention_aliases"]
+        assert mock_audit.log.call_args[0][1] == "command_iam_set"
+
     @pytest.mark.asyncio
     async def test_mentions_command_pipeline(self):
         result = SearchResult(
