@@ -9,8 +9,8 @@ It ingests messages from your Telegram account (within configured scope) into a 
 ## Table of Contents
 
 - [What This Project Is For](#what-this-project-is-for)
-- [Design Priorities](#design-priorities)
 - [Architecture At A Glance](#architecture-at-a-glance)
+- [Design Priorities](#design-priorities)
 - [Why Not Bot-Per-Chat Workflows](#why-not-bot-per-chat-workflows)
 - [Security Design](#security-design)
 - [Ingestion And Query Pipeline](#ingestion-and-query-pipeline)
@@ -48,6 +48,61 @@ Core intent:
 
 ---
 
+## Architecture At A Glance
+
+```mermaid
+flowchart LR
+    subgraph Owner["Owner"]
+        U["Telegram user"]
+    end
+
+    subgraph Host["Telelocal Host (trusted boundary)"]
+        S["tg-syncer (read-only Telethon wrapper)"]
+        Q["tg-querybot (owner-only bot handler)"]
+        DB[("PostgreSQL + pgvector")]
+        CRED["systemd credential runtime mount"]
+        NFT["nftables per-service egress policy"]
+    end
+
+    subgraph External["External systems"]
+        TG["Telegram (MTProto + Bot API)"]
+        CL["Claude API"]
+    end
+
+    U -->|"query via bot"| TG
+    TG --> Q
+    Q --> DB
+    Q --> CL
+    TG --> S
+    S --> DB
+    CRED --> S
+    CRED --> Q
+    NFT --> S
+    NFT --> Q
+```
+
+Trust interpretation:
+
+- Trusted: local host controls and local database.
+- Semi-trusted: Telegram transport and content source.
+- Untrusted for control purposes: external message content and internet-facing dependencies.
+- Data minimization: only scoped top-K context leaves host per query.
+
+Security layering summary:
+
+```mermaid
+flowchart LR
+    A["Host hardening<br/>(systemd sandbox + users)"] --> B["Network control<br/>(nftables per service UID)"]
+    B --> C["App controls<br/>(read-only wrapper + owner-only handlers)"]
+    C --> D["Data controls<br/>(DB roles + scoped retrieval + audit)"]
+```
+
+Deeper architecture notes (components, boundaries, compromise containment):
+
+- `tg-assistant/docs/ARCHITECTURE.md`
+
+---
+
 ## Design Priorities
 
 ### 1. Local Data Plane
@@ -68,51 +123,6 @@ Core intent:
 - One setup flow: `./scripts/setup.sh`
 - One CLI: `telelocal`
 - Central scope control: chat types + exclusions + caps
-
----
-
-## Architecture At A Glance
-
-```mermaid
-flowchart LR
-    subgraph Telegram["Telegram"]
-        TG["Telegram API / MTProto"]
-    end
-
-    subgraph Pi["Raspberry Pi / Host"]
-        S["tg-syncer<br/>(read-only Telethon wrapper)"]
-        DB[("PostgreSQL + pgvector")]
-        Q["tg-querybot<br/>(owner-only bot)"]
-    end
-
-    subgraph Cloud["Claude API"]
-        C["Haiku (intent) + Sonnet (synthesis)"]
-    end
-
-    TG --> S
-    S --> DB
-    Q --> DB
-    Q --> C
-```
-
-Trust boundary summary:
-
-- Trusted zone: your host + local DB
-- Untrusted/less-trusted: Telegram transport, LLM API
-- Data minimization: only scoped top-K context leaves host per query
-
-Security layering summary:
-
-```mermaid
-flowchart LR
-    A["Host hardening<br/>(systemd sandbox + users)"] --> B["Network control<br/>(nftables per service UID)"]
-    B --> C["App controls<br/>(read-only wrapper + owner-only handlers)"]
-    C --> D["Data controls<br/>(DB roles + scoped retrieval + audit)"]
-```
-
-Deeper architecture notes (components, boundaries, compromise containment):
-
-- `tg-assistant/docs/ARCHITECTURE.md`
 
 ---
 
