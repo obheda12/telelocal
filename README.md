@@ -56,7 +56,7 @@ flowchart TB
     U["Owner"]
     TG["Telegram<br/>(MTProto + Bot API)"]
 
-    subgraph Host["Telelocal Host (trusted boundary)"]
+    subgraph Host["Telelocal Host<br/>(trusted boundary)"]
         S["tg-syncer<br/>(read-only ingest)"]
         DB[("PostgreSQL + pgvector")]
         Q["tg-querybot<br/>(owner-only query path)"]
@@ -70,6 +70,8 @@ flowchart TB
     TG -->|"Bot API updates"| Q
     Q -->|"search/retrieve"| DB
     Q -->|"top-K context for synthesis"| CL
+    Q -->|"reply via Bot API"| TG
+    TG -->|"deliver answer"| U
 ```
 
 **How to read this architecture:**
