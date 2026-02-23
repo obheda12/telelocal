@@ -1,6 +1,8 @@
-# Local First Telegram Personal Assistant
+# Telelocal
 
-A defense-in-depth personal assistant that syncs your Telegram messages (within your configured sync scope) to a local database and lets you query them through a private bot powered by Claude. Deployed on a Raspberry Pi for physical control over your data.
+Telelocal is a defense-in-depth, local-first Telegram assistant that syncs your Telegram messages (within your configured sync scope) to a local database and lets you query them through a private bot powered by Claude. Deployed on a Raspberry Pi for physical control over your data.
+
+Primary CLI: `telelocal`
 
 ## Why This Exists
 
