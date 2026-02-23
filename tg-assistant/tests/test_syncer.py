@@ -1071,3 +1071,33 @@ class TestResolveIncludeChatTypes:
 
         config = {"syncer": {}}
         assert resolve_include_chat_types(config) == {"group", "channel", "user"}
+
+
+class TestSaveIncludeChatTypes:
+    def test_save_include_chat_types_rewrites_existing_key(self, tmp_path):
+        from syncer.manage_chats import save_include_chat_types
+
+        settings = tmp_path / "settings.toml"
+        settings.write_text(
+            "[syncer]\nmax_active_chats = 500\ninclude_chat_types = [\"group\", \"channel\", \"user\"]\n",
+            encoding="utf-8",
+        )
+        config = {"_meta_config_path": str(settings), "syncer": {}}
+
+        save_include_chat_types(config, {"group"})
+        text = settings.read_text(encoding="utf-8")
+        assert 'include_chat_types = ["group"]' in text
+
+    def test_save_include_chat_types_inserts_when_missing(self, tmp_path):
+        from syncer.manage_chats import save_include_chat_types
+
+        settings = tmp_path / "settings.toml"
+        settings.write_text(
+            "[syncer]\nmax_active_chats = 500\n",
+            encoding="utf-8",
+        )
+        config = {"_meta_config_path": str(settings), "syncer": {}}
+
+        save_include_chat_types(config, {"group", "user"})
+        text = settings.read_text(encoding="utf-8")
+        assert 'include_chat_types = ["group", "user"]' in text

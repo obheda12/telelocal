@@ -5,7 +5,7 @@ which ones the syncer should skip.
 Runnable as::
 
     python -m syncer.manage_chats          # from src/
-    telenad manage-chats                   # via CLI wrapper
+    telelocal manage-chats                   # via CLI wrapper
 
 Fetches chats from Telegram using the existing encrypted session when
 available (falls back to PostgreSQL ``chats`` table), then writes
@@ -18,6 +18,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -36,6 +37,7 @@ except ModuleNotFoundError:  # pragma: no cover - fallback for older local envs
 
 logger = logging.getLogger("syncer.manage_chats")
 _VALID_CHAT_TYPES = {"group", "channel", "user"}
+_CHAT_TYPE_ORDER = ("group", "channel", "user")
 
 # Re-use load_config from syncer.main to keep config handling consistent.
 # Imported lazily to avoid circular issues at module level.
@@ -156,6 +158,46 @@ def resolve_include_chat_types(config: Dict[str, Any]) -> set[str]:
 
     resolved = {item for item in items if item in _VALID_CHAT_TYPES}
     return resolved or set(_VALID_CHAT_TYPES)
+
+
+def _format_include_chat_types(include_types: set[str]) -> str:
+    ordered = [t for t in _CHAT_TYPE_ORDER if t in include_types]
+    return "[" + ", ".join(f'"{t}"' for t in ordered) + "]"
+
+
+def save_include_chat_types(config: Dict[str, Any], include_types: set[str]) -> Path:
+    """Persist ``syncer.include_chat_types`` back to settings.toml."""
+    if not include_types:
+        raise ValueError("include_types must not be empty")
+
+    cfg_path = Path(config.get("_meta_config_path") or _DEFAULT_CONFIG_PATH)
+    text = cfg_path.read_text(encoding="utf-8")
+    replacement = f"include_chat_types = {_format_include_chat_types(include_types)}"
+
+    # Replace existing key if present.
+    updated, count = re.subn(
+        r"(?m)^include_chat_types\s*=\s*\[[^\]]*\]\s*$",
+        replacement,
+        text,
+        count=1,
+    )
+
+    # Otherwise insert below max_active_chats in [syncer].
+    if count == 0:
+        updated, count = re.subn(
+            r"(?m)^(max_active_chats\s*=\s*[^\n]+)\s*$",
+            r"\1\n" + replacement,
+            text,
+            count=1,
+        )
+    if count == 0:
+        # Last resort append.
+        if not updated.endswith("\n"):
+            updated += "\n"
+        updated += replacement + "\n"
+
+    cfg_path.write_text(updated, encoding="utf-8")
+    return cfg_path
 
 
 # ---------------------------------------------------------------------------
@@ -293,6 +335,37 @@ async def interactive_main() -> None:
         sys.exit(1)
 
     include_chat_types = resolve_include_chat_types(config)
+    type_choices = []
+    for chat_type in _CHAT_TYPE_ORDER:
+        type_choices.append(
+            {
+                "name": chat_type,
+                "value": chat_type,
+                "enabled": chat_type in include_chat_types,
+            }
+        )
+    selected_types = await inquirer.checkbox(
+        message=(
+            "Select chat types to INCLUDE in sync "
+            "(unchecked types are globally excluded):"
+        ),
+        choices=type_choices,
+        cycle=False,
+    ).execute_async()
+    include_chat_types = set(str(t).strip().lower() for t in selected_types if t)
+    if not include_chat_types:
+        include_chat_types = {"group"}
+        print("No chat types selected; defaulting to group-only.")
+    original_include_types = resolve_include_chat_types(config)
+    if include_chat_types != original_include_types:
+        settings_path = save_include_chat_types(config, include_chat_types)
+        config.setdefault("syncer", {})["include_chat_types"] = sorted(include_chat_types)
+        print(
+            "Saved include_chat_types "
+            f"({_format_include_chat_types(include_chat_types)}) to {settings_path}"
+        )
+        print()
+
     if include_chat_types != _VALID_CHAT_TYPES:
         before = len(chats)
         chats = [

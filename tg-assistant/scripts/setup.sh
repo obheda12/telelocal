@@ -272,6 +272,38 @@ phase_configure() {
         log_info "owner_telegram_id already configured"
     fi
 
+    echo ""
+    echo -e "${BOLD}Chat ingestion scope${NC}"
+    echo "  Choose whether to exclude channels and/or direct user DMs."
+    echo "  Group chats are always included."
+    echo ""
+    read -rp "  Exclude channels from ingestion? [y/N] " EXCLUDE_CHANNELS
+    read -rp "  Exclude direct user DMs from ingestion? [y/N] " EXCLUDE_USERS
+
+    INCLUDE_CHAT_TYPES=("group")
+    if [[ ! "${EXCLUDE_CHANNELS}" =~ ^[Yy] ]]; then
+        INCLUDE_CHAT_TYPES+=("channel")
+    fi
+    if [[ ! "${EXCLUDE_USERS}" =~ ^[Yy] ]]; then
+        INCLUDE_CHAT_TYPES+=("user")
+    fi
+
+    INCLUDE_CHAT_TYPES_TOML="["
+    for i in "${!INCLUDE_CHAT_TYPES[@]}"; do
+        if [[ "${i}" -gt 0 ]]; then
+            INCLUDE_CHAT_TYPES_TOML+=", "
+        fi
+        INCLUDE_CHAT_TYPES_TOML+="\"${INCLUDE_CHAT_TYPES[$i]}\""
+    done
+    INCLUDE_CHAT_TYPES_TOML+="]"
+
+    if grep -q '^include_chat_types' "${CONFIG_FILE}" 2>/dev/null; then
+        sed -i -E "s|^include_chat_types\\s*=\\s*\\[[^]]*\\]|include_chat_types = ${INCLUDE_CHAT_TYPES_TOML}|g" "${CONFIG_FILE}"
+    else
+        sed -i "/^max_active_chats/a include_chat_types = ${INCLUDE_CHAT_TYPES_TOML}" "${CONFIG_FILE}"
+    fi
+    log_success "Configured include_chat_types = ${INCLUDE_CHAT_TYPES_TOML}"
+
     # NOTE: API ID/hash are stored in systemd credstore; config is left as placeholders.
 
     log_success "Configuration updated"
@@ -533,7 +565,7 @@ phase_service_activation() {
                 "${VENV_DIR}/bin/python3" -m syncer.manage_chats; then
                 log_success "Chat include/exclude list saved"
             else
-                log_warn "Chat selector failed; continuing with default include-all behavior"
+                log_warn "Chat selector failed; continuing with configured include_chat_types behavior"
             fi
         else
             log_warn "Python venv not found at ${VENV_DIR}; skipping chat selector"
@@ -577,8 +609,8 @@ phase_service_activation() {
         done
         if [[ "${POLL_OK}" == false ]]; then
             log_info "No messages yet (initial sync can take 10-30 minutes)."
-            log_info "Monitor progress with: telenad sync-status"
-            log_info "Check syncer logs with: telenad logs"
+            log_info "Monitor progress with: telelocal sync-status"
+            log_info "Check syncer logs with: telelocal logs"
         fi
     fi
 }
@@ -609,21 +641,21 @@ print_final_summary() {
     echo -e "${BOLD}Next:${NC}"
     echo "  1. The syncer is now pulling messages using your configured max_history_days window."
     echo "     Initial sync takes 10-30 minutes depending on history size."
-    echo "     Monitor progress with: telenad sync-status"
+    echo "     Monitor progress with: telelocal sync-status"
     echo "  2. You can message the bot right away — it will tell you when"
     echo "     the sync is still in progress and show current message counts."
     echo "  3. Use /stats in the bot to see sync status and message counts."
-    echo "  4. Check service logs: telenad logs"
+    echo "  4. Check service logs: telelocal logs"
     echo ""
     echo -e "${BOLD}Useful commands:${NC}"
-    echo "  telenad status                           # Check service health"
-    echo "  telenad sync-status                      # Sync progress per chat"
-    echo "  telenad logs                             # Tail service logs"
-    echo "  telenad manage-chats                     # Include/exclude chats from sync"
-    echo "  telenad update                           # Deploy latest code safely"
-    echo "  telenad prune                            # Prune history to retention window"
-    echo "  telenad restart                          # Restart after changes"
-    echo "  telenad session                          # Recreate Telethon session"
+    echo "  telelocal status                           # Check service health"
+    echo "  telelocal sync-status                      # Sync progress per chat"
+    echo "  telelocal logs                             # Tail service logs"
+    echo "  telelocal manage-chats                     # Include/exclude chats from sync"
+    echo "  telelocal update                           # Deploy latest code safely"
+    echo "  telelocal prune                            # Prune history to retention window"
+    echo "  telelocal restart                          # Restart after changes"
+    echo "  telelocal session                          # Recreate Telethon session"
     echo ""
     echo -e "${BOLD}${RED}Security reminders:${NC}"
     echo "  - Regularly check active sessions: Telegram > Settings > Devices"

@@ -27,7 +27,7 @@ Telethon implements MTProto — the same binary protocol official Telegram clien
 | **Identity** | Bot account | Your personal account |
 | **Protocol** | HTTPS to `api.telegram.org` | MTProto binary to Telegram DCs |
 | **Authentication** | Revocable bot token | Session file with auth keys |
-| **Message access** | Only chats where bot is a member | ALL chats, groups, channels, DMs |
+| **Message access** | Only chats where bot is a member | Account chats (ingestion scope is configurable) |
 | **Write capability** | Send as bot (labeled) | Send as YOU (indistinguishable) |
 | **If credential leaks** | Revoke token, bot is isolated | Attacker **IS** you on Telegram |
 | **Rate limits** | Liberal (bots expected automated) | Strict (human-like expected) |

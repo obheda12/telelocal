@@ -1,6 +1,6 @@
 # Local First Telegram Personal Assistant
 
-A defense-in-depth personal assistant that syncs ALL your Telegram messages to a local database and lets you query them through a private bot powered by Claude. Deployed on a Raspberry Pi for physical control over your data.
+A defense-in-depth personal assistant that syncs your Telegram messages (within your configured sync scope) to a local database and lets you query them through a private bot powered by Claude. Deployed on a Raspberry Pi for physical control over your data.
 
 ## Why This Exists
 
@@ -10,7 +10,7 @@ Managing many Telegram groups, channels, and conversations means important messa
 > "Summarize the discussion in the engineering group this week"
 > "Find all messages mentioning the budget deadline"
 
-The architecture uses Telethon (MTProto User API) to sync messages from ALL your chats — groups, channels, DMs — without requiring bot membership in each chat.
+The architecture uses Telethon (MTProto User API) to sync messages from your included chats (groups/channels/DMs per setup + exclusions) without requiring bot membership in each chat.
 
 ---
 
@@ -34,7 +34,7 @@ The architecture uses Telethon (MTProto User API) to sync messages from ALL your
 
 Two independent processes run on your Raspberry Pi:
 
-1. **Background sync** — `tg-syncer` continuously pulls messages from all your Telegram chats and stores them locally. You never interact with it.
+1. **Background sync** — `tg-syncer` continuously pulls messages from your configured chat scope and stores them locally. You never interact with it.
 2. **On-demand query** — When you message the bot, `tg-querybot` searches the local database, sends the relevant messages to Claude, and returns the answer.
 
 ### Background: Message Sync
@@ -51,7 +51,7 @@ sequenceDiagram
 
     loop Every 5 minutes
         Syncer->>TG: Fetch new messages (MTProto)
-        TG-->>Syncer: Messages from all chats
+        TG-->>Syncer: Messages from included chats
         Syncer->>DB: Store messages (+ embeddings inline or deferred)
     end
 ```
@@ -215,7 +215,7 @@ Details: [`tg-assistant/docs/TELETHON_HARDENING.md`](tg-assistant/docs/TELETHON_
 
 | Aspect | Bot API | Telethon / MTProto |
 |--------|---------|-------------------|
-| **Message access** | Only chats where bot is added | ALL user's chats, groups, channels |
+| **Message access** | Only chats where bot is added | User account chats within configured sync scope |
 | **Authentication** | Bot token | User session (phone + 2FA) |
 | **Session risk** | Token leak = bot compromise | Session leak = **full account compromise** |
 | **Read-only enforcement** | Config-level method blocking | Code-level allowlist wrapper |
@@ -384,7 +384,7 @@ Test-to-source ratio: 0.63:1 (134 tests). No external dependencies beyond stdlib
 ### Database Schema
 
 ```sql
--- Messages: synced from all Telegram chats
+-- Messages: synced from configured Telegram chat scope
 CREATE TABLE messages (
     message_id         BIGINT NOT NULL,
     chat_id            BIGINT NOT NULL,

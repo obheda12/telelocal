@@ -9,7 +9,7 @@
 #   - Time since last sync activity
 #
 # Usage: ./scripts/sync-status.sh
-#        telenad sync-status
+#        telelocal sync-status
 #
 
 set -euo pipefail

@@ -773,7 +773,7 @@ class TestSyncStatusContext:
 
         result = await _get_sync_status_context(pool)
         assert "initial sync is still in progress" in result
-        assert "telenad sync-status" in result
+        assert "telelocal sync-status" in result
 
     @pytest.mark.asyncio
     async def test_few_chats_shows_partial_sync(self):

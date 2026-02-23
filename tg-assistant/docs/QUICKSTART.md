@@ -115,7 +115,7 @@ tail -f /var/log/tg-assistant/audit.log
 sudo systemctl restart tg-syncer tg-querybot
 
 # Update include/exclude chat list
-sudo telenad manage-chats
+sudo telelocal manage-chats
 # Tip: selector respects `syncer.include_chat_types`; you can also enter a
 # keyword first to pre-exclude non-matching chats.
 
@@ -183,7 +183,8 @@ journalctl -u tg-syncer --since "1 hour ago" | grep -i flood
 - Keep `syncer.enable_prescan_progress = false` unless you need detailed ETA logs.
 - Set `syncer.max_active_chats = 500` (or lower) to focus ingest on freshest chats and reduce full-pass latency on large accounts.
 - Keep `syncer.max_history_days = 30` to bound initial per-chat fetch depth.
-- Keep `syncer.include_chat_types = ["group"]` to skip user/channel ingestion and focus throughput on group-chat context.
+- Use setup's chat-type prompt to exclude channels and/or user DMs if you want group-focused ingestion.
+- You can tune later via `syncer.include_chat_types` in `settings.toml` (for example `["group"]`).
 - Keep `syncer.store_raw_json = false` unless you explicitly need full raw payloads.
 - For faster catch-up on many chats, keep a small `syncer.idle_chat_delay_seconds` (default `0.1`).
 - The syncer now batches per-chat high-water-mark lookups into one DB query per pass for lower latency on large chat counts.
@@ -192,7 +193,7 @@ journalctl -u tg-syncer --since "1 hour ago" | grep -i flood
 - If you have hundreds of chats, tune `querybot.max_intent_chats` (default `200`) to reduce intent extraction latency/cost.
 - For the fastest ingest on large/busy accounts, enable `syncer.defer_embeddings = true` to decouple message writes from embedding generation.
 - For cross-chat recaps, ask queries like `"quick synopsis of the 50 freshest chats"` (breadth mode, bounded by querybot recent-summary settings).
-- Retention pruning runs hourly via `tg-prune-history.timer`; run `sudo telenad prune` manually if needed.
+- Retention pruning runs hourly via `tg-prune-history.timer`; run `sudo telelocal prune` manually if needed.
 - Use `./scripts/benchmark-pipeline.sh` after changes and compare p95 latency before/after.
 
 ---
@@ -224,12 +225,12 @@ sudo ls -la /var/lib/tg-syncer/
 ## Updating
 
 ```bash
-cd ~/telenad/tg-assistant
+cd ~/telelocal/tg-assistant
 git pull
 
 # Deploy to /opt without deleting runtime assets (venv/models)
 sudo ./scripts/deploy-update.sh
-# or: sudo telenad update ~/telenad/tg-assistant
+# or: sudo telelocal update ~/telelocal/tg-assistant
 
 # Re-verify security after updates
 sudo ./tests/security-verification.sh

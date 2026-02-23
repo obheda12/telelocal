@@ -59,7 +59,7 @@ REAL_INSTALL="$(realpath "${INSTALL_DIR}" 2>/dev/null || echo "${INSTALL_DIR}")"
 if [[ "${REAL_SOURCE}" == "${REAL_INSTALL}" ]]; then
     echo "[ERROR] Refusing self-copy: source resolves to ${REAL_SOURCE}" >&2
     echo "Run from your git checkout, e.g.:" >&2
-    echo "  sudo telenad update ~/telenad/tg-assistant" >&2
+    echo "  sudo telelocal update ~/telelocal/tg-assistant" >&2
     exit 1
 fi
 
@@ -85,8 +85,8 @@ chown -R root:root "${INSTALL_DIR}/src" "${INSTALL_DIR}/scripts" "${INSTALL_DIR}
 chmod -R a+rX "${INSTALL_DIR}/src" "${INSTALL_DIR}/scripts" "${INSTALL_DIR}/systemd" "${INSTALL_DIR}/nftables" "${INSTALL_DIR}/docs" "${INSTALL_DIR}/config" 2>/dev/null || true
 
 if [[ -d "${INSTALL_DIR}/scripts" ]]; then
-    chmod +x "${INSTALL_DIR}/scripts/"*.sh "${INSTALL_DIR}/scripts/telenad" 2>/dev/null || true
-    ln -sf "${INSTALL_DIR}/scripts/telenad" /usr/local/bin/telenad
+    chmod +x "${INSTALL_DIR}/scripts/"*.sh "${INSTALL_DIR}/scripts/telelocal" 2>/dev/null || true
+    ln -sf "${INSTALL_DIR}/scripts/telelocal" /usr/local/bin/telelocal
 fi
 
 for svc in \
@@ -116,4 +116,4 @@ else
     echo "[OK] Deploy complete. Services were not restarted (--no-restart)."
 fi
 
-echo "[INFO] Verify status with: telenad status"
+echo "[INFO] Verify status with: telelocal status"

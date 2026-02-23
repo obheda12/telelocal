@@ -717,7 +717,7 @@ deploy_application() {
     log_step "Deploying application source"
 
     # Detect self-deploy: when running from the installed location
-    # (e.g., via 'telenad setup'), PROJECT_ROOT == INSTALL_DIR.
+    # (e.g., via 'telelocal setup'), PROJECT_ROOT == INSTALL_DIR.
     # In that case, source is already in place — just fix permissions.
     REAL_PROJECT=$(realpath "${PROJECT_ROOT}" 2>/dev/null || echo "${PROJECT_ROOT}")
     REAL_INSTALL=$(realpath "${INSTALL_DIR}" 2>/dev/null || echo "${INSTALL_DIR}")
@@ -751,9 +751,9 @@ deploy_application() {
         cp -a "${PROJECT_ROOT}/scripts" "${INSTALL_DIR}/scripts"
     fi
     if [[ -d "${INSTALL_DIR}/scripts" ]]; then
-        chmod +x "${INSTALL_DIR}/scripts/"*.sh "${INSTALL_DIR}/scripts/telenad" 2>/dev/null || true
-        ln -sf "${INSTALL_DIR}/scripts/telenad" /usr/local/bin/telenad
-        log_success "CLI installed: telenad"
+        chmod +x "${INSTALL_DIR}/scripts/"*.sh "${INSTALL_DIR}/scripts/telelocal" 2>/dev/null || true
+        ln -sf "${INSTALL_DIR}/scripts/telelocal" /usr/local/bin/telelocal
+        log_success "CLI installed: telelocal"
 
         for timer in tg-refresh-api-ipsets.timer tg-prune-history.timer; do
             if systemctl enable --now "${timer}" >/dev/null 2>&1; then

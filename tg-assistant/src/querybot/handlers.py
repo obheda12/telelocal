@@ -359,7 +359,7 @@ async def _get_sync_status_context(pool: asyncpg.Pool) -> str:
         return (
             "The initial sync is still in progress — no messages have been "
             "stored yet. This usually takes 10–30 minutes after first setup.\n\n"
-            "Check progress on the server with: telenad sync-status"
+            "Check progress on the server with: telelocal sync-status"
         )
 
     if chat_count <= 3:

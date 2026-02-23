@@ -1,23 +1,23 @@
 #!/bin/bash
 #
-# telenad — CLI for Telegram Personal Assistant
+# telelocal — CLI for Telegram Personal Assistant
 #
-# Install: sudo ln -sf /opt/tg-assistant/scripts/telenad /usr/local/bin/telenad
+# Install: sudo ln -sf /opt/tg-assistant/scripts/telelocal /usr/local/bin/telelocal
 #
 # Usage:
-#   telenad setup          Full guided deployment
-#   telenad update [path]  Deploy latest checked-out code to /opt safely
-#   telenad prune          Prune DB history older than configured window
-#   telenad session        Create/recreate Telethon session
-#   telenad wipe           Destroy all credentials and state
-#   telenad status         Check service health
-#   telenad sync-status    Show sync progress (messages per chat, last activity)
-#   telenad benchmark      Measure ingestion + query latency
-#   telenad manage-chats   Interactively include/exclude chats from sync (requires sudo)
-#   telenad logs [service] Tail service logs (syncer|querybot|both)
-#   telenad restart        Restart both services
-#   telenad stop           Stop both services
-#   telenad start          Start both services
+#   telelocal setup          Full guided deployment
+#   telelocal update [path]  Deploy latest checked-out code to /opt safely
+#   telelocal prune          Prune DB history older than configured window
+#   telelocal session        Create/recreate Telethon session
+#   telelocal wipe           Destroy all credentials and state
+#   telelocal status         Check service health
+#   telelocal sync-status    Show sync progress (messages per chat, last activity)
+#   telelocal benchmark      Measure ingestion + query latency
+#   telelocal manage-chats   Interactively include/exclude chats from sync (requires sudo)
+#   telelocal logs [service] Tail service logs (syncer|querybot|both)
+#   telelocal restart        Restart both services
+#   telelocal stop           Stop both services
+#   telelocal start          Start both services
 #
 
 set -euo pipefail
@@ -28,9 +28,9 @@ NC='\033[0m'
 
 usage() {
     echo ""
-    echo -e "${BOLD}telenad${NC} — Telegram Personal Assistant CLI"
+    echo -e "${BOLD}telelocal${NC} — Telegram Personal Assistant CLI"
     echo ""
-    echo "Usage: telenad <command>"
+    echo "Usage: telelocal <command>"
     echo ""
     echo "Setup & teardown:"
     echo "  setup          Full guided deployment (requires sudo)"
@@ -55,7 +55,7 @@ usage() {
 
 require_sudo() {
     if [[ $EUID -ne 0 ]]; then
-        echo "This command requires sudo. Run: sudo telenad $1"
+        echo "This command requires sudo. Run: sudo telelocal $1"
         exit 1
     fi
 }
@@ -171,7 +171,7 @@ cmd_logs() {
             ;;
         *)
             echo "Unknown service: ${target}"
-            echo "Usage: telenad logs [syncer|querybot]"
+            echo "Usage: telelocal logs [syncer|querybot]"
             exit 1
             ;;
     esac

@@ -82,12 +82,13 @@ max_history_days = 30
 max_active_chats = 500
 
 # Chat types to include in ingestion.
-# Default is group-only to auto-exclude direct user chats and broadcast channels.
+# Setup prompts whether to exclude channels and/or direct user DMs.
+# By default, all chat types are included.
 # Valid values: "group", "channel", "user"
 # The manage-chats selector only shows chats matching these types.
-include_chat_types = ["group"]
+include_chat_types = ["group", "channel", "user"]
 
-# JSON file storing manually excluded chats (managed via `telenad manage-chats`).
+# JSON file storing manually excluded chats (managed via `telelocal manage-chats`).
 # This file is read by syncer each pass to skip selected chat IDs.
 excluded_chats_path = "/etc/tg-assistant/excluded_chats.json"
 
