@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Telegram Personal Assistant - Unified Setup
+# Telelocal - Unified Setup
 #
 # Single guided script that handles the entire deployment:
 #   Phase 1: Pre-flight checks
@@ -68,7 +68,7 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 echo ""
 echo "=============================================="
-echo "  Telegram Personal Assistant"
+echo "  Telelocal"
 echo "  Unified Setup"
 echo "=============================================="
 echo ""
@@ -627,7 +627,7 @@ print_final_summary() {
     echo -e "  ${GREEN}${BOLD}Setup Complete${NC}"
     echo "=============================================="
     echo ""
-    log_success "Telegram Personal Assistant has been deployed."
+    log_success "Telelocal has been deployed."
     echo ""
     echo -e "${BOLD}What was configured:${NC}"
     echo "  - System packages, Python, PostgreSQL + pgvector"

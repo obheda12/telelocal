@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# telelocal — CLI for Telegram Personal Assistant
+# telelocal — CLI for Telelocal
 #
 # Install: sudo ln -sf /opt/tg-assistant/scripts/telelocal /usr/local/bin/telelocal
 #
@@ -28,7 +28,7 @@ NC='\033[0m'
 
 usage() {
     echo ""
-    echo -e "${BOLD}telelocal${NC} — Telegram Personal Assistant CLI"
+    echo -e "${BOLD}telelocal${NC} — Telelocal CLI"
     echo ""
     echo "Usage: telelocal <command>"
     echo ""

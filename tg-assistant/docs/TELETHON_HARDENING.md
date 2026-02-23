@@ -1,6 +1,6 @@
 # Telethon Security Hardening Guide
 
-Telethon-specific security controls for the Telegram Personal Assistant. Companion to [SECURITY_MODEL.md](SECURITY_MODEL.md).
+Telethon-specific security controls for Telelocal. Companion to [SECURITY_MODEL.md](SECURITY_MODEL.md).
 
 Telethon is the highest-risk component. A compromised session grants **full account access** — read, send, delete, change settings, impersonate you. Every control here exists to contain that risk.
 
@@ -104,7 +104,7 @@ The `ReadOnlyTelegramClient` is the most important security control. It wraps `T
 ALLOWED_METHODS: FrozenSet[str] = frozenset({
     # READ: get_messages, get_dialogs, get_entity, get_participants,
     #        get_me, iter_messages, iter_dialogs, download_profile_photo
-    # LIFECYCLE: connect, disconnect, is_connected, start, run_until_disconnected
+    # LIFECYCLE: connect, disconnect, is_connected
 })
 
 class ReadOnlyTelegramClient:
@@ -146,37 +146,30 @@ Implementation: `src/syncer/main.py` (`rate_limit_delay` helper).
 | Min call interval | 2.0s | Base delay between API calls |
 | Jitter | 0.1–1.5s | Human-like randomness |
 | Max concurrent calls | 1 | Sequential access pattern |
-| Sync interval | 300s (5 min) | Gap between full sync cycles |
-| Backoff multiplier | 1.5x on `FloodWaitError` | Exponential backoff, capped at 1 hour |
-
-### Telegram's Known Thresholds
-
-| Operation | Observed Threshold | Our Limit | Safety Margin |
-|-----------|-------------------|-----------|---------------|
-| Requests per second | ~20-30 | 0.5 (one per 2s) | 40-60x under |
-| `get_dialogs` calls | ~20-30/min | 1/5min | 100-150x under |
-| `get_messages` across chats | ~30-40/min | ~12/min | 2.5-3x under |
+| Sync interval | 30s default (`sync_interval_seconds`) | Gap between sync passes |
+| Idle chat delay | 0.1s default (`idle_chat_delay_seconds`) | Fast probe over chats with no new messages |
+| Active chat cap | 500 default (`max_active_chats`) | Prioritizes freshest chats, limits pass length |
 
 ### Sync Cycle Pattern
 
 ```
 t=0:00  get_dialogs()
-t=0:02  get_messages(chat_1)     ← 2+ seconds between each
-t=0:04  get_messages(chat_2)
-...     (~15 active chats)
-t=0:30  Sync complete
-t=5:00  Next sync starts
+t=0:02  iter_messages(chat_1)    ← 2+ seconds between API calls
+t=0:04  iter_messages(chat_2)
+...     (up to max_active_chats, freshest first)
+t=N     sync pass completes
+t=N+sync_interval_seconds  next pass begins
 ```
 
-Configurable via `config/settings.toml` under `[syncer.rate_limits]`.
+Configurable via `config/settings.toml` under `[syncer]`.
 
 ### Human-Like Patterns
 
 - Random jitter on every delay
-- Variable batch sizes (50-100 messages)
+- Large DB batch inserts to reduce round-trips (default `batch_size = 500`)
 - Sequential chat access (not parallel)
 - Skip chats with no new messages since last sync
-- Always respect `FloodWaitError` wait period + 10% buffer
+- Telethon `FloodWaitError` handling is respected; sync cadence is intentionally conservative
 
 ---
 
@@ -204,8 +197,6 @@ Complete categorization of `TelegramClient` methods by status and risk.
 | `connect` | Establish MTProto connection |
 | `disconnect` | Close MTProto connection |
 | `is_connected` | Check connection status |
-| `start` | Connect and verify authentication |
-| `run_until_disconnected` | Block until disconnect |
 
 ### BLOCKED — Write Operations
 

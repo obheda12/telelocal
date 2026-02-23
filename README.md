@@ -18,6 +18,8 @@ The architecture uses Telethon (MTProto User API) to sync messages from your inc
 
 ## Table of Contents
 
+- [Start Here](#start-here)
+- [Design Considerations](#design-considerations)
 - [How It Works](#how-it-works)
 - [Architecture Overview](#architecture-overview)
 - [Security Model](#security-model)
@@ -29,6 +31,110 @@ The architecture uses Telethon (MTProto User API) to sync messages from your inc
 - [Verification Procedures](#verification-procedures)
 - [Incident Response](#incident-response)
 - [Known Security Limitations](#known-security-limitations)
+
+---
+
+## Start Here
+
+If you are deploying now, do this path first:
+
+```bash
+git clone <your-repo> telelocal
+cd telelocal/tg-assistant
+sudo ./scripts/setup.sh
+```
+
+After setup:
+
+```bash
+telelocal status
+telelocal sync-status
+telelocal logs
+```
+
+Primary bot commands:
+- `/summary 1d quick` — daily cross-chat recap
+- `/mentions 1d quick` — likely action items for you
+- `/fresh 25 quick` — snapshot of freshest chats
+- `/more` — continue long output
+
+First-run expectations:
+- Initial sync is incremental and may take 10-30+ minutes on large accounts.
+- The bot is usable immediately, but answer quality improves as sync coverage grows.
+- If message counts stay flat for 15+ minutes, run `telelocal logs` and follow `tg-assistant/docs/QUICKSTART.md` troubleshooting.
+
+Use this doc by intent:
+- Deploy + day-2 operations: `tg-assistant/docs/QUICKSTART.md`
+- Threat model + risk decisions: `tg-assistant/docs/SECURITY_MODEL.md`
+- Telethon hardening details: `tg-assistant/docs/TELETHON_HARDENING.md`
+
+For full deployment/runbook instructions, use `tg-assistant/docs/QUICKSTART.md`.
+
+---
+
+## Design Considerations
+
+Telelocal is intentionally optimized around four constraints:
+
+1. **Local-first data control** — ingest once into local Postgres, query locally, and avoid depending on Telegram bot membership per chat.
+2. **Security-first boundaries** — separate sync/query processes, separate DB roles, strict egress controls, and secret isolation per service.
+3. **Fast-enough on constrained hardware** — prioritize freshest chats, bounded history windows, deferred embeddings, and single-query hybrid search.
+4. **Simple operator UX** — one setup flow, one CLI (`telelocal`), and predictable day-2 commands.
+
+### Decision Map
+
+```mermaid
+flowchart LR
+    G["Goal: useful answers across many Telegram chats"] --> C["Constraints"]
+    C --> C1["Raspberry Pi resources"]
+    C --> C2["Credential risk"]
+    C --> C3["Large noisy chat graph"]
+
+    C1 --> D1["Freshest-first sync + bounded history"]
+    C1 --> D2["Deferred embeddings"]
+    C2 --> D3["Per-service credentials + read-only Telethon wrapper"]
+    C2 --> D4["Per-process nftables egress rules"]
+    C3 --> D5["Intent extraction -> scoped hybrid retrieval"]
+
+    D1 --> O["Outcome: faster ingestion + relevant query context"]
+    D2 --> O
+    D3 --> O2["Outcome: lower blast radius"]
+    D4 --> O2
+    D5 --> O
+```
+
+### Data Exposure Minimization
+
+```mermaid
+flowchart LR
+    Q["User question"] --> I["Intent extraction (chat IDs, time range, terms)"]
+    I --> S["Scoped local search (FTS + vector)"]
+    S --> K["Top-K messages only"]
+    K --> L["Claude synthesis"]
+    L --> A["Answer"]
+```
+
+Design implication:
+- Claude never needs full database access.
+- Most filtering happens locally first.
+- The searchable corpus can be large while per-query cloud payload stays small.
+
+### Practical Tuning Order
+
+If ingestion/query speed is the priority, tune in this order:
+
+1. `syncer.max_active_chats`
+2. `syncer.max_history_days`
+3. `syncer.include_chat_types`
+4. `syncer.defer_embeddings`
+5. `querybot.max_intent_chats`
+
+If security hardening is the priority, validate in this order:
+
+1. Credential isolation (`LoadCredentialEncrypted`, file perms, service ownership)
+2. Network policy (nftables sets and service egress)
+3. Read-only Telethon enforcement (`ReadOnlyTelegramClient`)
+4. DB role separation (`syncer_role` write scope, `querybot_role` read-only)
 
 ---
 
@@ -51,7 +157,7 @@ sequenceDiagram
         participant DB as PostgreSQL
     end
 
-    loop Every 5 minutes
+    loop Every sync interval (30s default)
         Syncer->>TG: Fetch new messages (MTProto)
         TG-->>Syncer: Messages from included chats
         Syncer->>DB: Store messages (+ embeddings inline or deferred)
@@ -109,6 +215,19 @@ sequenceDiagram
 
 **Trust boundaries**: Your Raspberry Pi (green) is the only trusted zone. Telegram (orange) relays messages but has no access to your database or credentials. The Claude API (red) receives only the top-K relevant messages per query — not the full database. Intent extraction uses Haiku (fast/cheap) with just your question and chat names; the main synthesis uses Sonnet with message context. Each process is restricted by kernel-level nftables rules to only its specific allowed network destinations.
 
+### Operator UX
+
+Telelocal intentionally keeps the day-to-day surface small:
+
+| Need | Command |
+|------|---------|
+| Health | `telelocal status` |
+| Ingestion progress | `telelocal sync-status` |
+| Logs | `telelocal logs` |
+| Adjust sync scope/exclusions | `sudo telelocal manage-chats` |
+| Safe code deploy | `sudo telelocal update <path-to-clone>` |
+| Restart services | `sudo telelocal restart` |
+
 ### Query Intent Extraction
 
 When you have 100+ group chats (often named like `TeamName <> YourCompany`), searching the entire database for every query would return noisy, irrelevant results. The querybot solves this with a two-stage pipeline:
@@ -141,7 +260,7 @@ flowchart LR
 
 The intent extraction runs on **Haiku** (~$0.002/query) and only sees your question + chat names — never message content. The main synthesis runs on **Sonnet** with the filtered results.
 
-If the filtered search returns nothing (e.g., Haiku misidentified the chat), the system falls back to unfiltered full-text search across all chats.
+If the filtered search returns nothing (e.g., Haiku misidentified the chat), the system falls back to unfiltered full-text search across the full included sync scope.
 
 ---
 
@@ -369,19 +488,18 @@ tg-assistant/
 
 ### Codebase Size
 
-<!-- UPDATE THIS TABLE WHEN PUSHING CHANGES -->
-<!-- Run: find src tests docs config -name '*.py' -o -name '*.md' -o -name '*.toml' | xargs wc -l -->
+Generated from the current tree (`src/`, `tests/test_*.py`, `docs/`, `config/`):
 
 | Component | Source | Tests | Docs/Config | Notes |
 |-----------|--------|-------|-------------|-------|
-| **querybot** | 1,137 | 509 | — | Largest: `llm.py` handles intent + formatting + synthesis |
-| **syncer** | 796 | 550 | — | `main.py` (sync loop) + `readonly_client.py` (allowlist wrapper) |
-| **shared** | 543 | 353 | — | DB, secrets, audit, safety — all cross-cutting concerns |
-| **docs** | — | — | 1,745 | `SECURITY_MODEL.md` is 1,173 lines (threat model + attack trees) |
-| **config** | — | — | 405 | `settings.toml` + `system_prompt.md` |
-| **Total** | **2,509** | **1,588** | **2,150** | **6,247 lines** across 8 files, 6 test files, 5 docs |
+| **querybot** | 2,252 | — | — | Intent extraction, search orchestration, command UX |
+| **syncer** | 2,336 | — | — | Sync loop, embedding pipeline, chat-scope controls |
+| **shared** | 778 | — | — | DB, secrets, audit, safety |
+| **Tests** | — | 3,028 | — | 6 primary Python test modules |
+| **Docs + Config** | — | — | 2,339 | `docs/`, `settings.toml`, `system_prompt.md` |
+| **Total** | **5,366** | **3,028** | **2,339** | **10,733 lines** |
 
-Test-to-source ratio: 0.63:1 (134 tests). No external dependencies beyond stdlib for safety/validation layer.
+Test-to-source ratio: ~0.56:1 (`3,028 / 5,366`). Current automated test count: **216** (`pytest`).
 
 ### Database Schema
 
@@ -444,24 +562,27 @@ TG_ASSISTANT_DB_USER=postgres /opt/tg-assistant/venv/bin/python3 /opt/tg-assista
 ### Quick Start
 
 ```bash
-# 1. Clone and run setup
-git clone <your-repo> && cd tg-assistant
-./scripts/setup-raspberry-pi.sh
+# 1. Clone and run unified setup
+git clone <your-repo> telelocal
+cd telelocal/tg-assistant
+sudo ./scripts/setup.sh
 
-# 2. Create Telethon session (interactive — requires phone + 2FA)
-./scripts/setup-telethon-session.sh
+# 2. Check status / sync progress
+telelocal status
+telelocal sync-status
 
-# 3. Create Telegram bot via @BotFather, add token to keychain
+# 3. Use the query bot commands
+# /summary, /mentions, /fresh, /more
+```
 
-# 4. Add credentials
-# (guided by setup script)
+### Day-2 Operations
 
-# 5. Verify security
-./tests/security-verification.sh
-
-# 6. Start services
-sudo systemctl enable tg-syncer tg-querybot
-sudo systemctl start tg-syncer tg-querybot
+```bash
+telelocal status
+telelocal sync-status
+telelocal logs
+sudo telelocal manage-chats
+sudo telelocal restart
 ```
 
 Full deployment guide: [`tg-assistant/docs/QUICKSTART.md`](tg-assistant/docs/QUICKSTART.md)
@@ -477,7 +598,7 @@ Full deployment guide: [`tg-assistant/docs/QUICKSTART.md`](tg-assistant/docs/QUI
 grep -i "injection\|blocked\|error\|denied" /var/log/tg-assistant/audit.log | tail -100
 
 # 2. Verify no unexpected network connections
-sudo ./tg-assistant/scripts/monitor-network.sh 30
+sudo /opt/tg-assistant/scripts/monitor-network.sh 30
 
 # 3. Check service health
 systemctl status tg-syncer tg-querybot

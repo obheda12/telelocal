@@ -2,7 +2,7 @@
 
 ## 1. Overview
 
-Authoritative security reference for the Telegram Personal Assistant. Covers the full security posture: what is protected, how, assumptions, and residual risk. Uses STRIDE methodology with attack trees and a formal risk matrix.
+Authoritative security reference for Telelocal. Covers the full security posture: what is protected, how, assumptions, and residual risk. Uses STRIDE methodology with attack trees and a formal risk matrix.
 
 **Related docs**: [TELETHON_HARDENING.md](TELETHON_HARDENING.md) (Telethon-specific controls). This document is self-contained for understanding the complete security posture.
 
@@ -21,7 +21,7 @@ This diagram shows the system from a 30,000-foot view: who interacts with it and
 ```mermaid
 flowchart LR
     Owner(["**Owner**<br/>Queries own message history"])
-    TGA["**Telegram Personal Assistant**<br/>Syncs all Telegram messages locally;<br/>provides LLM-powered query interface"]
+    TGA["**Telelocal**<br/>Syncs configured Telegram messages locally;<br/>provides LLM-powered query interface"]
     Telegram["**Telegram**<br/>(MTProto + Bot API)"]
     Claude["**Claude API**<br/>(Anthropic LLM)"]
 
@@ -491,7 +491,7 @@ This section catalogs all identified threats using the STRIDE methodology. Each 
 | **Component** | tg-syncer (Telethon) |
 | **Description** | Telegram detects bot-like behavior from the syncer's MTProto access and restricts or bans the user's account. Telegram does not publish exact thresholds, making this risk inherently unpredictable. |
 | **Severity** | **MEDIUM** |
-| **Mitigation** | Conservative rate limiting (one API call per 2+ seconds with random jitter). 5-minute sync intervals. Human-like access patterns (variable batch sizes, sequential chat access, skip inactive chats). Exponential backoff on `FloodWaitError`. Rate limiter statistics logged for monitoring. |
+| **Mitigation** | Conservative rate limiting (one API call per 2+ seconds with random jitter). Sync intervals are configurable (`sync_interval_seconds`, default 30s) and chats are processed sequentially with freshest-first prioritization and caps (`max_active_chats`). Exponential backoff on `FloodWaitError`. Rate limiter statistics logged for monitoring. |
 | **Residual Risk** | Telegram's enforcement policies are opaque. Even conservative automated access carries residual ban risk. Mitigation: maintain ability to fall back to Bot API-only mode. |
 
 ### T9: Denial of Service via Query Flooding
