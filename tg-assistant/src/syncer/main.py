@@ -289,6 +289,7 @@ async def sync_once(
     batch_size = syncer_config.get("batch_size", 100)
     rate_seconds = syncer_config.get("rate_limit_seconds", 2)
     max_history_days = syncer_config.get("max_history_days", 365)
+    max_active_chats = syncer_config.get("max_active_chats", 500)
     enable_prescan_progress = syncer_config.get("enable_prescan_progress", False)
     store_raw_json = syncer_config.get("store_raw_json", False)
     idle_chat_delay_seconds = syncer_config.get("idle_chat_delay_seconds", 0.1)
@@ -301,6 +302,11 @@ async def sync_once(
         1, int(syncer_config.get("embedding_queue_size", batch_size * 8))
     )
     use_vectors = embedder.dimension is not None and embedder.dimension > 0
+    try:
+        max_active_chats = int(max_active_chats)
+    except (TypeError, ValueError):
+        max_active_chats = 500
+    max_active_chats = max(0, max_active_chats)
 
     total_new = 0
     if _shutdown_event.is_set():
@@ -406,6 +412,15 @@ async def sync_once(
         return dt
 
     active_dialogs.sort(key=_dialog_sort_key, reverse=True)
+    capped_chats = 0
+    if max_active_chats > 0 and len(active_dialogs) > max_active_chats:
+        capped_chats = len(active_dialogs) - max_active_chats
+        active_dialogs = active_dialogs[:max_active_chats]
+        logger.info(
+            "Capped active chats to %d freshest (skipped %d older active chats)",
+            max_active_chats,
+            capped_chats,
+        )
 
     await audit.log(
         "syncer",
@@ -415,6 +430,8 @@ async def sync_once(
             "active_dialogs": len(active_dialogs),
             "excluded_count": excluded_count,
             "max_history_days": max_history_days,
+            "max_active_chats": max_active_chats,
+            "capped_chats": capped_chats,
         },
         success=True,
     )

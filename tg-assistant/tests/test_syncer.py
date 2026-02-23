@@ -633,6 +633,65 @@ class TestSyncOnce:
         )
 
     @pytest.mark.asyncio
+    async def test_sync_once_caps_to_freshest_active_chats(self):
+        """sync_once should process only the freshest chats when max_active_chats is set."""
+        from syncer.main import sync_once
+
+        newest_dialog = MagicMock()
+        newest_dialog.id = 111
+        newest_dialog.title = "Newest"
+        newest_dialog.is_group = False
+        newest_dialog.is_channel = False
+        newest_dialog.date = datetime.now(timezone.utc)
+
+        older_dialog = MagicMock()
+        older_dialog.id = 222
+        older_dialog.title = "Older"
+        older_dialog.is_group = False
+        older_dialog.is_channel = False
+        older_dialog.date = datetime.now(timezone.utc) - timedelta(days=2)
+
+        msg = MagicMock()
+        msg.id = 500
+        msg.text = "hello"
+        msg.message = "hello"
+        msg.date = datetime.now(timezone.utc)
+        msg.sender = None
+        msg.to_dict.return_value = {}
+
+        mock_client = MagicMock()
+        mock_client.get_dialogs = AsyncMock(return_value=[older_dialog, newest_dialog])
+        mock_client.iter_messages = MagicMock(return_value=self._iter_messages([msg]))
+
+        mock_store = AsyncMock()
+        mock_store.get_last_synced_id.return_value = None
+        mock_store.store_messages_batch.return_value = 1
+
+        mock_embedder = MagicMock()
+        mock_embedder.dimension = 0
+        mock_audit = AsyncMock()
+
+        config = {
+            "syncer": {
+                "batch_size": 100,
+                "rate_limit_seconds": 0,
+                "max_history_days": 0,
+                "max_active_chats": 1,
+            }
+        }
+
+        with patch("syncer.main.rate_limit_delay", new_callable=AsyncMock):
+            count = await sync_once(
+                mock_client, mock_store, mock_embedder, mock_audit, config
+            )
+
+        assert count == 1
+        mock_client.iter_messages.assert_called_once_with(newest_dialog, reverse=False)
+        mock_store.update_chat_metadata.assert_called_once_with(
+            chat_id=111, title="Newest", chat_type="user",
+        )
+
+    @pytest.mark.asyncio
     async def test_sync_once_includes_dialog_without_date(self):
         """Dialogs without a .date attribute should be included (conservative)."""
         from syncer.main import sync_once
