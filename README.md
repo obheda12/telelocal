@@ -10,16 +10,12 @@ It ingests messages from your Telegram account (within configured scope) into a 
 
 - [What This Project Is For](#what-this-project-is-for)
 - [Architecture At A Glance](#architecture-at-a-glance)
-- [Design Priorities](#design-priorities)
-- [Why Not Bot-Per-Chat Workflows](#why-not-bot-per-chat-workflows)
 - [Security Design](#security-design)
 - [Ingestion And Query Pipeline](#ingestion-and-query-pipeline)
 - [Quick Start](#quick-start)
 - [Operational UX](#operational-ux)
-- [Performance Tuning For Large Accounts](#performance-tuning-for-large-accounts)
 - [Repository Layout](#repository-layout)
 - [Threat Model And Known Limits](#threat-model-and-known-limits)
-- [Incident Response Quick Actions](#incident-response-quick-actions)
 - [Documentation Map](#documentation-map)
 - [License](#license)
 
@@ -82,9 +78,7 @@ flowchart LR
     TG -->|"deliver answer"| U
 ```
 
-For deeper component and threat detail:
-
-- [Architecture reference](tg-assistant/docs/ARCHITECTURE.md)
+For deeper component and threat detail, see the [Security Model](tg-assistant/docs/SECURITY_MODEL.md).
 
 ---
 
@@ -136,33 +130,9 @@ sequenceDiagram
     QB-->>TG: Reply to owner
 ```
 
-**Ingestion behavior (current design):**
+Ingestion uses freshest-first ordering, configurable chat-type scope, and optional deferred embeddings. Queries go through intent extraction, hybrid retrieval (FTS + vector), and scoped synthesis — non-owner requests are silently ignored.
 
-- Freshest-first dialog ordering
-- Activity window filter via `syncer.max_history_days`
-- Pass cap via `syncer.max_active_chats`
-- Chat-type scope via `syncer.include_chat_types`
-- Optional deferred embeddings (`syncer.defer_embeddings = true`)
-
-**Ingestion security properties:**
-
-- Messages are pulled via a read-only wrapper path (default deny on unknown Telethon methods).
-- Sync runs under dedicated user + service sandbox.
-- Sync egress is constrained to Telegram ranges at kernel level.
-- Stored corpus is immediately subject to DB role separation.
-
-**Query behavior (current design):**
-
-- Intent extraction narrows scope (chats, terms, time range)
-- Hybrid retrieval (FTS + vector) with lexical gate for short queries
-- Fallback path when scoped retrieval is empty
-
-**Query security properties:**
-
-- Non-owner requests are silently ignored.
-- Retrieval is scoped before synthesis to reduce cloud payload.
-- Querybot role is read-only for messages.
-- Querybot egress is restricted to Telegram Bot API + Anthropic API address sets.
+For full pipeline detail and security properties, see the [Security Model](tg-assistant/docs/SECURITY_MODEL.md).
 
 ---
 
@@ -196,25 +166,23 @@ For full deployment details and troubleshooting:
 
 ## Operational UX
 
-Day-to-day commands are intentionally small:
+Everything is managed through the `telelocal` CLI:
 
-| Need | Command |
-|---|---|
-| Service health | `telelocal status` |
-| Ingestion progress | `telelocal sync-status` |
-| Runtime logs | `telelocal logs` |
-| Adjust scope/exclusions | `sudo telelocal manage-chats` |
-| Restart services | `sudo telelocal restart` |
-| Deploy checked-out changes safely | `sudo telelocal update <path-to-clone>` |
-| Prune old history | `sudo telelocal prune` |
+```
+telelocal setup          # Full guided deployment (sudo)
+telelocal status         # Service health, credentials, DB counts
+telelocal sync-status    # Ingestion progress per chat
+telelocal logs           # Tail service logs
+telelocal update <path>  # Deploy new code safely (sudo)
+telelocal wipe           # Destroy all credentials and state (sudo)
+```
 
-Operator-focused bot prompts:
+The bot accepts natural language queries ("What needs my attention from the last 24 hours?") as well as structured commands:
 
-- `/mentions 1d quick`
-- `/summary 1d quick`
-- `/summary 1w detailed`
-- `/fresh 25 quick`
-- `/more`
+- `/mentions 1d quick` — triage items needing your reply
+- `/bd 3d detailed` — open questions and unanswered asks
+- `/summary 1w quick` — cross-chat recap
+- `/fresh 25 quick` — snapshot of most active chats
 
 ---
 
@@ -223,7 +191,7 @@ Operator-focused bot prompts:
 ```text
 tg-assistant/
   config/      # settings + system prompt
-  docs/        # quickstart, architecture, threat/security model, hardening notes
+  docs/        # quickstart, security model, hardening notes
   nftables/    # egress policy template
   scripts/     # setup, update, ops helpers
   src/
@@ -258,25 +226,11 @@ tg-assistant/
 
 ---
 
-## Incident Response Quick Actions
-
-If compromise is suspected:
-
-1. Stop services: `sudo systemctl stop tg-syncer tg-querybot`
-2. Preserve logs: copy `/var/log/tg-assistant/audit.log` and relevant `journalctl` output
-3. Rotate/revoke: Telethon session, API ID/hash, bot token, Claude API key, session encryption key
-4. Re-run checks: `sudo ./tests/security-verification.sh`
-5. Recreate session and restart only after review
-
----
-
 ## Documentation Map
 
-- Deployment + troubleshooting: [tg-assistant/docs/QUICKSTART.md](tg-assistant/docs/QUICKSTART.md)
-- Architecture reference: [tg-assistant/docs/ARCHITECTURE.md](tg-assistant/docs/ARCHITECTURE.md)
-- Threat model snapshot: [tg-assistant/docs/THREAT_MODEL.md](tg-assistant/docs/THREAT_MODEL.md)
+- Deployment, usage, and troubleshooting: [tg-assistant/docs/QUICKSTART.md](tg-assistant/docs/QUICKSTART.md)
+- Security model, threat catalog, and incident response: [tg-assistant/docs/SECURITY_MODEL.md](tg-assistant/docs/SECURITY_MODEL.md)
 - Telethon hardening details: [tg-assistant/docs/TELETHON_HARDENING.md](tg-assistant/docs/TELETHON_HARDENING.md)
-- Full security model and attack trees: [tg-assistant/docs/SECURITY_MODEL.md](tg-assistant/docs/SECURITY_MODEL.md)
 
 ---
 

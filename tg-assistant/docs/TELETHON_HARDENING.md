@@ -1,6 +1,6 @@
 # Telethon Security Hardening Guide
 
-Telethon-specific security controls for Telelocal. Companion to [SECURITY_MODEL.md](SECURITY_MODEL.md), [THREAT_MODEL.md](THREAT_MODEL.md), and [ARCHITECTURE.md](ARCHITECTURE.md).
+Telethon-specific security controls for Telelocal. Companion to [SECURITY_MODEL.md](SECURITY_MODEL.md).
 
 Telethon is the highest-risk component. A compromised session grants **full account access** — read, send, delete, change settings, impersonate you. Every control here exists to contain that risk.
 

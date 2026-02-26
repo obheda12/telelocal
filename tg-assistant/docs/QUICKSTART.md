@@ -1,22 +1,10 @@
 # Telelocal Quick Start
 
-This guide is optimized for operators who want:
-
-- secure local-first Telegram indexing,
-- fast ingestion for high chat counts,
-- clear day-2 commands with minimal operational overhead.
-
-For full threat analysis and control rationale, see:
-
-- `../../README.md`
-- `ARCHITECTURE.md`
-- `THREAT_MODEL.md`
-- `SECURITY_MODEL.md`
-- `TELETHON_HARDENING.md`
+Get Telelocal running and start querying your Telegram history.
 
 ---
 
-## 1. Before You Run Setup
+## Prerequisites
 
 Have these ready:
 
@@ -25,7 +13,7 @@ Have these ready:
 3. Anthropic API key: [console.anthropic.com](https://console.anthropic.com/settings/keys)
 4. Your Telegram user ID: [@userinfobot](https://t.me/userinfobot)
 
-Recommended host profile:
+Recommended host:
 
 - Raspberry Pi 4 (4GB+) or Pi 5
 - Raspberry Pi OS 64-bit or Ubuntu 22.04+ ARM64
@@ -34,7 +22,7 @@ Recommended host profile:
 
 ---
 
-## 2. Fast Deploy (Copy/Paste)
+## Install and Verify
 
 ```bash
 git clone <your-repo-url> telelocal
@@ -42,82 +30,114 @@ cd telelocal/tg-assistant
 sudo ./scripts/setup.sh
 ```
 
-Then verify runtime:
+Setup prompts you for credentials (stored via encrypted credstore), chat-type scope, and optional per-chat include/exclude selection.
+
+Once setup completes, verify everything is running:
 
 ```bash
-telelocal status
-telelocal sync-status
-telelocal logs
-```
-
-Setup prompts you for:
-
-- credentials (stored via encrypted credstore),
-- chat-type scope (exclude channels and/or direct user DMs),
-- optional per-chat include/exclude selection before first sync starts.
-
----
-
-## 3. Security-Critical Post-Install Checks
-
-Run these once immediately after deploy:
-
-```bash
+telelocal status          # both services should be active
+telelocal sync-status     # message/chat counts should appear
 sudo ./tests/security-verification.sh
-telelocal status
-telelocal sync-status
 ```
 
-Expected outcomes:
+Check that:
 
-- `tg-syncer` and `tg-querybot` are running.
-- message/chat counts increase over time.
-- no plaintext `.session` file exists in `/var/lib/tg-syncer/` (a temporary runtime `.session` file in `/dev/shm` is expected while `tg-syncer` is running).
+- `tg-syncer` and `tg-querybot` are both running,
+- no plaintext `.session` file exists in `/var/lib/tg-syncer/` (a temporary runtime `.session` in `/dev/shm` is expected while syncer runs),
 - nftables rules are active for both service users.
 
-If the sync count stays at zero for 15+ minutes, go to [Troubleshooting](#8-troubleshooting).
+Now send your first query to the bot:
 
----
-
-## 4. First 15-Minute Validation
-
-1. Send one query to your bot:
-   - `/summary 1d quick`
-2. Confirm owner-only behavior:
-   - non-owner accounts should get no response.
-3. Confirm ingestion progress:
-   - `telelocal sync-status` should show active chats and message growth.
-
-Initial sync expectations:
-
-- first pass may take 10-30+ minutes on large accounts,
-- quality improves as more chats are ingested.
-
----
-
-## 5. Day-2 Commands
-
-| Need | Command |
-|------|---------|
-| Service health | `telelocal status` |
-| Ingestion progress | `telelocal sync-status` |
-| Runtime logs | `telelocal logs` |
-| Scope/exclusions management | `sudo telelocal manage-chats` |
-| Restart both services (non-blocking wrapper) | `sudo telelocal restart` |
-| Safe code deploy to `/opt` | `sudo telelocal update <path-to-clone>` |
-| History pruning | `sudo telelocal prune` |
-
-Common query commands:
-
-- `/mentions 1d quick`
 - `/summary 1d quick`
-- `/summary 1w detailed`
-- `/fresh 25 quick`
-- `/more`
+
+Confirm non-owner accounts get no response. Initial sync may take 10–30+ minutes on large accounts — query quality improves as more chats are ingested.
+
+If sync count stays at zero for 15+ minutes, see [Troubleshooting](#troubleshooting).
 
 ---
 
-## 6. Scope And Throughput Tuning
+## Usage
+
+The bot is your personal search and triage interface over your synced Telegram history. You interact with it by messaging your bot in Telegram.
+
+### Natural language queries
+
+The primary way to use the bot is to just ask it things in plain text. The system extracts your intent (target chats, senders, time range, keywords), runs a scoped search over your local corpus, and has Claude synthesize an answer.
+
+Examples:
+
+- "What needs my attention from the past 24 hours?"
+- "Summarise the discussion in DevChat yesterday"
+- "What did team X decide about pricing this week?"
+- "Find messages about the Python deployment"
+- "Quick synopsis of the 50 freshest chats"
+
+This is especially useful for **BD and relationship management** — keeping track of open asks, follow-ups owed, and commitments across many concurrent conversations. Instead of scrolling through dozens of chats, ask the bot who's waiting on you, what was agreed, or what needs a response.
+
+### Commands
+
+Commands give you structured, repeatable queries with time-window and detail controls:
+
+| Command | What it does |
+|---------|-------------|
+| `/mentions 1d quick` | Items that likely need your reply (mentions, direct questions) |
+| `/bd 3d detailed` | Open questions and unanswered asks — useful for BD follow-up triage |
+| `/summary 1w quick` | Cross-chat recap: decisions, blockers, action items |
+| `/fresh 25 quick` | Snapshot of the 25 most recently active chats |
+| `/more` | Continue a long response that was auto-chunked |
+| `/iam [@alias1 ...]` | Bind your identity so the bot can find your mentions accurately |
+| `/stats` | Database and sync statistics |
+
+Time windows: `1d`, `3d`, `1w`. Detail modes: `quick` (concise) or `detailed` (thorough).
+
+### Host management
+
+Everything is managed through the `telelocal` CLI on the host.
+
+**Setup and teardown:**
+
+| Command | What it does |
+|---------|-------------|
+| `sudo telelocal setup` | Full guided deployment — credentials, DB, services, firewall |
+| `sudo telelocal session` | Create or recreate the Telethon session |
+| `sudo telelocal wipe` | Destroy all credentials, sessions, DB, and state — clean slate |
+
+**Daily operations:**
+
+| Command | What it does |
+|---------|-------------|
+| `telelocal status` | Service health, credential state, DB message/chat counts |
+| `telelocal sync-status` | Ingestion progress per chat with last activity times |
+| `telelocal logs` | Tail both service logs (`logs syncer` or `logs querybot` for one) |
+| `sudo telelocal manage-chats` | Interactively include/exclude chats from sync scope |
+| `sudo telelocal restart` | Restart both services (also: `stop`, `start`) |
+| `sudo telelocal prune` | Prune DB history older than configured retention window |
+
+**Updating:**
+
+```bash
+cd ~/telelocal/tg-assistant
+git pull
+sudo telelocal update ~/telelocal/tg-assistant
+sudo ./tests/security-verification.sh
+```
+
+`telelocal update` copies code into `/opt/tg-assistant` without touching runtime assets (`venv`, `models`), then restarts services.
+
+**Incident response:**
+
+If compromise is suspected, stop services immediately and run the emergency revocation script:
+
+```bash
+sudo telelocal stop
+sudo ./scripts/emergency-revoke.sh
+```
+
+See [SECURITY_MODEL.md](SECURITY_MODEL.md) for full incident response procedures.
+
+---
+
+## Tuning
 
 Highest-impact knobs in `settings.toml`:
 
@@ -137,7 +157,7 @@ Tips:
 
 ---
 
-## 7. Important File Locations
+## Reference
 
 | Description | Path |
 |-------------|------|
@@ -154,7 +174,7 @@ Tips:
 
 ---
 
-## 8. Troubleshooting
+## Troubleshooting
 
 ### `sync-status` shows 0 messages
 
@@ -192,7 +212,7 @@ sudo telelocal update ~/telelocal/tg-assistant
 If venv is missing entirely:
 
 ```bash
-sudo ./scripts/setup.sh
+sudo telelocal setup
 ```
 
 ### Bot does not respond
@@ -211,9 +231,9 @@ Also verify:
 ### Telethon session invalidated
 
 ```bash
-sudo systemctl stop tg-syncer
-sudo ./scripts/setup-telethon-session.sh
-sudo systemctl start tg-syncer
+sudo telelocal stop
+sudo telelocal session
+sudo telelocal start
 ```
 
 ### Rate-limiting symptoms
@@ -226,42 +246,9 @@ The syncer already applies backoff; avoid lowering rate limits aggressively.
 
 ---
 
-## 9. Updating Safely
+For security incident response procedures, see [SECURITY_MODEL.md](SECURITY_MODEL.md).
 
-```bash
-cd ~/telelocal/tg-assistant
-git pull
-sudo telelocal update ~/telelocal/tg-assistant
-sudo ./tests/security-verification.sh
-```
+Related docs:
 
-Avoid direct `rsync --delete` into `/opt/tg-assistant` unless you preserve runtime assets (`venv`, `models`).
-
-Optional embedding backfill after upgrades:
-
-```bash
-TG_ASSISTANT_DB_USER=postgres /opt/tg-assistant/venv/bin/python3 /opt/tg-assistant/scripts/backfill-embeddings.py
-```
-
----
-
-## 10. Security Incident Quick Actions
-
-If compromise is suspected:
-
-1. Stop services:
-   - `sudo systemctl stop tg-syncer tg-querybot`
-2. Revoke Telegram session from another trusted Telegram client:
-   - Telegram -> Settings -> Devices
-3. Rotate:
-   - Telegram API ID/hash
-   - Telethon session + session encryption key
-   - Bot token
-   - Claude API key
-4. Preserve logs and run:
-   - `sudo ./tests/security-verification.sh`
-5. Recreate session and restart services only after review.
-
-Critical note:
-
-- A usable Telethon session is effectively account-level compromise.
+- `SECURITY_MODEL.md` (authoritative security model, threat catalog, incident response)
+- `TELETHON_HARDENING.md` (Telethon-specific controls)
