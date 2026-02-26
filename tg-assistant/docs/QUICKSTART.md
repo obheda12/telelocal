@@ -25,7 +25,7 @@ Recommended host:
 ## Install and Verify
 
 ```bash
-git clone <your-repo-url> telelocal
+git clone https://github.com/obheda12/telelocal.git
 cd telelocal/tg-assistant
 sudo ./scripts/setup.sh
 ```

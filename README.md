@@ -139,7 +139,7 @@ For full pipeline detail and security properties, see the [Security Model](tg-as
 ## Quick Start
 
 ```bash
-git clone <your-repo-url> telelocal
+git clone https://github.com/obheda12/telelocal.git
 cd telelocal/tg-assistant
 sudo ./scripts/setup.sh
 ```
