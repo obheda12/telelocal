@@ -272,39 +272,10 @@ phase_configure() {
         log_info "owner_telegram_id already configured"
     fi
 
-    echo ""
-    echo -e "${BOLD}Chat ingestion scope${NC}"
-    echo "  Choose whether to exclude channels and/or direct user DMs."
-    echo "  Group chats are always included."
-    echo ""
-    read -rp "  Exclude channels from ingestion? [y/N] " EXCLUDE_CHANNELS
-    read -rp "  Exclude direct user DMs from ingestion? [y/N] " EXCLUDE_USERS
-
-    INCLUDE_CHAT_TYPES=("group")
-    if [[ ! "${EXCLUDE_CHANNELS}" =~ ^[Yy] ]]; then
-        INCLUDE_CHAT_TYPES+=("channel")
-    fi
-    if [[ ! "${EXCLUDE_USERS}" =~ ^[Yy] ]]; then
-        INCLUDE_CHAT_TYPES+=("user")
-    fi
-
-    INCLUDE_CHAT_TYPES_TOML="["
-    for i in "${!INCLUDE_CHAT_TYPES[@]}"; do
-        if [[ "${i}" -gt 0 ]]; then
-            INCLUDE_CHAT_TYPES_TOML+=", "
-        fi
-        INCLUDE_CHAT_TYPES_TOML+="\"${INCLUDE_CHAT_TYPES[$i]}\""
-    done
-    INCLUDE_CHAT_TYPES_TOML+="]"
-
-    if grep -q '^include_chat_types' "${CONFIG_FILE}" 2>/dev/null; then
-        sed -i -E "s|^include_chat_types\\s*=\\s*\\[[^]]*\\]|include_chat_types = ${INCLUDE_CHAT_TYPES_TOML}|g" "${CONFIG_FILE}"
-    else
-        sed -i "/^max_active_chats/a include_chat_types = ${INCLUDE_CHAT_TYPES_TOML}" "${CONFIG_FILE}"
-    fi
-    log_success "Configured include_chat_types = ${INCLUDE_CHAT_TYPES_TOML}"
-
     # NOTE: API ID/hash are stored in systemd credstore; config is left as placeholders.
+    # NOTE: Chat scope configuration (include_chat_types + per-chat exclusions) is
+    #       handled in Phase 7 after the Telethon session is live, so all chat
+    #       selection happens in one place.
 
     log_success "Configuration updated"
 }
@@ -555,8 +526,42 @@ phase_service_activation() {
         return
     fi
 
+    # --- Chat type scope ---
+    CONFIG_FILE="${CONFIG_DIR}/settings.toml"
     echo ""
-    read -rp "  Configure chat include/exclude list before first sync? [Y/n] " CONFIGURE_CHATS
+    echo -e "${BOLD}Chat ingestion scope${NC}"
+    echo "  Choose which chat types to sync. Group chats are always included."
+    echo ""
+    read -rp "  Exclude channels from ingestion? [y/N] " EXCLUDE_CHANNELS
+    read -rp "  Exclude direct user DMs from ingestion? [y/N] " EXCLUDE_USERS
+
+    INCLUDE_CHAT_TYPES=("group")
+    if [[ ! "${EXCLUDE_CHANNELS}" =~ ^[Yy] ]]; then
+        INCLUDE_CHAT_TYPES+=("channel")
+    fi
+    if [[ ! "${EXCLUDE_USERS}" =~ ^[Yy] ]]; then
+        INCLUDE_CHAT_TYPES+=("user")
+    fi
+
+    INCLUDE_CHAT_TYPES_TOML="["
+    for i in "${!INCLUDE_CHAT_TYPES[@]}"; do
+        if [[ "${i}" -gt 0 ]]; then
+            INCLUDE_CHAT_TYPES_TOML+=", "
+        fi
+        INCLUDE_CHAT_TYPES_TOML+="\"${INCLUDE_CHAT_TYPES[$i]}\""
+    done
+    INCLUDE_CHAT_TYPES_TOML+="]"
+
+    if grep -q '^include_chat_types' "${CONFIG_FILE}" 2>/dev/null; then
+        sed -i -E "s|^include_chat_types\\s*=\\s*\\[[^]]*\\]|include_chat_types = ${INCLUDE_CHAT_TYPES_TOML}|g" "${CONFIG_FILE}"
+    else
+        sed -i "/^max_active_chats/a include_chat_types = ${INCLUDE_CHAT_TYPES_TOML}" "${CONFIG_FILE}"
+    fi
+    log_success "Configured include_chat_types = ${INCLUDE_CHAT_TYPES_TOML}"
+
+    # --- Per-chat exclusions ---
+    echo ""
+    read -rp "  Configure per-chat include/exclude list before first sync? [Y/n] " CONFIGURE_CHATS
     echo ""
     if [[ ! "${CONFIGURE_CHATS}" =~ ^[Nn] ]]; then
         if [[ -x "${VENV_DIR}/bin/python3" ]]; then

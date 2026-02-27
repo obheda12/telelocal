@@ -30,7 +30,9 @@ cd telelocal/tg-assistant
 sudo ./scripts/setup.sh
 ```
 
-Setup prompts you for credentials (stored via encrypted credstore), chat-type scope, and optional per-chat include/exclude selection.
+Setup prompts you for credentials (stored via encrypted credstore), creates your Telegram session, then configures chat scope and per-chat exclusions.
+
+During Telegram session setup, Telethon will prompt "Please enter your phone (or bot token):" — **enter your phone number in full international format with country code** (e.g., `+11231231234`). Do not enter a bot token here. The connection will fail if the country code is missing or the format is wrong.
 
 Once setup completes, verify everything is running:
 
