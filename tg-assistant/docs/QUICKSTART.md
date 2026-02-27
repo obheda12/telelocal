@@ -58,6 +58,22 @@ If sync count stays at zero for 15+ minutes, see [Troubleshooting](#troubleshoot
 
 ---
 
+## How Sync and Pruning Work
+
+Once running, the syncer **continuously pulls new messages** in a loop. After each pass it sleeps for `sync_interval_seconds` (default **5 minutes**, configurable in `settings.toml` under `[syncer]`), then fetches new messages from active chats freshest-first. No manual triggering is needed — the corpus stays up to date automatically.
+
+Old messages are **pruned automatically** by a systemd timer (`tg-prune-history.timer`) that runs **every hour**. It deletes messages older than `syncer.max_history_days` (default 30 days) and removes orphaned chats with no remaining messages. Set `max_history_days = 0` to disable pruning and keep all history.
+
+| Setting | Default | Effect |
+|---------|---------|--------|
+| `syncer.sync_interval_seconds` | `300` (5 min) | Time between sync passes |
+| `syncer.max_history_days` | `30` | Messages older than this are pruned; `0` disables pruning |
+| `syncer.max_active_chats` | `500` | Max chats scanned per pass (freshest first) |
+
+You can manually trigger a prune at any time with `sudo telelocal prune`.
+
+---
+
 ## Usage
 
 The bot is your personal search and triage interface over your synced Telegram history. You interact with it by messaging your bot in Telegram.
