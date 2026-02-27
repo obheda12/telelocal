@@ -179,10 +179,9 @@ telelocal wipe           # Destroy all credentials and state (sudo)
 
 The bot accepts natural language queries ("What needs my attention from the last 24 hours?") as well as structured commands:
 
+- `/bd 3d 50 quick` — freshest chat briefing with status and actions
 - `/mentions 1d quick` — triage items needing your reply
-- `/bd 3d detailed` — open questions and unanswered asks
 - `/summary 1w quick` — cross-chat recap
-- `/fresh 25 quick` — snapshot of most active chats
 
 ---
 

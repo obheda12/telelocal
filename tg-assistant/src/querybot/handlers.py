@@ -55,7 +55,7 @@ _DETAIL_ALIASES = {
     "detailed": "detailed",
     "detail": "detailed",
 }
-_FRESH_CHAT_CHOICES = {10, 25, 50}
+_FRESH_CHAT_CHOICES = {10, 25, 50, 100}
 _WINDOW_DAY_RE = re.compile(
     r"\b(?:(?:past|last)\s+)?(\d{1,3})\s*(day|days|d|week|weeks|w)\b",
     re.IGNORECASE,
@@ -261,19 +261,31 @@ def _parse_window_and_detail_args(
     return days, detail_mode, None
 
 
-def _parse_fresh_args(
+def _parse_bd_args(
     args: List[str],
     *,
     default_count: int = 25,
-) -> Tuple[int, str, Optional[str]]:
-    """Parse `/fresh` args into ``chat_count`` and ``detail_mode``."""
+    default_days: int = 3,
+) -> Tuple[int, int, str, Optional[str]]:
+    """Parse ``/bd`` args into ``chat_count``, ``days`` and ``detail_mode``.
+
+    Accepts a timeframe (``1d``, ``3d``, ``1w``), a chat count
+    (``10``, ``25``, ``50``, ``100``), and a detail mode (``quick`` or
+    ``detailed``) in any order.
+
+    Returns ``(chat_count, days, detail_mode, error_or_none)``.
+    """
     chat_count = int(default_count)
+    days = int(default_days)
     detail_mode = "quick"
     unknown: List[str] = []
 
     for raw in args:
         token = (raw or "").strip().lower()
         if not token:
+            continue
+        if token in _WINDOW_TO_DAYS:
+            days = _WINDOW_TO_DAYS[token]
             continue
         if token in _DETAIL_ALIASES:
             detail_mode = _DETAIL_ALIASES[token]
@@ -288,8 +300,8 @@ def _parse_fresh_args(
         unknown.append(raw)
 
     if unknown:
-        return chat_count, detail_mode, f"Unknown option(s): {' '.join(unknown)}"
-    return chat_count, detail_mode, None
+        return chat_count, days, detail_mode, f"Unknown option(s): {' '.join(unknown)}"
+    return chat_count, days, detail_mode, None
 
 
 def _detail_params(
@@ -620,20 +632,18 @@ async def handle_help(
         "  /help  - This help text\n"
         "  /iam   - Show/set owner identity binding\n"
         "  /stats - Sync and usage statistics\n\n"
+        "  /bd [1d|3d|1w] [10|25|50|100] [quick|detailed] - Freshest chat briefing with status and actions\n"
         "  /mentions [1d|3d|1w] [quick|detailed] - Items likely needing your reply\n"
-        "  /bd [1d|3d|1w] [quick|detailed] - Likely unanswered open questions\n"
         "  /summary  [1d|3d|1w] [quick|detailed] - Cross-chat time-window recap\n"
-        "  /fresh    [10|25|50] [quick|detailed] - Snapshot of freshest chats\n"
         "  /more - Continue the previous long response\n\n"
         "How to use:\n"
         "  Just send me a question in plain text! I'll search your "
         "synced Telegram messages and answer using Claude.\n\n"
         "Tips for effective queries:\n"
         '  - Identity binding: "/iam 123456789 @yourusername"\n'
+        '  - Chat briefing: "/bd 3d 50 quick"\n'
         '  - Mentions triage: "/mentions 1d quick"\n'
-        '  - Open questions: "/bd 3d quick"\n'
         '  - Daily recap: "/summary 1d quick"\n'
-        '  - Freshest chats: "/fresh 25 quick"\n'
         '  - Be specific: "What did Alice say about the project deadline?"\n'
         '  - Ask for summaries: "Summarise the discussion in DevChat yesterday"\n'
         '  - Search by topic: "Find messages about Python deployment"\n'
@@ -764,53 +774,53 @@ async def handle_mentions(
 async def handle_bd(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Handle `/bd` unanswered-question triage command."""
+    """Handle ``/bd`` — freshest-chat briefing with status and actions.
+
+    Accepts a timeframe (``1d``, ``3d``, ``1w``), a chat count
+    (``10``, ``25``, ``50``, ``100``), and a detail mode
+    (``quick`` or ``detailed``) in any order.  Defaults: 25 chats, 3 days,
+    quick mode.
+    """
     search: MessageSearch = context.bot_data["search"]
     llm: ClaudeAssistant = context.bot_data["llm"]
     audit: AuditLogger = context.bot_data["audit"]
 
-    days, detail_mode, parse_err = _parse_window_and_detail_args(
+    chat_count, days, detail_mode, parse_err = _parse_bd_args(
         context.args or [],
-        default_days=1,
+        default_count=25,
+        default_days=3,
     )
     if parse_err:
         await update.message.reply_text(
-            f"{parse_err}\nUsage: /bd [1d|3d|1w] [quick|detailed]"
+            f"{parse_err}\n"
+            "Usage: /bd [1d|3d|1w] [10|25|50|100] [quick|detailed]"
         )
         return
 
-    owner_id = _resolve_owner_user_id(update, context)
-    owner_aliases = _resolve_owner_mention_aliases(update, context)
-    limit, context_max_chars, max_tokens = _detail_params(
-        detail_mode,
-        quick_limit=80,
-        detailed_limit=160,
-        quick_ctx_chars=12000,
-        detailed_ctx_chars=22000,
-        quick_max_tokens=1200,
-        detailed_max_tokens=2600,
+    per_chat_messages, context_max_chars, max_tokens = (
+        (4, 48000, 4096)
+        if detail_mode == "detailed"
+        else (2, 32000, 2800)
     )
-    results = await search.open_questions_needing_reply(
-        owner_id=owner_id,
+    results = await search.recent_chat_summary_context(
+        chat_limit=chat_count,
+        per_chat_messages=per_chat_messages,
         days_back=days,
-        limit=limit,
     )
     if not results:
-        await update.message.reply_text(
-            f"No likely-open unanswered questions found in the last {days} day(s)."
-        )
+        no_results_msg = await _get_sync_status_context(search._pool)
+        await update.message.reply_text(no_results_msg)
         return
 
-    total_candidates = len(results)
     prompt = (
-        f"Create a {detail_mode} briefing of likely unanswered questions from the last {days} day(s). "
-        f"There are {total_candidates} candidate question messages in context. "
-        "These are questions that appear not to have a reply from me yet. "
-        "Use sections: <b>Need My Reply</b>, <b>Could Wait</b>, <b>Low Priority</b>. "
-        "Include as many concrete items as possible (not just one), each with chat, sender, timestamp, "
-        "and key question text. If you cannot list everything due length, add a final line saying "
-        "'More items not shown'."
+        f"Give me a {detail_mode} briefing of my {chat_count} freshest chats "
+        f"from the last {days} day(s). "
+        "For each chat, capture the current status, key updates, and whether I need to act. "
+        "Prioritize chats with actionable items first. "
+        "Keep each chat summary concise and include timestamps for important events."
     )
+    owner_id = _resolve_owner_user_id(update, context)
+    owner_aliases = _resolve_owner_mention_aliases(update, context)
     answer = await llm.query(
         prompt,
         results,
@@ -825,8 +835,10 @@ async def handle_bd(
         "querybot",
         "command_bd",
         {
+            "chat_count": chat_count,
             "days_back": days,
             "detail_mode": detail_mode,
+            "per_chat_messages": per_chat_messages,
             "results_count": len(results),
         },
         success=True,
@@ -898,71 +910,6 @@ async def handle_summary(
             "days_back": days,
             "detail_mode": detail_mode,
             "chat_limit": chat_limit,
-            "per_chat_messages": per_chat_messages,
-            "results_count": len(results),
-        },
-        success=True,
-    )
-
-
-@owner_only
-async def handle_fresh(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> None:
-    """Handle `/fresh` for freshest-chat snapshots."""
-    search: MessageSearch = context.bot_data["search"]
-    llm: ClaudeAssistant = context.bot_data["llm"]
-    audit: AuditLogger = context.bot_data["audit"]
-
-    chat_count, detail_mode, parse_err = _parse_fresh_args(
-        context.args or [],
-        default_count=25,
-    )
-    if parse_err:
-        await update.message.reply_text(
-            f"{parse_err}\nUsage: /fresh [10|25|50] [quick|detailed]"
-        )
-        return
-
-    per_chat_messages, context_max_chars, max_tokens = (
-        (4, 32000, 3600)
-        if detail_mode == "detailed"
-        else (2, 22000, 1700)
-    )
-    results = await search.recent_chat_summary_context(
-        chat_limit=chat_count,
-        per_chat_messages=per_chat_messages,
-        days_back=30,
-    )
-    if not results:
-        no_results_msg = await _get_sync_status_context(search._pool)
-        await update.message.reply_text(no_results_msg)
-        return
-
-    prompt = (
-        f"Give me a {detail_mode} synopsis of my {chat_count} freshest chats. "
-        "For each chat, capture the current status, key updates, and whether I need to act. "
-        "Prioritize chats with actionable items first. "
-        "Keep each chat summary concise and include timestamps for important events."
-    )
-    owner_id = _resolve_owner_user_id(update, context)
-    owner_aliases = _resolve_owner_mention_aliases(update, context)
-    answer = await llm.query(
-        prompt,
-        results,
-        context_max_chars=context_max_chars,
-        max_tokens_override=max_tokens,
-        owner_user_id=owner_id,
-        owner_aliases=owner_aliases,
-    )
-    await _reply_answer(update, context, answer)
-
-    await audit.log(
-        "querybot",
-        "command_fresh",
-        {
-            "chat_count": chat_count,
-            "detail_mode": detail_mode,
             "per_chat_messages": per_chat_messages,
             "results_count": len(results),
         },

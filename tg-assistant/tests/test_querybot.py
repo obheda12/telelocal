@@ -9,13 +9,12 @@ import pytest
 from querybot.handlers import (
     _extract_mentions_window_days,
     _extract_open_questions_window_days,
-    _parse_fresh_args,
+    _parse_bd_args,
     _parse_window_and_detail_args,
     _get_sync_status_context,
     _sanitize_telegram_html,
     _split_message,
     handle_bd,
-    handle_fresh,
     handle_iam,
     handle_message,
     handle_mentions,
@@ -237,20 +236,35 @@ class TestCommandArgParsing:
         _, _, err = _parse_window_and_detail_args(["bad"], default_days=1)
         assert err is not None
 
-    def test_parse_fresh_defaults(self):
-        count, detail_mode, err = _parse_fresh_args([])
+    def test_parse_bd_defaults(self):
+        count, days, detail_mode, err = _parse_bd_args([])
         assert count == 25
+        assert days == 3
         assert detail_mode == "quick"
         assert err is None
 
-    def test_parse_fresh_values(self):
-        count, detail_mode, err = _parse_fresh_args(["50", "detailed"])
+    def test_parse_bd_all_params(self):
+        count, days, detail_mode, err = _parse_bd_args(["1w", "50", "detailed"])
         assert count == 50
+        assert days == 7
         assert detail_mode == "detailed"
         assert err is None
 
-    def test_parse_fresh_invalid(self):
-        _, _, err = _parse_fresh_args(["11"])
+    def test_parse_bd_timeframe_only(self):
+        count, days, detail_mode, err = _parse_bd_args(["1d"])
+        assert count == 25
+        assert days == 1
+        assert detail_mode == "quick"
+        assert err is None
+
+    def test_parse_bd_count_only(self):
+        count, days, detail_mode, err = _parse_bd_args(["100"])
+        assert count == 100
+        assert days == 3
+        assert err is None
+
+    def test_parse_bd_invalid_count(self):
+        _, _, _, err = _parse_bd_args(["11"])
         assert err is not None
 
     def test_extract_mentions_window_days_week(self):
@@ -630,7 +644,7 @@ class TestHandleMessage:
 
 
 # ---------------------------------------------------------------------------
-# Command handlers (/mentions, /summary, /fresh, /more)
+# Command handlers (/bd, /mentions, /summary, /more)
 # ---------------------------------------------------------------------------
 
 
@@ -683,26 +697,26 @@ class TestScaffoldCommandHandlers:
             chat_title="Ops Chat",
             sender_name="Alice",
             timestamp="2024-01-15T10:00:00Z",
-            text="Can you confirm the rollout?",
+            text="Status update on rollout",
             score=1.0,
         )
         update, context, mock_search, mock_llm, mock_audit = _make_handler_context(
             search_results=[result],
-            llm_answer="Need My Reply: ...",
+            llm_answer="Briefing: ...",
         )
-        context.args = ["3d", "quick"]
+        context.args = ["1w", "50", "quick"]
 
         await handle_bd(update, context)
 
-        mock_search.open_questions_needing_reply.assert_called_once_with(
-            owner_id=12345,
-            days_back=3,
-            limit=80,
+        mock_search.recent_chat_summary_context.assert_called_once_with(
+            chat_limit=50,
+            per_chat_messages=2,
+            days_back=7,
         )
         mock_llm.query.assert_called_once()
         llm_kwargs = mock_llm.query.call_args.kwargs
-        assert llm_kwargs["context_max_chars"] == 12000
-        assert llm_kwargs["max_tokens_override"] == 1200
+        assert llm_kwargs["context_max_chars"] == 32000
+        assert llm_kwargs["max_tokens_override"] == 2800
         assert mock_audit.log.call_args[0][1] == "command_bd"
 
     @pytest.mark.asyncio
@@ -735,7 +749,7 @@ class TestScaffoldCommandHandlers:
         assert mock_audit.log.call_args[0][1] == "command_summary"
 
     @pytest.mark.asyncio
-    async def test_fresh_command_uses_requested_chat_count(self):
+    async def test_bd_command_defaults(self):
         result = SearchResult(
             message_id=1,
             chat_id=1,
@@ -747,21 +761,21 @@ class TestScaffoldCommandHandlers:
         )
         update, context, mock_search, mock_llm, mock_audit = _make_handler_context(
             search_results=[result],
-            llm_answer="Fresh summary",
+            llm_answer="BD summary",
         )
-        context.args = ["50", "quick"]
+        context.args = []
 
-        await handle_fresh(update, context)
+        await handle_bd(update, context)
 
         mock_search.recent_chat_summary_context.assert_called_once_with(
-            chat_limit=50,
+            chat_limit=25,
             per_chat_messages=2,
-            days_back=30,
+            days_back=3,
         )
         llm_kwargs = mock_llm.query.call_args.kwargs
-        assert llm_kwargs["context_max_chars"] == 22000
-        assert llm_kwargs["max_tokens_override"] == 1700
-        assert mock_audit.log.call_args[0][1] == "command_fresh"
+        assert llm_kwargs["context_max_chars"] == 32000
+        assert llm_kwargs["max_tokens_override"] == 2800
+        assert mock_audit.log.call_args[0][1] == "command_bd"
 
     @pytest.mark.asyncio
     async def test_more_command_sends_pending_chunks(self):

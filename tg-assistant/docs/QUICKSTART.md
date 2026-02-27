@@ -98,15 +98,14 @@ Commands give you structured, repeatable queries with time-window and detail con
 
 | Command | What it does |
 |---------|-------------|
-| `/mentions 1d quick` | Items that likely need your reply (mentions, direct questions) |
-| `/bd 3d detailed` | Open questions and unanswered asks — useful for BD follow-up triage |
-| `/summary 1w quick` | Cross-chat recap: decisions, blockers, action items |
-| `/fresh 25 quick` | Snapshot of the 25 most recently active chats |
+| `/bd [1d\|3d\|1w] [10\|25\|50\|100] [quick\|detailed]` | Freshest chat briefing — status, key updates, and actions needed |
+| `/mentions [1d\|3d\|1w] [quick\|detailed]` | Items that likely need your reply (mentions, direct questions) |
+| `/summary [1d\|3d\|1w] [quick\|detailed]` | Cross-chat recap: decisions, blockers, action items |
 | `/more` | Continue a long response that was auto-chunked |
 | `/iam [@alias1 ...]` | Bind your identity so the bot can find your mentions accurately |
 | `/stats` | Database and sync statistics |
 
-Time windows: `1d`, `3d`, `1w`. Detail modes: `quick` (concise) or `detailed` (thorough).
+Time windows: `1d`, `3d`, `1w`. Chat counts (for `/bd`): `10`, `25`, `50`, `100`. Detail modes: `quick` (concise) or `detailed` (thorough). All parameters are optional and can be combined in any order. Long responses are automatically split and continued with `/more`.
 
 ### Host management
 

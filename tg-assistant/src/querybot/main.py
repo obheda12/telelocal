@@ -30,7 +30,6 @@ from telegram.ext import (
 
 from querybot.handlers import (
     handle_bd,
-    handle_fresh,
     handle_help,
     handle_iam,
     handle_message,
@@ -253,7 +252,6 @@ def build_application(config: Dict[str, Any]) -> Application:
     app.add_handler(CommandHandler("mentions", handle_mentions, filters=owner_filter))
     app.add_handler(CommandHandler("bd", handle_bd, filters=owner_filter))
     app.add_handler(CommandHandler("summary", handle_summary, filters=owner_filter))
-    app.add_handler(CommandHandler("fresh", handle_fresh, filters=owner_filter))
     app.add_handler(CommandHandler("more", handle_more, filters=owner_filter))
     app.add_handler(
         MessageHandler(
