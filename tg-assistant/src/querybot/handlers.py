@@ -8,6 +8,7 @@ from non-owner users.
 
 from __future__ import annotations
 
+import asyncio
 import html
 import logging
 import re
@@ -15,7 +16,7 @@ from functools import wraps
 from typing import Any, Callable, Coroutine, List, Optional, Tuple
 
 from telegram import Update
-from telegram.constants import ParseMode
+from telegram.constants import ChatAction, ParseMode
 from telegram.ext import ContextTypes
 
 import asyncpg
@@ -56,6 +57,7 @@ _DETAIL_ALIASES = {
     "detail": "detailed",
 }
 _FRESH_CHAT_CHOICES = {10, 25, 50, 100}
+_QUICK_MODE_MODEL = "claude-haiku-4-5-20251001"
 _WINDOW_DAY_RE = re.compile(
     r"\b(?:(?:past|last)\s+)?(\d{1,3})\s*(day|days|d|week|weeks|w)\b",
     re.IGNORECASE,
@@ -111,6 +113,16 @@ def owner_only(func: HandlerFunc) -> HandlerFunc:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+async def _send_typing(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Send a TYPING chat action. Best-effort — failures logged, not raised."""
+    try:
+        await context.bot.send_chat_action(
+            update.effective_chat.id, ChatAction.TYPING
+        )
+    except Exception:
+        logger.debug("Failed to send typing indicator", exc_info=True)
 
 
 def _split_message(text: str) -> List[str]:
@@ -453,6 +465,46 @@ def _extract_open_questions_window_days(question: str) -> int | None:
     return 1
 
 
+# ---------------------------------------------------------------------------
+# Fast-path intent extraction (skip Haiku for common patterns)
+# ---------------------------------------------------------------------------
+
+
+_RECENT_SUMMARY_FAST_PATHS: list[tuple[re.Pattern, int]] = [
+    (re.compile(r"\b(?:what'?s\s+new|what\s+happened|catch\s+me\s+up|anything\s+new|what\s+did\s+i\s+miss)\b", re.IGNORECASE), 3),
+    (re.compile(r"\b(?:summarize\s+everything|give\s+me\s+an?\s+overview|full\s+(?:summary|overview|recap))\b", re.IGNORECASE), 7),
+]
+
+# Specificity indicators — if present, the question targets a particular
+# chat/sender/topic and should go through Haiku for proper intent parsing.
+_SPECIFICITY_INDICATORS = (
+    "in the", "in chat", "from ", "by ", "about ",
+    "said", "wrote", "asked", "mentioned",
+)
+
+
+def _try_recent_summary_fast_path(question: str) -> Optional[QueryIntent]:
+    """Return a QueryIntent if the question matches a common summary pattern.
+
+    Returns None when the question contains specificity indicators (chat
+    names, sender references, topic keywords) that need Haiku for proper
+    intent parsing.
+    """
+    from querybot.search import QueryIntent
+
+    q = question.lower()
+
+    # Bail out if the question targets something specific
+    if any(indicator in q for indicator in _SPECIFICITY_INDICATORS):
+        return None
+
+    for pattern, days_back in _RECENT_SUMMARY_FAST_PATHS:
+        if pattern.search(question):
+            return QueryIntent(days_back=days_back)
+
+    return None
+
+
 async def _reply_chunks(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -713,6 +765,7 @@ async def handle_mentions(
         )
         return
 
+    await _send_typing(update, context)
     owner_id = _resolve_owner_user_id(update, context)
     normalized_aliases = _resolve_owner_mention_aliases(update, context)
 
@@ -754,6 +807,7 @@ async def handle_mentions(
         max_tokens_override=max_tokens,
         owner_user_id=owner_id,
         owner_aliases=normalized_aliases,
+        model_override=_QUICK_MODE_MODEL if detail_mode == "quick" else None,
     )
     await _reply_answer(update, context, answer)
 
@@ -797,6 +851,7 @@ async def handle_bd(
         )
         return
 
+    await _send_typing(update, context)
     per_chat_messages, context_max_chars, max_tokens = (
         (4, 48000, 4096)
         if detail_mode == "detailed"
@@ -828,6 +883,7 @@ async def handle_bd(
         max_tokens_override=max_tokens,
         owner_user_id=owner_id,
         owner_aliases=owner_aliases,
+        model_override=_QUICK_MODE_MODEL if detail_mode == "quick" else None,
     )
     await _reply_answer(update, context, answer)
 
@@ -864,6 +920,7 @@ async def handle_summary(
         )
         return
 
+    await _send_typing(update, context)
     if detail_mode == "detailed":
         chat_limit = 50
         per_chat_messages = 3
@@ -900,6 +957,7 @@ async def handle_summary(
         max_tokens_override=max_tokens,
         owner_user_id=owner_id,
         owner_aliases=owner_aliases,
+        model_override=_QUICK_MODE_MODEL if detail_mode == "quick" else None,
     )
     await _reply_answer(update, context, answer)
 
@@ -978,6 +1036,7 @@ async def handle_message(
     # 0.5 Natural-language mentions/replies triage mode.
     mention_days = _extract_mentions_window_days(question)
     if mention_days is not None:
+        await _send_typing(update, context)
         detail_mode = "detailed" if "detail" in question.lower() else "quick"
         owner_id = _resolve_owner_user_id(update, context)
         aliases = _resolve_owner_mention_aliases(update, context)
@@ -1018,6 +1077,7 @@ async def handle_message(
             max_tokens_override=max_tokens,
             owner_user_id=owner_id,
             owner_aliases=aliases,
+            model_override=_QUICK_MODE_MODEL if detail_mode == "quick" else None,
         )
         await _reply_answer(update, context, answer)
         await audit.log(
@@ -1037,6 +1097,7 @@ async def handle_message(
     # 0.6 Natural-language unanswered/open-questions mode.
     bd_days = _extract_open_questions_window_days(question)
     if bd_days is not None:
+        await _send_typing(update, context)
         detail_mode = "detailed" if "detail" in question.lower() else "quick"
         owner_id = _resolve_owner_user_id(update, context)
         owner_aliases = _resolve_owner_mention_aliases(update, context)
@@ -1077,6 +1138,7 @@ async def handle_message(
             max_tokens_override=max_tokens,
             owner_user_id=owner_id,
             owner_aliases=owner_aliases,
+            model_override=_QUICK_MODE_MODEL if detail_mode == "quick" else None,
         )
         await _reply_answer(update, context, answer)
         await audit.log(
@@ -1092,15 +1154,25 @@ async def handle_message(
         )
         return
 
-    # 1. Get chat list + extract intent
-    max_intent_chats = context.bot_data.get("max_intent_chats")
-    chat_list_limit = (
-        max_intent_chats
-        if isinstance(max_intent_chats, int) and max_intent_chats > 0
-        else None
-    )
-    chat_list = await search.get_chat_list(limit=chat_list_limit)
-    intent = await llm.extract_query_intent(question, chat_list)
+    # 1. Get chat list + extract intent (with fast-path shortcut)
+    fast_intent = _try_recent_summary_fast_path(question)
+    if fast_intent is not None:
+        intent = fast_intent
+        logger.debug("Fast-path intent: days_back=%s", intent.days_back)
+    else:
+        max_intent_chats = context.bot_data.get("max_intent_chats")
+        chat_list_limit = (
+            max_intent_chats
+            if isinstance(max_intent_chats, int) and max_intent_chats > 0
+            else None
+        )
+        # Overlap chat list fetch with typing indicator
+        chat_list_task = asyncio.create_task(
+            search.get_chat_list(limit=chat_list_limit)
+        )
+        await _send_typing(update, context)
+        chat_list = await chat_list_task
+        intent = await llm.extract_query_intent(question, chat_list)
 
     recent_summary_default = context.bot_data.get(
         "recent_summary_default_chat_count", 20
@@ -1183,7 +1255,8 @@ async def handle_message(
             if scan.flagged:
                 injection_warnings_count += len(scan.warnings)
 
-    # 5. Ask Claude
+    # 5. Ask Claude (re-send typing — it expires after ~5s)
+    await _send_typing(update, context)
     context_max_chars = (
         recent_summary_context_max_chars if recent_summary_mode else 8000
     )

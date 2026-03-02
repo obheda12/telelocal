@@ -327,6 +327,7 @@ class ClaudeAssistant:
         max_tokens_override: Optional[int] = None,
         owner_user_id: Optional[int] = None,
         owner_aliases: Optional[List[str]] = None,
+        model_override: Optional[str] = None,
     ) -> str:
         """Send a question with context to Claude and return the response.
 
@@ -339,6 +340,7 @@ class ClaudeAssistant:
         """
         await self._enforce_rate_limit()
 
+        effective_model = model_override if model_override else self._model
         system_prompt = self._load_system_prompt()
         try:
             context_max_chars = int(context_max_chars)
@@ -374,7 +376,7 @@ class ClaudeAssistant:
             )
 
         response = await self._client.messages.create(
-            model=self._model,
+            model=effective_model,
             max_tokens=max_tokens,
             temperature=self._temperature,
             system=system_prompt,
@@ -393,6 +395,13 @@ class ClaudeAssistant:
         # Track tokens
         self._synthesis_input_tokens += response.usage.input_tokens
         self._synthesis_output_tokens += response.usage.output_tokens
+        if model_override:
+            logger.debug(
+                "Synthesis used override %s (%d in / %d out)",
+                model_override,
+                response.usage.input_tokens,
+                response.usage.output_tokens,
+            )
 
         return response.content[0].text
 

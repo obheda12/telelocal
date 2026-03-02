@@ -12,8 +12,10 @@ from querybot.handlers import (
     _parse_bd_args,
     _parse_window_and_detail_args,
     _get_sync_status_context,
+    _QUICK_MODE_MODEL,
     _sanitize_telegram_html,
     _split_message,
+    _try_recent_summary_fast_path,
     handle_bd,
     handle_iam,
     handle_message,
@@ -301,7 +303,7 @@ def _make_handler_context(
     """Build mock objects for handler tests."""
     update = MagicMock()
     update.effective_user.id = 12345
-    update.message.text = "What happened yesterday?"
+    update.message.text = "What did the team discuss yesterday?"
     update.message.reply_text = AsyncMock()
 
     mock_search = AsyncMock()
@@ -329,6 +331,7 @@ def _make_handler_context(
     mock_validator.validate.return_value = InputValidationResult(valid=True)
 
     context = MagicMock()
+    context.bot = AsyncMock()
     context.bot_data = {
         "owner_id": 12345,
         "search": mock_search,
@@ -951,3 +954,235 @@ class TestSyncStatusContext:
         reply_text = update.message.reply_text.call_args[0][0]
         assert "initial sync is still in progress" in reply_text
         mock_llm.query.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Typing indicators
+# ---------------------------------------------------------------------------
+
+
+class TestTypingIndicators:
+    @pytest.mark.asyncio
+    async def test_bd_sends_typing(self):
+        """handle_bd should send a typing indicator before processing."""
+        result = SearchResult(
+            message_id=1, chat_id=1, chat_title="Chat",
+            sender_name="User", timestamp="2024-01-15T10:00:00Z",
+            text="Update", score=1.0,
+        )
+        update, context, mock_search, mock_llm, _ = _make_handler_context(
+            search_results=[result], llm_answer="Briefing",
+        )
+        context.args = []
+
+        await handle_bd(update, context)
+
+        context.bot.send_chat_action.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_mentions_sends_typing(self):
+        """handle_mentions should send a typing indicator."""
+        result = SearchResult(
+            message_id=1, chat_id=1, chat_title="Chat",
+            sender_name="User", timestamp="2024-01-15T10:00:00Z",
+            text="@owner check this", score=1.0,
+        )
+        update, context, mock_search, mock_llm, _ = _make_handler_context(
+            search_results=[result], llm_answer="Triage",
+        )
+        context.args = ["1d"]
+        update.effective_user.username = "owner"
+
+        await handle_mentions(update, context)
+
+        context.bot.send_chat_action.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_handle_message_sends_typing(self):
+        """handle_message main path should send typing indicators."""
+        result = SearchResult(
+            message_id=1, chat_id=1, chat_title="Chat",
+            sender_name="User", timestamp="2024-01-15T10:00:00Z",
+            text="Hello", score=0.9,
+        )
+        update, context, mock_search, mock_llm, _ = _make_handler_context(
+            search_results=[result], llm_answer="Answer",
+            intent=QueryIntent(search_terms="hello", chat_ids=[1]),
+        )
+        update.message.text = "What did User say about hello?"
+
+        await handle_message(update, context)
+
+        context.bot.send_chat_action.assert_called()
+
+
+# ---------------------------------------------------------------------------
+# Model routing (quick → Haiku, detailed → Sonnet)
+# ---------------------------------------------------------------------------
+
+
+class TestModelRouting:
+    @pytest.mark.asyncio
+    async def test_bd_quick_uses_haiku(self):
+        """quick mode /bd should pass model_override=Haiku to llm.query()."""
+        result = SearchResult(
+            message_id=1, chat_id=1, chat_title="Chat",
+            sender_name="User", timestamp="2024-01-15T10:00:00Z",
+            text="Status update", score=1.0,
+        )
+        update, context, mock_search, mock_llm, _ = _make_handler_context(
+            search_results=[result], llm_answer="Briefing",
+        )
+        context.args = ["1d", "quick"]
+
+        await handle_bd(update, context)
+
+        llm_kwargs = mock_llm.query.call_args.kwargs
+        assert llm_kwargs["model_override"] == _QUICK_MODE_MODEL
+
+    @pytest.mark.asyncio
+    async def test_bd_detailed_uses_sonnet(self):
+        """detailed mode /bd should not pass model_override (uses default Sonnet)."""
+        result = SearchResult(
+            message_id=1, chat_id=1, chat_title="Chat",
+            sender_name="User", timestamp="2024-01-15T10:00:00Z",
+            text="Status update", score=1.0,
+        )
+        update, context, mock_search, mock_llm, _ = _make_handler_context(
+            search_results=[result], llm_answer="Briefing",
+        )
+        context.args = ["1d", "detailed"]
+
+        await handle_bd(update, context)
+
+        llm_kwargs = mock_llm.query.call_args.kwargs
+        assert llm_kwargs["model_override"] is None
+
+    @pytest.mark.asyncio
+    async def test_mentions_quick_uses_haiku(self):
+        """quick mode /mentions should pass model_override=Haiku."""
+        result = SearchResult(
+            message_id=1, chat_id=1, chat_title="Chat",
+            sender_name="User", timestamp="2024-01-15T10:00:00Z",
+            text="@owner check", score=1.0,
+        )
+        update, context, mock_search, mock_llm, _ = _make_handler_context(
+            search_results=[result], llm_answer="Triage",
+        )
+        context.args = ["1d", "quick"]
+        update.effective_user.username = "owner"
+
+        await handle_mentions(update, context)
+
+        llm_kwargs = mock_llm.query.call_args.kwargs
+        assert llm_kwargs["model_override"] == _QUICK_MODE_MODEL
+
+    @pytest.mark.asyncio
+    async def test_free_text_never_uses_model_override(self):
+        """Free-text handle_message main path should NOT pass model_override."""
+        result = SearchResult(
+            message_id=1, chat_id=1, chat_title="Chat",
+            sender_name="Alice", timestamp="2024-01-15T10:00:00Z",
+            text="Deployment tomorrow", score=0.9,
+        )
+        update, context, mock_search, mock_llm, _ = _make_handler_context(
+            search_results=[result], llm_answer="Alice mentioned deployment.",
+            intent=QueryIntent(search_terms="deployment", chat_ids=[1]),
+        )
+        update.message.text = "What did Alice say about deployment?"
+
+        await handle_message(update, context)
+
+        mock_llm.query.assert_called_once()
+        llm_kwargs = mock_llm.query.call_args.kwargs
+        assert "model_override" not in llm_kwargs or llm_kwargs.get("model_override") is None
+
+
+# ---------------------------------------------------------------------------
+# Fast-path intent extraction
+# ---------------------------------------------------------------------------
+
+
+class TestFastPathIntentExtraction:
+    def test_whats_new_matches(self):
+        """'what's new' should match fast-path with 3 days."""
+        intent = _try_recent_summary_fast_path("what's new")
+        assert intent is not None
+        assert intent.days_back == 3
+
+    def test_catch_me_up_matches(self):
+        """'catch me up' should match fast-path with 3 days."""
+        intent = _try_recent_summary_fast_path("catch me up")
+        assert intent is not None
+        assert intent.days_back == 3
+
+    def test_anything_new_matches(self):
+        """'anything new' should match fast-path with 3 days."""
+        intent = _try_recent_summary_fast_path("anything new?")
+        assert intent is not None
+        assert intent.days_back == 3
+
+    def test_what_did_i_miss_matches(self):
+        """'what did I miss' should match fast-path with 3 days."""
+        intent = _try_recent_summary_fast_path("what did I miss")
+        assert intent is not None
+        assert intent.days_back == 3
+
+    def test_summarize_everything_matches(self):
+        """'summarize everything' should match fast-path with 7 days."""
+        intent = _try_recent_summary_fast_path("summarize everything")
+        assert intent is not None
+        assert intent.days_back == 7
+
+    def test_full_overview_matches(self):
+        """'full overview' should match fast-path with 7 days."""
+        intent = _try_recent_summary_fast_path("give me a full overview")
+        assert intent is not None
+        assert intent.days_back == 7
+
+    def test_specific_chat_falls_through(self):
+        """Questions targeting a specific chat should NOT match fast-path."""
+        intent = _try_recent_summary_fast_path("what's new in the engineering chat")
+        assert intent is None
+
+    def test_specific_sender_falls_through(self):
+        """Questions about a specific sender should NOT match fast-path."""
+        intent = _try_recent_summary_fast_path("what's new from Alice")
+        assert intent is None
+
+    def test_about_topic_falls_through(self):
+        """Questions about a specific topic should NOT match fast-path."""
+        intent = _try_recent_summary_fast_path("what's new about the deployment")
+        assert intent is None
+
+    def test_said_falls_through(self):
+        """Questions with 'said' should NOT match fast-path."""
+        intent = _try_recent_summary_fast_path("what's new that Bob said")
+        assert intent is None
+
+    def test_no_match_returns_none(self):
+        """Unrelated questions should return None."""
+        intent = _try_recent_summary_fast_path("tell me about the budget")
+        assert intent is None
+
+    @pytest.mark.asyncio
+    async def test_fast_path_skips_haiku_in_pipeline(self):
+        """Fast-path questions should skip extract_query_intent and get_chat_list."""
+        result = SearchResult(
+            message_id=1, chat_id=1, chat_title="Chat",
+            sender_name="User", timestamp="2024-01-15T10:00:00Z",
+            text="Latest update", score=1.0,
+        )
+        update, context, mock_search, mock_llm, _ = _make_handler_context(
+            search_results=[result], llm_answer="Summary of recent events.",
+            intent=QueryIntent(search_terms="ignored"),
+        )
+        update.message.text = "what's new"
+
+        await handle_message(update, context)
+
+        # Fast-path should skip Haiku intent extraction and chat list fetch
+        mock_llm.extract_query_intent.assert_not_called()
+        mock_search.get_chat_list.assert_not_called()
+        # But should still call LLM for synthesis
+        mock_llm.query.assert_called_once()
