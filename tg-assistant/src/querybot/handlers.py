@@ -529,7 +529,8 @@ async def _reply_chunks(
             await update.message.reply_text(chunk, parse_mode=ParseMode.HTML)
         except Exception:
             logger.debug("HTML parse failed for chunk, retrying as plain text")
-            await update.message.reply_text(chunk)
+            plain = re.sub(r"<[^>]+>", "", chunk)
+            await update.message.reply_text(plain)
 
     if pending:
         context.user_data[_PENDING_RESPONSE_CHUNKS_KEY] = pending
@@ -757,7 +758,7 @@ async def handle_mentions(
 
     days, detail_mode, parse_err = _parse_window_and_detail_args(
         context.args or [],
-        default_days=1,
+        default_days=3,
     )
     if parse_err:
         await update.message.reply_text(
