@@ -146,7 +146,7 @@ class MessageSearch:
             # Escape LIKE metacharacters to prevent pattern injection
             escaped = sender_name.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             params.append(f"%{escaped}%")
-            conditions.append(f"{alias}.sender_name ILIKE ${len(params)} ESCAPE '\\\\'")
+            conditions.append(f"{alias}.sender_name ILIKE ${len(params)} ESCAPE '\\'")
 
         if days_back is not None and days_back > 0:
             cutoff = datetime.now(timezone.utc) - timedelta(days=days_back)
@@ -522,7 +522,7 @@ class MessageSearch:
                 escaped = alias.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
                 params.append(f"%{escaped}%")
                 alias_clauses.append(
-                    f"COALESCE(m.text, '') ILIKE ${len(params)} ESCAPE '\\\\'"
+                    f"COALESCE(m.text, '') ILIKE ${len(params)} ESCAPE '\\'"
                 )
             mention_text_clause = "(" + " OR ".join(alias_clauses) + ")"
 
