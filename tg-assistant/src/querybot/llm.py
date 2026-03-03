@@ -283,17 +283,43 @@ class ClaudeAssistant:
 
     @staticmethod
     def _inject_chat_links(text: str, link_map: Dict[str, str]) -> str:
-        """Replace <b>ChatName</b> with <a href="url"><b>ChatName</b></a>.
+        """Inject clickable deep links around chat names in LLM output.
 
-        Skips names that are already inside an <a> tag.
+        Handles <b>Name</b>, bare Name, and case variations.
+        Processes longest names first to avoid partial matches.
         """
-        for name, url in link_map.items():
-            target = f"<b>{name}</b>"
-            replacement = f'<a href="{url}"><b>{name}</b></a>'
-            # Avoid double-wrapping if already linked
-            linked = f'"{url}"><b>{name}</b></a>'
-            if linked not in text:
-                text = text.replace(target, replacement)
+        sorted_items = sorted(
+            link_map.items(), key=lambda kv: len(kv[0]), reverse=True,
+        )
+        for name, url in sorted_items:
+            escaped = re.escape(name)
+
+            # Already linked for this name? skip
+            if re.search(
+                r'<a\s+href="[^"]*">\s*<b>' + escaped + r'</b>',
+                text, re.IGNORECASE,
+            ):
+                continue
+
+            # Replace bolded form: <b>Name</b> → <a href><b>Name</b></a>
+            bold_pat = re.compile(
+                r'<b>(' + escaped + r')</b>', re.IGNORECASE,
+            )
+            text = bold_pat.sub(
+                lambda m, u=url: f'<a href="{u}"><b>{m.group(1)}</b></a>',
+                text,
+            )
+
+            # Also replace bare occurrences not inside HTML tags.
+            # (?<![>\w]) prevents matching right after a tag like <b>.
+            # (?![<\w]) prevents matching right before a closing tag.
+            bare_pat = re.compile(
+                r'(?<![>\w])(' + escaped + r')(?![<\w])', re.IGNORECASE,
+            )
+            text = bare_pat.sub(
+                lambda m, u=url: f'<a href="{u}"><b>{m.group(1)}</b></a>',
+                text,
+            )
         return text
 
     @staticmethod
