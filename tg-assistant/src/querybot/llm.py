@@ -23,8 +23,10 @@ import json
 import logging
 import time
 from collections import OrderedDict
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from zoneinfo import ZoneInfo
 
 import anthropic
 
@@ -244,10 +246,26 @@ class ClaudeAssistant:
     # Context formatting (data minimisation)
     # ------------------------------------------------------------------
 
+    _ET = ZoneInfo("America/New_York")
+
     @staticmethod
     def _escape_xml(text: str) -> str:
         """Escape < and > in untrusted text to prevent XML tag injection."""
         return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    @staticmethod
+    def _to_et(iso_ts: str) -> str:
+        """Convert an ISO-format UTC timestamp to ET (e.g. '2025-03-01 14:30 ET')."""
+        if not iso_ts:
+            return iso_ts
+        try:
+            dt = datetime.fromisoformat(iso_ts)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            et_dt = dt.astimezone(ClaudeAssistant._ET)
+            return et_dt.strftime("%Y-%m-%d %H:%M ET")
+        except (ValueError, TypeError):
+            return iso_ts  # pass through if unparseable
 
     @staticmethod
     def _format_entry(
@@ -272,7 +290,8 @@ class ClaudeAssistant:
         if r.is_topic_message:
             thread_tags.append("topic_message=true")
         tag_suffix = f" ({', '.join(thread_tags)})" if thread_tags else ""
-        return f"[{r.timestamp}] {safe_sender}{tag_suffix}: {safe_text}\n"
+        ts_et = ClaudeAssistant._to_et(r.timestamp)
+        return f"[{ts_et}] {safe_sender}{tag_suffix}: {safe_text}\n"
 
     @staticmethod
     def _format_context(

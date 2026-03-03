@@ -893,6 +893,7 @@ async def handle_mentions(
         "3. <b>FYI</b> — informational, no action needed.\n\n"
         f"{item_instruction}\n"
         "Order items within each section by urgency. "
+        "All times are in ET (Eastern Time). "
         "Be thorough — list every qualifying item, don't summarize them away."
     )
     answer = await llm.query(
@@ -1008,7 +1009,8 @@ async def handle_bd(
         "- <i>italic</i> for status/context\n"
         "- Use line breaks and bullets for legibility but don't over-space\n"
         "- NEVER use --- or *** or === as separators or horizontal rules. Do not output them.\n"
-        "- Timestamps only when they add context (e.g. how long someone's been waiting)\n\n"
+        "- Timestamps only when they add context (e.g. how long someone's been waiting)\n"
+        "- All times are in ET (Eastern Time). Use ET when displaying any time.\n\n"
         "IMPORTANT: Separate each section with the exact marker ===SECTION=== on its own line. "
         "Each section will be sent as its own message."
     )
@@ -1106,6 +1108,7 @@ async def handle_summary(
         "Format for Telegram readability:\n"
         "- Category headers: <code><b>ALL CAPS</b></code> — no emojis in headers\n"
         "- Keep each chat entry short enough to scan on a phone\n"
+        "- All times are in ET (Eastern Time). Use ET when displaying any time.\n"
         "- NEVER use --- or *** or === as separators\n\n"
         "Be thorough across all chats — the goal is to never fall behind on anything.\n\n"
         "IMPORTANT: Separate each category with the exact marker ===SECTION=== on its own line. "
@@ -1237,6 +1240,7 @@ async def handle_message(
             "3. <b>FYI</b> — informational, no action needed.\n\n"
             f"{item_instruction}\n"
             "Order items within each section by urgency. "
+            "All times are in ET (Eastern Time). "
             "Be thorough — list every qualifying item, don't summarize them away."
         )
         answer = await llm.query(
@@ -1292,7 +1296,8 @@ async def handle_message(
             "These are questions that appear not to have a reply from me yet. "
             "Use sections: <b>Need My Reply</b>, <b>Could Wait</b>, <b>Low Priority</b>. "
             "Include as many concrete items as possible (not just one), each with chat, sender, timestamp, "
-            "and key question text. If you cannot list everything due length, add a final line saying "
+            "and key question text. All times are in ET (Eastern Time). "
+            "If you cannot list everything due length, add a final line saying "
             "'More items not shown'."
         )
         answer = await llm.query(
