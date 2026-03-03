@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from collections import OrderedDict
 from datetime import datetime, timezone
@@ -269,6 +270,32 @@ class ClaudeAssistant:
             return f"=== {safe_title} | {link} ===\n"
         return f"=== {safe_title} ===\n"
 
+    # Pattern to strip common org prefixes from chat titles
+    _COUNTERPARTY_RE = re.compile(
+        r"^(?:Monad(?:\s+Foundation)?\s*(?:<>|x|×|—|-)\s*)", re.IGNORECASE,
+    )
+
+    @classmethod
+    def _counterparty_name(cls, title: str) -> Optional[str]:
+        """Extract the counterparty portion of a chat title, if any."""
+        stripped = cls._COUNTERPARTY_RE.sub("", title).strip()
+        return stripped if stripped and stripped != title else None
+
+    @staticmethod
+    def _inject_chat_links(text: str, link_map: Dict[str, str]) -> str:
+        """Replace <b>ChatName</b> with <a href="url"><b>ChatName</b></a>.
+
+        Skips names that are already inside an <a> tag.
+        """
+        for name, url in link_map.items():
+            target = f"<b>{name}</b>"
+            replacement = f'<a href="{url}"><b>{name}</b></a>'
+            # Avoid double-wrapping if already linked
+            linked = f'"{url}"><b>{name}</b></a>'
+            if linked not in text:
+                text = text.replace(target, replacement)
+        return text
+
     @staticmethod
     def _to_et(iso_ts: str) -> str:
         """Convert an ISO-format UTC timestamp to ET (e.g. '2025-03-01 14:30 ET')."""
@@ -499,26 +526,21 @@ class ClaudeAssistant:
                 + "- In context rows, owner_message=true marks the owner's own messages.\n\n"
             )
 
-        # Build explicit chat-name → deep-link mapping for the LLM
-        chat_link_note = ""
-        seen_links: dict[int, tuple[str, str]] = {}
+        # Build name → URL mapping for deterministic post-processing
+        chat_link_map: Dict[str, str] = {}
+        seen_chat_ids: set[int] = set()
         for r in context_results:
-            if r.chat_id not in seen_links:
-                link = self._chat_deep_link(r.chat_id)
-                if link:
-                    title = r.chat_title or "Unknown Chat"
-                    seen_links[r.chat_id] = (title, link)
-        if seen_links:
-            mapping_lines = "\n".join(
-                f'- "{title}" → <a href="{url}"><b>{self._escape_xml(title)}</b></a>'
-                for title, url in seen_links.values()
-            )
-            chat_link_note = (
-                "Chat link rendering: when you mention a chat by name "
-                "in your response, render it as a clickable hyperlink "
-                "using the exact HTML below:\n"
-                f"{mapping_lines}\n\n"
-            )
+            if r.chat_id in seen_chat_ids:
+                continue
+            link = self._chat_deep_link(r.chat_id)
+            if link:
+                seen_chat_ids.add(r.chat_id)
+                title = r.chat_title or "Unknown Chat"
+                # Map both the full title and the counterparty-only form
+                chat_link_map[title] = link
+                cp = self._counterparty_name(title)
+                if cp:
+                    chat_link_map[cp] = link
 
         response = await self._client.messages.create(
             model=effective_model,
@@ -531,7 +553,6 @@ class ClaudeAssistant:
                     "content": (
                         f"{identity_block}"
                         f"Context:\n{context}\n\n"
-                        f"{chat_link_note}"
                         f"Question: {user_question}"
                     ),
                 }
@@ -549,7 +570,10 @@ class ClaudeAssistant:
                 response.usage.output_tokens,
             )
 
-        return response.content[0].text
+        answer = response.content[0].text
+        if chat_link_map:
+            answer = self._inject_chat_links(answer, chat_link_map)
+        return answer
 
     # ------------------------------------------------------------------
     # Cost tracking
