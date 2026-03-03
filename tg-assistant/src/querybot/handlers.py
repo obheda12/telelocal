@@ -1062,12 +1062,25 @@ async def handle_summary(
         return
 
     prompt = (
-        f"Create a {detail_mode} summary for the last {days} day(s) across my chats. "
-        "Go chat by chat and give me detailed contextual information about what happened — "
-        "key decisions, developments, who said what, blockers, and any action items for me. "
-        "Start with the highest-priority chats first (ones with action items or important updates), "
-        "then cover the rest. Include chat name, sender, and relevant context for each point. "
-        "Be thorough — I want to understand everything that happened so I never fall behind."
+        f"Summarize what happened across my chats in the last {days} day(s). "
+        "This is for a BD person managing many partner and team chats.\n\n"
+        "Group chats into categories based on what actually happened in the messages. "
+        "Choose categories dynamically based on the content — examples might include: "
+        "Deals & Partnerships, Launches & Milestones, Integrations & Technical, "
+        "Inbound & New Opportunities, People & Team Changes, Marketing & Amplification, "
+        "Stalled / Needs Unblocking — but use whatever categories fit the actual content. "
+        "Skip quiet chats entirely — don't mention them.\n\n"
+        "Within each category, number the chats. For each chat give:\n"
+        "- <b>Bold team name</b> (drop 'Monad <> ' / 'Monad x ' prefix, just the counterparty)\n"
+        "- 1-3 lines of what happened: who said what, key developments, specifics\n"
+        "- Only include timestamps when staleness matters\n\n"
+        "Format for Telegram readability:\n"
+        "- Category headers: <code><b>ALL CAPS</b></code> — no emojis in headers\n"
+        "- Keep each chat entry short enough to scan on a phone\n"
+        "- NEVER use --- or *** or === as separators\n\n"
+        "Be thorough across all chats — the goal is to never fall behind on anything.\n\n"
+        "IMPORTANT: Separate each category with the exact marker ===SECTION=== on its own line. "
+        "Each category will be sent as its own message."
     )
     owner_id = _resolve_owner_user_id(update, context)
     owner_aliases = _resolve_owner_mention_aliases(update, context)
@@ -1081,7 +1094,7 @@ async def handle_summary(
         model_override=_QUICK_MODE_MODEL if detail_mode == "quick" else None,
         min_messages_per_group=2,
     )
-    await _reply_answer(update, context, answer)
+    await _reply_sections(update, context, answer)
 
     await audit.log(
         "querybot",
