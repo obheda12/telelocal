@@ -499,12 +499,25 @@ class ClaudeAssistant:
                 + "- In context rows, owner_message=true marks the owner's own messages.\n\n"
             )
 
+        # Build explicit chat-name → deep-link mapping for the LLM
         chat_link_note = ""
-        if "| https://t.me/" in context:
+        seen_links: dict[int, tuple[str, str]] = {}
+        for r in context_results:
+            if r.chat_id not in seen_links:
+                link = self._chat_deep_link(r.chat_id)
+                if link:
+                    title = r.chat_title or "Unknown Chat"
+                    seen_links[r.chat_id] = (title, link)
+        if seen_links:
+            mapping_lines = "\n".join(
+                f'- "{title}" → <a href="{url}"><b>{self._escape_xml(title)}</b></a>'
+                for title, url in seen_links.values()
+            )
             chat_link_note = (
-                "Chat link rendering: context headers with a URL "
-                "(=== Name | URL ===) should use "
-                '<a href="URL"><b>Name</b></a> in your response.\n\n'
+                "Chat link rendering: when you mention a chat by name "
+                "in your response, render it as a clickable hyperlink "
+                "using the exact HTML below:\n"
+                f"{mapping_lines}\n\n"
             )
 
         response = await self._client.messages.create(
