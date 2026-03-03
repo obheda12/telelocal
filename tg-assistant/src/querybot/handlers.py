@@ -593,6 +593,19 @@ async def _reply_answer(
     await _reply_chunks(update, context, chunks)
 
 
+def _clean_response(text: str) -> str:
+    """Post-process LLM output before sending to Telegram.
+
+    - Strips ``---`` / ``***`` / ``===`` horizontal-rule lines
+    - Replaces ``&lt;&gt;`` artifacts with ``—`` for readability
+    """
+    # Remove horizontal rule lines (---, ***, ===, with optional spaces)
+    text = re.sub(r"^\s*[-*=]{3,}\s*$", "", text, flags=re.MULTILINE)
+    # Collapse runs of 3+ blank lines down to 2
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
 async def _reply_sections(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -606,11 +619,14 @@ async def _reply_sections(
     """
     sections = [s.strip() for s in answer.split("===SECTION===") if s.strip()]
     if len(sections) <= 1:
-        await _reply_answer(update, context, answer)
+        await _reply_answer(update, context, _clean_response(answer))
         return
 
     for section in sections:
-        sanitized = _sanitize_telegram_html(section)
+        cleaned = _clean_response(section)
+        if not cleaned:
+            continue
+        sanitized = _sanitize_telegram_html(cleaned)
         for chunk in _split_message(sanitized):
             try:
                 await update.message.reply_text(
@@ -964,12 +980,17 @@ async def handle_bd(
         "worth knowing about.\n\n"
         "QUIET section:\n"
         "Collapse into a single line — just list the chat names.\n\n"
+        "Chat name rules:\n"
+        "- Chat titles are usually 'Monad <> CompanyName' or similar. "
+        "Drop the 'Monad <> ' / 'Monad x ' prefix — just use the counterparty name "
+        "(e.g. 'Composable Security' not 'Monad Foundation <> Composable Security'). "
+        "If the chat name doesn't follow that pattern, use it as-is.\n\n"
         "Formatting rules:\n"
         "- Section headers: <blockquote><b>ALL CAPS HEADER</b></blockquote>\n"
         "- <b>bold</b> for chat names and Action: labels\n"
         "- <i>italic</i> for status/context\n"
-        "- Use line breaks for legibility but don't over-space\n"
-        "- No horizontal rules, no --- separators, no decorative lines\n"
+        "- Use line breaks and bullets for legibility but don't over-space\n"
+        "- NEVER use --- or *** or === as separators or horizontal rules. Do not output them.\n"
         "- Timestamps only when they add context (e.g. how long someone's been waiting)\n\n"
         "IMPORTANT: Separate each section with the exact marker ===SECTION=== on its own line. "
         "Each section will be sent as its own message."
