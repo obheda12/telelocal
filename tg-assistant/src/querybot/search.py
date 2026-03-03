@@ -431,11 +431,18 @@ class MessageSearch:
 
         This powers "summarize freshest chats" style requests where breadth
         across chats is more important than per-message relevance ranking.
+
+        When *per_chat_messages* is ``0``, all messages within the timeframe
+        are returned (no per-chat cap).
         """
         chat_limit = min(self._max_fresh_chats, max(1, int(chat_limit)))
+        uncapped = int(per_chat_messages) <= 0
         per_chat_messages = max(1, int(per_chat_messages))
 
-        params: List[Any] = [chat_limit, per_chat_messages]
+        params: List[Any] = [chat_limit]
+        if not uncapped:
+            params.append(per_chat_messages)
+            rn_param_idx = len(params)
         freshness_condition = ""
         message_condition = ""
         if days_back is not None and days_back > 0:
@@ -444,6 +451,8 @@ class MessageSearch:
             cutoff_idx = len(params)
             freshness_condition = f"AND m.timestamp >= ${cutoff_idx}"
             message_condition = f"AND m.timestamp >= ${cutoff_idx}"
+
+        rn_filter = "" if uncapped else f"WHERE rn <= ${rn_param_idx}"
 
         sql = f"""
             WITH freshest AS (
@@ -472,7 +481,7 @@ class MessageSearch:
                    timestamp, text,
                    1.0 AS score
             FROM ranked
-            WHERE rn <= $2
+            {rn_filter}
             ORDER BY last_ts DESC, timestamp DESC
         """
         rows = await self._pool.fetch(sql, *params)

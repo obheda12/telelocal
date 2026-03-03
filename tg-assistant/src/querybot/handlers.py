@@ -319,34 +319,35 @@ def _parse_bd_args(
 def _bd_scaling_params(days: int, detail_mode: str) -> Tuple[int, int, int]:
     """Return ``(per_chat_messages, context_max_chars, max_tokens)`` for /bd.
 
-    Scales retrieval depth with the timeframe so longer windows pull more
-    messages per chat, and the context/token budget grows to match.
+    Retrieval is always timeframe-based (per_chat=0 means all messages in
+    window).  ``detailed`` gets a larger token budget for comprehensive
+    writeups; ``quick`` gets a smaller budget, forcing the LLM to filter
+    and be more concise.
     """
+    per_chat = 0  # all messages in the timeframe, no artificial cap
     if detail_mode == "detailed":
-        per_chat = min(75, 15 + days * 8)            # 1d→23, 3d→39, 7d→71
         ctx = min(200_000, 80_000 + days * 18_000)   # 1d→98k, 3d→134k, 7d→200k
         tokens = min(8_000, 4_096 + days * 500)      # 1d→4596, 3d→5596, 7d→7596
     else:
-        per_chat = min(40, 8 + days * 4)             # 1d→12, 3d→20, 7d→36
-        ctx = min(120_000, 48_000 + days * 10_000)   # 1d→58k, 3d→78k, 7d→118k
-        tokens = min(4_096, 2_800 + days * 200)      # 1d→3000, 3d→3400, 7d→4096
+        ctx = min(200_000, 80_000 + days * 18_000)   # same context so LLM sees everything
+        tokens = min(4_096, 2_048 + days * 300)      # 1d→2348, 3d→2948, 7d→4096
     return per_chat, ctx, tokens
 
 
 def _mentions_scaling_params(days: int, detail_mode: str) -> Tuple[int, int, int]:
     """Return ``(limit, context_max_chars, max_tokens)`` for mentions queries.
 
-    Scales retrieval depth with the timeframe so longer windows pull more
-    results and the context/token budget grows to match.
+    Limit is set high (500) to effectively return all mentions in the
+    timeframe.  ``detailed`` gets more tokens for fuller per-item context;
+    ``quick`` gets fewer tokens, producing a tighter summary.
     """
+    limit = 500  # effectively uncapped — get all mentions in the timeframe
     if detail_mode == "detailed":
-        limit = min(300, 80 + days * 30)              # 1d→110, 3d→170, 7d→290
-        ctx = min(160_000, 60_000 + days * 14_000)     # 1d→74k, 3d→102k, 7d→158k
-        tokens = min(6_000, 3_000 + days * 400)        # 1d→3400, 3d→4200, 7d→5800
+        ctx = min(200_000, 80_000 + days * 18_000)     # 1d→98k, 3d→134k, 7d→200k
+        tokens = min(8_000, 4_096 + days * 500)        # 1d→4596, 3d→5596, 7d→7596
     else:
-        limit = min(160, 40 + days * 15)               # 1d→55, 3d→85, 7d→145
-        ctx = min(80_000, 30_000 + days * 7_000)       # 1d→37k, 3d→51k, 7d→79k
-        tokens = min(4_096, 2_000 + days * 200)        # 1d→2200, 3d→2600, 7d→3400
+        ctx = min(200_000, 80_000 + days * 18_000)     # same context for good triage
+        tokens = min(4_096, 2_048 + days * 300)        # 1d→2348, 3d→2948, 7d→4096
     return limit, ctx, tokens
 
 
@@ -360,12 +361,11 @@ def _summary_scaling_params(
     messages and context/token budgets scale with the timeframe.
     """
     chats = 250  # let the timeframe be the filter, not an arbitrary chat cap
+    per_chat = 0  # 0 = all messages in the timeframe, no per-chat cap
     if detail_mode == "detailed":
-        per_chat = min(75, 15 + days * 8)               # 1d→23, 3d→39, 7d→71
         ctx = 200_000                                    # max context always
         tokens = min(16_000, 8_000 + days * 1_000)      # 1d→9k, 3d→11k, 7d→15k
     else:
-        per_chat = min(40, 8 + days * 4)                # 1d→12, 3d→20, 7d→36
         ctx = min(200_000, 80_000 + days * 18_000)      # 1d→98k, 3d→134k, 7d→200k
         tokens = min(8_000, 4_096 + days * 500)         # 1d→4596, 3d→5596, 7d→7596
     return chats, per_chat, ctx, tokens
@@ -961,14 +961,8 @@ async def handle_bd(
         await update.message.reply_text(no_results_msg)
         return
 
-    prompt = (
-        f"Give me a {detail_mode} briefing of my {chat_count} freshest chats "
-        f"from the last {days} day(s).\n\n"
-        "Start with a one-line triage count (e.g. '5 need response · 8 updates · 12 quiet').\n\n"
-        "BREADTH IS CRITICAL — scan every single chat and do not miss anything that "
-        "needs my response. Even borderline cases should be included. "
-        "I'd rather see a false positive than miss something.\n\n"
-        "Scale detail with importance:\n\n"
+    # NEEDS RESPONSE always gets full detail — it's the most important section.
+    needs_response_instruction = (
         "NEEDS RESPONSE section:\n"
         "These are teams/people that need something from me — a reply, a decision, "
         "a review, a deliverable, a connection, anything. Not just questions.\n"
@@ -978,10 +972,29 @@ async def handle_bd(
         "Then end each team with <b>Action Items:</b> followed by a numbered list "
         "of the specific things I need to do for them. A single team can have "
         "multiple action items if the conversation warrants it.\n"
-        "This section needs enough depth that I can act without going back to read the chat.\n\n"
-        "UPDATES section:\n"
-        "Use bullets. Brief status + what changed. Only include chats with something "
-        "worth knowing about.\n\n"
+        "This section needs enough depth that I can act without going back to read the chat."
+    )
+    if detail_mode == "detailed":
+        updates_instruction = (
+            "UPDATES section:\n"
+            "Use bullets. Status + what changed + enough context to understand why it matters."
+        )
+    else:
+        updates_instruction = (
+            "UPDATES section:\n"
+            "Use bullets. Chat name + one-line status."
+        )
+
+    prompt = (
+        f"Give me a {detail_mode} briefing of my {chat_count} freshest chats "
+        f"from the last {days} day(s).\n\n"
+        "Start with a one-line triage count (e.g. '5 need response · 8 updates · 12 quiet').\n\n"
+        "BREADTH IS CRITICAL — scan every single chat and do not miss anything that "
+        "needs my response. Even borderline cases should be included. "
+        "I'd rather see a false positive than miss something.\n\n"
+        "Scale detail with importance:\n\n"
+        f"{needs_response_instruction}\n\n"
+        f"{updates_instruction}\n\n"
         "QUIET section:\n"
         "Collapse into a single line — just list the chat names.\n\n"
         "Chat name rules:\n"
@@ -1061,6 +1074,25 @@ async def handle_summary(
         await update.message.reply_text(no_results_msg)
         return
 
+    if detail_mode == "detailed":
+        depth_instruction = (
+            "Within each category, number the chats. For each chat give:\n"
+            "- <b>Bold team name</b> (drop 'Monad <> ' / 'Monad x ' prefix, just the counterparty)\n"
+            "- Full context: who said what, key developments, specifics, "
+            "relevant quotes, and implications\n"
+            "- Include timestamps when they add context\n"
+            "- The goal is comprehensive — I should understand exactly what "
+            "happened without reading the original chats"
+        )
+    else:
+        depth_instruction = (
+            "Within each category, number the chats. For each chat give:\n"
+            "- <b>Bold team name</b> (drop 'Monad <> ' / 'Monad x ' prefix, just the counterparty)\n"
+            "- 1-2 lines of what happened: key development + who's involved\n"
+            "- Only include timestamps when staleness matters\n"
+            "- Filter aggressively — only include chats with meaningful activity"
+        )
+
     prompt = (
         f"Summarize what happened across my chats in the last {days} day(s). "
         "This is for a BD person managing many partner and team chats.\n\n"
@@ -1070,10 +1102,7 @@ async def handle_summary(
         "Inbound & New Opportunities, People & Team Changes, Marketing & Amplification, "
         "Stalled / Needs Unblocking — but use whatever categories fit the actual content. "
         "Skip quiet chats entirely — don't mention them.\n\n"
-        "Within each category, number the chats. For each chat give:\n"
-        "- <b>Bold team name</b> (drop 'Monad <> ' / 'Monad x ' prefix, just the counterparty)\n"
-        "- 1-3 lines of what happened: who said what, key developments, specifics\n"
-        "- Only include timestamps when staleness matters\n\n"
+        f"{depth_instruction}\n\n"
         "Format for Telegram readability:\n"
         "- Category headers: <code><b>ALL CAPS</b></code> — no emojis in headers\n"
         "- Keep each chat entry short enough to scan on a phone\n"
