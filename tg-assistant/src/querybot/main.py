@@ -95,12 +95,13 @@ def load_config(path: Path = _DEFAULT_CONFIG_PATH) -> Dict[str, Any]:
 
 
 def build_owner_filter(owner_id: int) -> filters.BaseFilter:
-    """Return a ``python-telegram-bot`` filter that passes only for *owner_id*.
+    """Return a ``python-telegram-bot`` filter that passes only for *owner_id*
+    in private chats.
 
-    Messages from any other user are silently dropped — no error reply
-    is sent (to avoid revealing the bot's existence to strangers).
+    Messages from any other user — or from the owner in groups/channels —
+    are silently dropped to prevent leaking responses into shared chats.
     """
-    return filters.User(user_id=owner_id)
+    return filters.User(user_id=owner_id) & filters.ChatType.PRIVATE
 
 
 # ---------------------------------------------------------------------------

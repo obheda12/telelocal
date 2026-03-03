@@ -161,7 +161,7 @@ class ClaudeAssistant:
         default intent (full question as search terms) on any failure.
         """
         formatted_chats = "\n".join(
-            f"{c['chat_id']} | {c.get('title', 'Unknown')} | {c.get('chat_type', '')}"
+            f"{c['chat_id']} | {ClaudeAssistant._escape_xml((c.get('title') or 'Unknown').replace(chr(10), ' ')[:80])} | {c.get('chat_type', '')}"
             for c in chat_list
         )
         # Use .replace() instead of .format() — chat titles may contain braces
