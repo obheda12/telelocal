@@ -915,10 +915,17 @@ async def handle_bd(
 
     prompt = (
         f"Give me a {detail_mode} briefing of my {chat_count} freshest chats "
-        f"from the last {days} day(s). "
-        "For each chat, capture the current status, key updates, and whether I need to act. "
-        "Prioritize chats with actionable items first. "
-        "Keep each chat summary concise and include timestamps for important events."
+        f"from the last {days} day(s).\n\n"
+        "Start with a one-line triage count (e.g. '5 need response · 8 updates · 12 quiet').\n\n"
+        "Then list chats numbered, prioritizing actionable ones first. "
+        "Scale detail with importance:\n"
+        "- Chats needing my response: full context — who's waiting, what they need, "
+        "timestamps, and an explicit 'Action:' line so I know exactly what to do.\n"
+        "- Chats with notable updates: brief status + what changed.\n"
+        "- Quiet chats (no meaningful activity): collapse into a single line at the end "
+        "(just list the chat names, don't summarize individually).\n\n"
+        "The goal is to save me time — give me enough context to act on important chats "
+        "without wading through low-priority noise."
     )
     owner_id = _resolve_owner_user_id(update, context)
     owner_aliases = _resolve_owner_mention_aliases(update, context)
