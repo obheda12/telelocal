@@ -894,7 +894,11 @@ async def handle_mentions(
         f"{item_instruction}\n"
         "Order items within each section by urgency. "
         "All times are in ET (Eastern Time). "
-        "Be thorough — list every qualifying item, don't summarize them away."
+        "Be thorough — list every qualifying item, don't summarize them away.\n\n"
+        "Formatting rules:\n"
+        "- Section headers MUST use exactly: <code><b>HEADER</b></code>\n"
+        "- <b>bold</b> for chat names\n"
+        "- NEVER use --- or *** or === as separators"
     )
     answer = await llm.query(
         prompt,
