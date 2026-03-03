@@ -214,14 +214,13 @@ def build_application(config: Dict[str, Any]) -> Application:
         # Surface the primary UX commands directly in Telegram's command menu.
         try:
             commands = [
+                BotCommand("bd", "Chat triage briefing (1d|3d|1w, 10-100, quick|detailed)"),
+                BotCommand("mentions", "Triage your mentions (1d|3d|1w, quick|detailed)"),
+                BotCommand("summary", "Cross-chat recap (1d|3d|1w, quick|detailed)"),
                 BotCommand("iam", "Show/set owner identity binding"),
-                BotCommand("summary", "Time-window recap (1d, 3d, 1w)"),
-                BotCommand("mentions", "Items likely needing your reply"),
-                BotCommand("bd", "Likely unanswered open questions"),
-                BotCommand("fresh", "Snapshot of freshest chats"),
-                BotCommand("more", "Continue previous long response"),
                 BotCommand("stats", "Sync and usage statistics"),
-                BotCommand("help", "Show command usage"),
+                BotCommand("more", "Continue previous long response"),
+                BotCommand("help", "All commands, parameters, and tips"),
             ]
             await app.bot.set_my_commands(commands)
             await app.bot.set_my_commands(

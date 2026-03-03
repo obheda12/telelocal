@@ -316,20 +316,59 @@ def _parse_bd_args(
     return chat_count, days, detail_mode, None
 
 
-def _detail_params(
-    detail_mode: str,
-    *,
-    quick_limit: int,
-    detailed_limit: int,
-    quick_ctx_chars: int,
-    detailed_ctx_chars: int,
-    quick_max_tokens: int,
-    detailed_max_tokens: int,
-) -> Tuple[int, int, int]:
-    """Return ``(result_limit, context_max_chars, max_tokens)`` by detail mode."""
+def _bd_scaling_params(days: int, detail_mode: str) -> Tuple[int, int, int]:
+    """Return ``(per_chat_messages, context_max_chars, max_tokens)`` for /bd.
+
+    Scales retrieval depth with the timeframe so longer windows pull more
+    messages per chat, and the context/token budget grows to match.
+    """
     if detail_mode == "detailed":
-        return detailed_limit, detailed_ctx_chars, detailed_max_tokens
-    return quick_limit, quick_ctx_chars, quick_max_tokens
+        per_chat = min(75, 15 + days * 8)            # 1d→23, 3d→39, 7d→71
+        ctx = min(200_000, 80_000 + days * 18_000)   # 1d→98k, 3d→134k, 7d→200k
+        tokens = min(8_000, 4_096 + days * 500)      # 1d→4596, 3d→5596, 7d→7596
+    else:
+        per_chat = min(40, 8 + days * 4)             # 1d→12, 3d→20, 7d→36
+        ctx = min(120_000, 48_000 + days * 10_000)   # 1d→58k, 3d→78k, 7d→118k
+        tokens = min(4_096, 2_800 + days * 200)      # 1d→3000, 3d→3400, 7d→4096
+    return per_chat, ctx, tokens
+
+
+def _mentions_scaling_params(days: int, detail_mode: str) -> Tuple[int, int, int]:
+    """Return ``(limit, context_max_chars, max_tokens)`` for mentions queries.
+
+    Scales retrieval depth with the timeframe so longer windows pull more
+    results and the context/token budget grows to match.
+    """
+    if detail_mode == "detailed":
+        limit = min(300, 80 + days * 30)              # 1d→110, 3d→170, 7d→290
+        ctx = min(160_000, 60_000 + days * 14_000)     # 1d→74k, 3d→102k, 7d→158k
+        tokens = min(6_000, 3_000 + days * 400)        # 1d→3400, 3d→4200, 7d→5800
+    else:
+        limit = min(160, 40 + days * 15)               # 1d→55, 3d→85, 7d→145
+        ctx = min(80_000, 30_000 + days * 7_000)       # 1d→37k, 3d→51k, 7d→79k
+        tokens = min(4_096, 2_000 + days * 200)        # 1d→2200, 3d→2600, 7d→3400
+    return limit, ctx, tokens
+
+
+def _summary_scaling_params(
+    days: int, detail_mode: str,
+) -> Tuple[int, int, int, int]:
+    """Return ``(chat_limit, per_chat, context_max_chars, max_tokens)`` for /summary.
+
+    Scales retrieval depth with the timeframe so longer windows pull more
+    chats/messages and the context/token budget grows to match.
+    """
+    if detail_mode == "detailed":
+        chats = min(100, 30 + days * 10)               # 1d→40, 3d→60, 7d→100
+        per_chat = min(50, 10 + days * 5)               # 1d→15, 3d→25, 7d→45
+        ctx = min(160_000, 60_000 + days * 14_000)      # 1d→74k, 3d→102k, 7d→158k
+        tokens = min(6_000, 3_000 + days * 400)         # 1d→3400, 3d→4200, 7d→5800
+    else:
+        chats = min(50, 15 + days * 5)                  # 1d→20, 3d→30, 7d→50
+        per_chat = min(25, 5 + days * 3)                # 1d→8, 3d→14, 7d→26→capped 25
+        ctx = min(80_000, 30_000 + days * 7_000)        # 1d→37k, 3d→51k, 7d→79k
+        tokens = min(4_096, 2_000 + days * 200)         # 1d→2200, 3d→2600, 7d→3400
+    return chats, per_chat, ctx, tokens
 
 
 def _resolve_owner_mention_aliases(
@@ -680,27 +719,29 @@ async def handle_help(
 ) -> None:
     """Handle the ``/help`` command."""
     help_text = (
-        "Available commands:\n"
-        "  /start - Welcome message\n"
-        "  /help  - This help text\n"
-        "  /iam   - Show/set owner identity binding\n"
-        "  /stats - Sync and usage statistics\n\n"
-        "  /bd [1d|3d|1w] [10|25|50|100] [quick|detailed] - Freshest chat briefing with status and actions\n"
-        "  /mentions [1d|3d|1w] [quick|detailed] - Items likely needing your reply\n"
-        "  /summary  [1d|3d|1w] [quick|detailed] - Cross-chat time-window recap\n"
-        "  /more - Continue the previous long response\n\n"
-        "How to use:\n"
-        "  Just send me a question in plain text! I'll search your "
-        "synced Telegram messages and answer using Claude.\n\n"
-        "Tips for effective queries:\n"
-        '  - Identity binding: "/iam 123456789 @yourusername"\n'
-        '  - Chat briefing: "/bd 3d 50 quick"\n'
-        '  - Mentions triage: "/mentions 1d quick"\n'
-        '  - Daily recap: "/summary 1d quick"\n'
-        '  - Be specific: "What did Alice say about the project deadline?"\n'
-        '  - Ask for summaries: "Summarise the discussion in DevChat yesterday"\n'
-        '  - Search by topic: "Find messages about Python deployment"\n'
-        '  - Cross-chat brief: "Quick synopsis of the 50 freshest chats"'
+        "Briefing commands:\n"
+        "  /bd [1d|3d|1w] [10|25|50|100] [quick|detailed]\n"
+        "      Chat triage — needs response / watch / quiet\n"
+        "  /mentions [1d|3d|1w] [quick|detailed]\n"
+        "      Mention triage — Act Now / Reply Soon / FYI\n"
+        "  /summary [1d|3d|1w] [quick|detailed]\n"
+        "      Cross-chat recap — Action Items / Key Updates / Quiet\n\n"
+        "Parameters (all optional, any order):\n"
+        "  Time window: 1d, 3d, 1w (default varies by command)\n"
+        "  Detail mode: quick (concise, faster) or detailed (thorough)\n"
+        "  Chat count (/bd only): 10, 25, 50, 100\n\n"
+        "Utility commands:\n"
+        "  /iam [@alias1 ...] — bind your identity for accurate mention detection\n"
+        "  /stats — sync status and LLM usage\n"
+        "  /more — continue a long response that was auto-chunked\n\n"
+        "Natural language queries:\n"
+        "  Just send a plain-text question — I'll search your synced\n"
+        "  messages and answer using Claude. Examples:\n"
+        '  "What did Alice say about the project deadline?"\n'
+        '  "Summarise the discussion in DevChat yesterday"\n'
+        '  "Find messages about Python deployment"\n'
+        '  "Quick synopsis of the 50 freshest chats"\n'
+        '  "What needs my attention from the past week?"'
     )
     await update.message.reply_text(help_text)
 
@@ -770,14 +811,8 @@ async def handle_mentions(
     owner_id = _resolve_owner_user_id(update, context)
     normalized_aliases = _resolve_owner_mention_aliases(update, context)
 
-    limit, context_max_chars, max_tokens = _detail_params(
-        detail_mode,
-        quick_limit=80,
-        detailed_limit=160,
-        quick_ctx_chars=12000,
-        detailed_ctx_chars=22000,
-        quick_max_tokens=1200,
-        detailed_max_tokens=2600,
+    limit, context_max_chars, max_tokens = _mentions_scaling_params(
+        days, detail_mode,
     )
     results = await search.mentions_needing_attention(
         owner_id=owner_id,
@@ -792,14 +827,25 @@ async def handle_mentions(
         )
         return
 
+    if detail_mode == "detailed":
+        item_instruction = (
+            "Use bullet points for each item. Include: chat name, who said it, "
+            "what they need, enough context to act, and timestamp."
+        )
+    else:
+        item_instruction = (
+            "Use bullet points. Each bullet: chat name + one-line context."
+        )
     prompt = (
-        f"Create a {detail_mode} triage briefing for the last {days} day(s). "
-        "These messages are likely direct mentions or replies to me. "
-        "Prioritize what needs my action. "
-        "Use sections: "
-        "<b>Act Now</b>, <b>Reply Soon</b>, <b>FYI</b>. "
-        "For each item include chat, sender, and timestamp. "
-        "If a section has no items, state 'none'."
+        f"Triage my mentions/replies from the last {days} day(s). "
+        "Put what needs my response FIRST — I need to see that immediately.\n\n"
+        "Sections (in this order, omit empty ones):\n"
+        "1. <b>Act Now</b> — someone is waiting on my reply or I committed to something.\n"
+        "2. <b>Reply Soon</b> — relevant to me but not time-sensitive.\n"
+        "3. <b>FYI</b> — informational, no action needed.\n\n"
+        f"{item_instruction}\n"
+        "Order items within each section by urgency. "
+        "Be thorough — list every qualifying item, don't summarize them away."
     )
     answer = await llm.query(
         prompt,
@@ -809,6 +855,7 @@ async def handle_mentions(
         owner_user_id=owner_id,
         owner_aliases=normalized_aliases,
         model_override=_QUICK_MODE_MODEL if detail_mode == "quick" else None,
+        min_messages_per_group=2,
     )
     await _reply_answer(update, context, answer)
 
@@ -853,10 +900,8 @@ async def handle_bd(
         return
 
     await _send_typing(update, context)
-    per_chat_messages, context_max_chars, max_tokens = (
-        (4, 48000, 4096)
-        if detail_mode == "detailed"
-        else (2, 32000, 2800)
+    per_chat_messages, context_max_chars, max_tokens = _bd_scaling_params(
+        days, detail_mode,
     )
     results = await search.recent_chat_summary_context(
         chat_limit=chat_count,
@@ -868,12 +913,29 @@ async def handle_bd(
         await update.message.reply_text(no_results_msg)
         return
 
+    if detail_mode == "detailed":
+        detail_instruction = (
+            "Use bullet points. For each chat in NEEDS RESPONSE and WATCH, include: "
+            "chat name, who's waiting, what they need, enough context to act, "
+            "and timestamp."
+        )
+    else:
+        detail_instruction = (
+            "Use bullet points. Each bullet: chat name + one-line context."
+        )
     prompt = (
-        f"Give me a {detail_mode} briefing of my {chat_count} freshest chats "
-        f"from the last {days} day(s). "
-        "For each chat, capture the current status, key updates, and whether I need to act. "
-        "Prioritize chats with actionable items first. "
-        "Keep each chat summary concise and include timestamps for important events."
+        f"Triage my {chat_count} freshest chats from the last {days} day(s). "
+        "Put what needs my response FIRST — I need to see that immediately.\n\n"
+        "Sections (in this order, omit empty ones):\n"
+        "1. <b>NEEDS RESPONSE</b> — someone is waiting on me, open question directed "
+        "at me, or a commitment I made. These require my action.\n"
+        "2. <b>WATCH</b> — active discussion relevant to me, but no immediate action "
+        "needed right now.\n"
+        "3. <b>QUIET</b> — no significant activity. Group into a single line "
+        "(just list chat names).\n\n"
+        f"{detail_instruction}\n"
+        "Order items within each section by urgency. "
+        "Be thorough — list every qualifying chat, don't summarize them away."
     )
     owner_id = _resolve_owner_user_id(update, context)
     owner_aliases = _resolve_owner_mention_aliases(update, context)
@@ -885,6 +947,7 @@ async def handle_bd(
         owner_user_id=owner_id,
         owner_aliases=owner_aliases,
         model_override=_QUICK_MODE_MODEL if detail_mode == "quick" else None,
+        min_messages_per_group=2,
     )
     await _reply_answer(update, context, answer)
 
@@ -922,16 +985,9 @@ async def handle_summary(
         return
 
     await _send_typing(update, context)
-    if detail_mode == "detailed":
-        chat_limit = 50
-        per_chat_messages = 3
-        context_max_chars = 24000
-        max_tokens = 2800
-    else:
-        chat_limit = 25
-        per_chat_messages = 2
-        context_max_chars = 14000
-        max_tokens = 1400
+    chat_limit, per_chat_messages, context_max_chars, max_tokens = (
+        _summary_scaling_params(days, detail_mode)
+    )
 
     results = await search.recent_chat_summary_context(
         chat_limit=chat_limit,
@@ -943,11 +999,27 @@ async def handle_summary(
         await update.message.reply_text(no_results_msg)
         return
 
+    if detail_mode == "detailed":
+        item_instruction = (
+            "Use bullet points. For ACTION ITEMS include: chat name, "
+            "what's needed, who's involved, and timestamp. "
+            "For KEY UPDATES give a per-chat breakdown: chat name as a header, "
+            "then the key points — make it easy to scan chat by chat."
+        )
+    else:
+        item_instruction = (
+            "Use bullet points. Each bullet: chat name + one-line summary."
+        )
     prompt = (
-        f"Create a {detail_mode} summary for the last {days} day(s) across my chats. "
-        "Focus on what changed, key decisions, blockers, and action items for me. "
-        "Start with the highest-priority actions first, then major updates. "
-        "Include chat, sender, and time for each important point."
+        f"Summarize my chats from the last {days} day(s). "
+        "Lead with anything requiring my action.\n\n"
+        "Sections (in this order, omit empty ones):\n"
+        "1. <b>ACTION ITEMS</b> — decisions or tasks requiring my follow-up.\n"
+        "2. <b>KEY UPDATES</b> — significant developments across chats.\n"
+        "3. <b>QUIET</b> — chats with no meaningful activity "
+        "(group into a single line, just list chat names).\n\n"
+        f"{item_instruction}\n"
+        "Be thorough — the goal is to never fall behind on any chat."
     )
     owner_id = _resolve_owner_user_id(update, context)
     owner_aliases = _resolve_owner_mention_aliases(update, context)
@@ -959,6 +1031,7 @@ async def handle_summary(
         owner_user_id=owner_id,
         owner_aliases=owner_aliases,
         model_override=_QUICK_MODE_MODEL if detail_mode == "quick" else None,
+        min_messages_per_group=2,
     )
     await _reply_answer(update, context, answer)
 
@@ -1041,14 +1114,8 @@ async def handle_message(
         detail_mode = "detailed" if "detail" in question.lower() else "quick"
         owner_id = _resolve_owner_user_id(update, context)
         aliases = _resolve_owner_mention_aliases(update, context)
-        limit, context_max_chars, max_tokens = _detail_params(
-            detail_mode,
-            quick_limit=80,
-            detailed_limit=160,
-            quick_ctx_chars=12000,
-            detailed_ctx_chars=22000,
-            quick_max_tokens=1200,
-            detailed_max_tokens=2600,
+        limit, context_max_chars, max_tokens = _mentions_scaling_params(
+            mention_days, detail_mode,
         )
         mention_results = await search.mentions_needing_attention(
             owner_id=owner_id,
@@ -1062,14 +1129,25 @@ async def handle_message(
             )
             return
 
+        if detail_mode == "detailed":
+            item_instruction = (
+                "Use bullet points for each item. Include: chat name, who said it, "
+                "what they need, enough context to act, and timestamp."
+            )
+        else:
+            item_instruction = (
+                "Use bullet points. Each bullet: chat name + one-line context."
+            )
         prompt = (
-            f"Create a {detail_mode} triage briefing for the last {mention_days} day(s). "
-            "These messages are likely direct mentions or replies to me. "
-            "Prioritize what needs my action. "
-            "Use sections: "
-            "<b>Act Now</b>, <b>Reply Soon</b>, <b>FYI</b>. "
-            "For each item include chat, sender, and timestamp. "
-            "If a section has no items, state 'none'."
+            f"Triage my mentions/replies from the last {mention_days} day(s). "
+            "Put what needs my response FIRST — I need to see that immediately.\n\n"
+            "Sections (in this order, omit empty ones):\n"
+            "1. <b>Act Now</b> — someone is waiting on my reply or I committed to something.\n"
+            "2. <b>Reply Soon</b> — relevant to me but not time-sensitive.\n"
+            "3. <b>FYI</b> — informational, no action needed.\n\n"
+            f"{item_instruction}\n"
+            "Order items within each section by urgency. "
+            "Be thorough — list every qualifying item, don't summarize them away."
         )
         answer = await llm.query(
             prompt,
@@ -1079,6 +1157,7 @@ async def handle_message(
             owner_user_id=owner_id,
             owner_aliases=aliases,
             model_override=_QUICK_MODE_MODEL if detail_mode == "quick" else None,
+            min_messages_per_group=2,
         )
         await _reply_answer(update, context, answer)
         await audit.log(
@@ -1102,14 +1181,8 @@ async def handle_message(
         detail_mode = "detailed" if "detail" in question.lower() else "quick"
         owner_id = _resolve_owner_user_id(update, context)
         owner_aliases = _resolve_owner_mention_aliases(update, context)
-        limit, context_max_chars, max_tokens = _detail_params(
-            detail_mode,
-            quick_limit=80,
-            detailed_limit=160,
-            quick_ctx_chars=12000,
-            detailed_ctx_chars=22000,
-            quick_max_tokens=1200,
-            detailed_max_tokens=2600,
+        limit, context_max_chars, max_tokens = _mentions_scaling_params(
+            bd_days, detail_mode,
         )
         open_questions = await search.open_questions_needing_reply(
             owner_id=owner_id,
@@ -1140,6 +1213,7 @@ async def handle_message(
             owner_user_id=owner_id,
             owner_aliases=owner_aliases,
             model_override=_QUICK_MODE_MODEL if detail_mode == "quick" else None,
+            min_messages_per_group=2,
         )
         await _reply_answer(update, context, answer)
         await audit.log(
@@ -1183,9 +1257,6 @@ async def handle_message(
     )
     recent_summary_per_chat_messages = context.bot_data.get(
         "recent_summary_per_chat_messages", 2
-    )
-    recent_summary_context_max_chars = context.bot_data.get(
-        "recent_summary_context_max_chars", 22000
     )
     recent_chat_target = _extract_recent_chat_summary_target(
         question,
@@ -1258,9 +1329,11 @@ async def handle_message(
 
     # 5. Ask Claude (re-send typing — it expires after ~5s)
     await _send_typing(update, context)
-    context_max_chars = (
-        recent_summary_context_max_chars if recent_summary_mode else 8000
-    )
+    if recent_summary_mode:
+        summary_days = intent.days_back if intent.days_back is not None else 7
+        context_max_chars = min(80_000, 30_000 + summary_days * 7_000)
+    else:
+        context_max_chars = 8000
     owner_id = _resolve_owner_user_id(update, context)
     owner_aliases = _resolve_owner_mention_aliases(update, context)
     answer = await llm.query(
@@ -1269,6 +1342,7 @@ async def handle_message(
         context_max_chars=context_max_chars,
         owner_user_id=owner_id,
         owner_aliases=owner_aliases,
+        min_messages_per_group=2,
     )
 
     # 6. Reply

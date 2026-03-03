@@ -202,7 +202,7 @@ class ClaudeAssistant:
 
             days_back = data.get("days_back")
             if days_back is not None:
-                days_back = max(1, int(days_back))
+                days_back = min(180, max(1, int(days_back)))
 
             search_terms = data.get("search_terms")
             if isinstance(search_terms, list):
@@ -250,11 +250,37 @@ class ClaudeAssistant:
         return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
     @staticmethod
+    def _format_entry(
+        r: SearchResult,
+        per_message_chars: int,
+        owner_user_id: Optional[int],
+    ) -> str:
+        """Format a single search result into a context line."""
+        safe_sender = ClaudeAssistant._escape_xml(r.sender_name or "")
+        safe_text = ClaudeAssistant._escape_xml(r.text or "")
+        if per_message_chars > 0 and len(safe_text) > per_message_chars:
+            safe_text = safe_text[: per_message_chars - 3].rstrip() + "..."
+        thread_tags: List[str] = []
+        if r.sender_id is not None:
+            thread_tags.append(f"sender_id={r.sender_id}")
+        if owner_user_id is not None and r.sender_id == owner_user_id:
+            thread_tags.append("owner_message=true")
+        if r.thread_top_msg_id is not None:
+            thread_tags.append(f"thread={r.thread_top_msg_id}")
+        if r.reply_to_msg_id is not None:
+            thread_tags.append(f"reply_to={r.reply_to_msg_id}")
+        if r.is_topic_message:
+            thread_tags.append("topic_message=true")
+        tag_suffix = f" ({', '.join(thread_tags)})" if thread_tags else ""
+        return f"[{r.timestamp}] {safe_sender}{tag_suffix}: {safe_text}\n"
+
+    @staticmethod
     def _format_context(
         results: List[SearchResult],
         max_chars: int = 8000,
         per_message_chars: int = 320,
         owner_user_id: Optional[int] = None,
+        min_messages_per_group: int = 0,
     ) -> str:
         """Format search results grouped by chat for better LLM comprehension.
 
@@ -262,6 +288,15 @@ class ClaudeAssistant:
         within each group. Wrapped in XML boundary markers with
         ``trust_level="untrusted"`` to clearly separate synced content
         from the system prompt. Truncated to ``max_chars``.
+
+        When *min_messages_per_group* > 0, uses a two-pass approach:
+
+        - **Pass 1**: include up to *min_messages_per_group* messages per
+          chat, guaranteeing every chat is represented.
+        - **Pass 2**: round-robin through remaining messages to fill the
+          budget.
+
+        Default ``0`` preserves the original single-pass behavior.
         """
         if not results:
             return "(No relevant messages found in synced chats.)"
@@ -277,39 +312,91 @@ class ClaudeAssistant:
         ]
         total_len = len(parts[0])
 
-        for (_, chat_title), msgs in chat_groups.items():
-            safe_title = ClaudeAssistant._escape_xml(chat_title)
-            header = f"=== {safe_title} ===\n"
-            if total_len + len(header) > max_chars:
-                break
-            parts.append(header)
-            total_len += len(header)
-
-            for r in msgs:
-                safe_sender = ClaudeAssistant._escape_xml(r.sender_name or "")
-                safe_text = ClaudeAssistant._escape_xml(r.text or "")
-                if per_message_chars > 0 and len(safe_text) > per_message_chars:
-                    safe_text = safe_text[: per_message_chars - 3].rstrip() + "..."
-                thread_tags: List[str] = []
-                if r.sender_id is not None:
-                    thread_tags.append(f"sender_id={r.sender_id}")
-                if owner_user_id is not None and r.sender_id == owner_user_id:
-                    thread_tags.append("owner_message=true")
-                if r.thread_top_msg_id is not None:
-                    thread_tags.append(f"thread={r.thread_top_msg_id}")
-                if r.reply_to_msg_id is not None:
-                    thread_tags.append(f"reply_to={r.reply_to_msg_id}")
-                if r.is_topic_message:
-                    thread_tags.append("topic_message=true")
-                tag_suffix = f" ({', '.join(thread_tags)})" if thread_tags else ""
-                entry = f"[{r.timestamp}] {safe_sender}{tag_suffix}: {safe_text}\n"
-                if total_len + len(entry) > max_chars:
+        if min_messages_per_group <= 0:
+            # Original single-pass behavior
+            for (_, chat_title), msgs in chat_groups.items():
+                safe_title = ClaudeAssistant._escape_xml(chat_title)
+                header = f"=== {safe_title} ===\n"
+                if total_len + len(header) > max_chars:
                     break
-                parts.append(entry)
-                total_len += len(entry)
+                parts.append(header)
+                total_len += len(header)
 
-            parts.append("\n")
-            total_len += 1
+                for r in msgs:
+                    entry = ClaudeAssistant._format_entry(
+                        r, per_message_chars, owner_user_id,
+                    )
+                    if total_len + len(entry) > max_chars:
+                        break
+                    parts.append(entry)
+                    total_len += len(entry)
+
+                parts.append("\n")
+                total_len += 1
+        else:
+            # Two-pass breadth-first: guarantee every chat gets representation
+            #
+            # Pass 1 — up to min_messages_per_group per chat
+            remaining: OrderedDict[tuple[int, str], List[SearchResult]] = OrderedDict()
+            for key, msgs in chat_groups.items():
+                _, chat_title = key
+                safe_title = ClaudeAssistant._escape_xml(chat_title)
+                header = f"=== {safe_title} ===\n"
+                if total_len + len(header) > max_chars:
+                    break
+                parts.append(header)
+                total_len += len(header)
+
+                included = 0
+                leftover: List[SearchResult] = []
+                for r in msgs:
+                    if included < min_messages_per_group:
+                        entry = ClaudeAssistant._format_entry(
+                            r, per_message_chars, owner_user_id,
+                        )
+                        if total_len + len(entry) > max_chars:
+                            leftover.append(r)
+                            leftover.extend(msgs[msgs.index(r) + 1 :])
+                            break
+                        parts.append(entry)
+                        total_len += len(entry)
+                        included += 1
+                    else:
+                        leftover.append(r)
+                if leftover:
+                    remaining[key] = leftover
+
+                parts.append("\n")
+                total_len += 1
+
+            # Pass 2 — round-robin remaining messages across chats
+            while remaining and total_len < max_chars:
+                exhausted_keys: List[tuple[int, str]] = []
+                for key, msgs in remaining.items():
+                    if not msgs:
+                        exhausted_keys.append(key)
+                        continue
+                    r = msgs.pop(0)
+                    _, chat_title = key
+                    safe_title = ClaudeAssistant._escape_xml(chat_title)
+                    # Re-emit the header so the message lands under the right chat
+                    header = f"=== {safe_title} ===\n"
+                    entry = ClaudeAssistant._format_entry(
+                        r, per_message_chars, owner_user_id,
+                    )
+                    if total_len + len(header) + len(entry) > max_chars:
+                        exhausted_keys.append(key)
+                        continue
+                    parts.append(header)
+                    total_len += len(header)
+                    parts.append(entry)
+                    total_len += len(entry)
+                    parts.append("\n")
+                    total_len += 1
+                    if not msgs:
+                        exhausted_keys.append(key)
+                for key in exhausted_keys:
+                    remaining.pop(key, None)
 
         parts.append("</message_context>")
         return "".join(parts)
@@ -328,6 +415,7 @@ class ClaudeAssistant:
         owner_user_id: Optional[int] = None,
         owner_aliases: Optional[List[str]] = None,
         model_override: Optional[str] = None,
+        min_messages_per_group: int = 0,
     ) -> str:
         """Send a question with context to Claude and return the response.
 
@@ -358,6 +446,7 @@ class ClaudeAssistant:
             context_results,
             max_chars=context_max_chars,
             owner_user_id=owner_user_id,
+            min_messages_per_group=min_messages_per_group,
         )
         identity_lines: List[str] = []
         if owner_user_id is not None:

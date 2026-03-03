@@ -7,14 +7,17 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from querybot.handlers import (
+    _bd_scaling_params,
     _extract_mentions_window_days,
     _extract_open_questions_window_days,
+    _mentions_scaling_params,
     _parse_bd_args,
     _parse_window_and_detail_args,
     _get_sync_status_context,
     _QUICK_MODE_MODEL,
     _sanitize_telegram_html,
     _split_message,
+    _summary_scaling_params,
     _try_recent_summary_fast_path,
     handle_bd,
     handle_iam,
@@ -613,7 +616,7 @@ class TestHandleMessage:
             owner_id=12345,
             mention_aliases=["@owner"],
             days_back=7,
-            limit=80,
+            limit=145,  # _mentions_scaling_params(7, "quick") → min(160, 40+105)
         )
         mock_llm.extract_query_intent.assert_not_called()
         assert mock_audit.log.call_args[0][1] == "query_mentions"
@@ -640,7 +643,7 @@ class TestHandleMessage:
         mock_search.open_questions_needing_reply.assert_called_once_with(
             owner_id=12345,
             days_back=7,
-            limit=80,
+            limit=145,  # _mentions_scaling_params(7, "quick") → min(160, 40+105)
         )
         mock_llm.extract_query_intent.assert_not_called()
         assert mock_audit.log.call_args[0][1] == "query_bd"
@@ -686,10 +689,13 @@ class TestScaffoldCommandHandlers:
         await handle_mentions(update, context)
 
         mock_search.mentions_needing_attention.assert_called_once()
+        call_kwargs = mock_search.mentions_needing_attention.call_args.kwargs
+        assert call_kwargs["limit"] == 55  # min(160, 40+15)
         mock_llm.query.assert_called_once()
         llm_kwargs = mock_llm.query.call_args.kwargs
-        assert llm_kwargs["context_max_chars"] == 12000
-        assert llm_kwargs["max_tokens_override"] == 1200
+        assert llm_kwargs["context_max_chars"] == 37000  # min(80k, 30k+7k)
+        assert llm_kwargs["max_tokens_override"] == 2200  # min(4096, 2k+200)
+        assert llm_kwargs["min_messages_per_group"] == 2
         assert mock_audit.log.call_args[0][1] == "command_mentions"
 
     @pytest.mark.asyncio
@@ -713,13 +719,14 @@ class TestScaffoldCommandHandlers:
 
         mock_search.recent_chat_summary_context.assert_called_once_with(
             chat_limit=50,
-            per_chat_messages=2,
+            per_chat_messages=36,
             days_back=7,
         )
         mock_llm.query.assert_called_once()
         llm_kwargs = mock_llm.query.call_args.kwargs
-        assert llm_kwargs["context_max_chars"] == 32000
-        assert llm_kwargs["max_tokens_override"] == 2800
+        assert llm_kwargs["context_max_chars"] == 118000
+        assert llm_kwargs["max_tokens_override"] == 4096
+        assert llm_kwargs["min_messages_per_group"] == 2
         assert mock_audit.log.call_args[0][1] == "command_bd"
 
     @pytest.mark.asyncio
@@ -742,13 +749,14 @@ class TestScaffoldCommandHandlers:
         await handle_summary(update, context)
 
         mock_search.recent_chat_summary_context.assert_called_once_with(
-            chat_limit=50,
-            per_chat_messages=3,
+            chat_limit=60,       # min(100, 30+30)
+            per_chat_messages=25,  # min(50, 10+15)
             days_back=3,
         )
         llm_kwargs = mock_llm.query.call_args.kwargs
-        assert llm_kwargs["context_max_chars"] == 24000
-        assert llm_kwargs["max_tokens_override"] == 2800
+        assert llm_kwargs["context_max_chars"] == 102000  # min(160k, 60k+42k)
+        assert llm_kwargs["max_tokens_override"] == 4200   # min(6k, 3k+1200)
+        assert llm_kwargs["min_messages_per_group"] == 2
         assert mock_audit.log.call_args[0][1] == "command_summary"
 
     @pytest.mark.asyncio
@@ -772,12 +780,13 @@ class TestScaffoldCommandHandlers:
 
         mock_search.recent_chat_summary_context.assert_called_once_with(
             chat_limit=25,
-            per_chat_messages=2,
+            per_chat_messages=20,
             days_back=3,
         )
         llm_kwargs = mock_llm.query.call_args.kwargs
-        assert llm_kwargs["context_max_chars"] == 32000
-        assert llm_kwargs["max_tokens_override"] == 2800
+        assert llm_kwargs["context_max_chars"] == 78000
+        assert llm_kwargs["max_tokens_override"] == 3400
+        assert llm_kwargs["min_messages_per_group"] == 2
         assert mock_audit.log.call_args[0][1] == "command_bd"
 
     @pytest.mark.asyncio
@@ -1186,3 +1195,315 @@ class TestFastPathIntentExtraction:
         mock_search.get_chat_list.assert_not_called()
         # But should still call LLM for synthesis
         mock_llm.query.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# _bd_scaling_params
+# ---------------------------------------------------------------------------
+
+
+class TestBdScalingParams:
+    def test_quick_1d(self):
+        per_chat, ctx, tokens = _bd_scaling_params(1, "quick")
+        assert per_chat == 12    # min(40, 8+4)
+        assert ctx == 58000      # min(120000, 48000+10000)
+        assert tokens == 3000    # min(4096, 2800+200)
+
+    def test_quick_3d(self):
+        per_chat, ctx, tokens = _bd_scaling_params(3, "quick")
+        assert per_chat == 20    # min(40, 8+12)
+        assert ctx == 78000      # min(120000, 48000+30000)
+        assert tokens == 3400    # min(4096, 2800+600)
+
+    def test_quick_7d(self):
+        per_chat, ctx, tokens = _bd_scaling_params(7, "quick")
+        assert per_chat == 36    # min(40, 8+28)
+        assert ctx == 118000     # min(120000, 48000+70000)
+        assert tokens == 4096    # min(4096, 2800+1400) → capped
+
+    def test_detailed_1d(self):
+        per_chat, ctx, tokens = _bd_scaling_params(1, "detailed")
+        assert per_chat == 23    # min(75, 15+8)
+        assert ctx == 98000      # min(200000, 80000+18000)
+        assert tokens == 4596    # min(8000, 4096+500)
+
+    def test_detailed_3d(self):
+        per_chat, ctx, tokens = _bd_scaling_params(3, "detailed")
+        assert per_chat == 39    # min(75, 15+24)
+        assert ctx == 134000     # min(200000, 80000+54000)
+        assert tokens == 5596    # min(8000, 4096+1500)
+
+    def test_detailed_7d(self):
+        per_chat, ctx, tokens = _bd_scaling_params(7, "detailed")
+        assert per_chat == 71    # min(75, 15+56)
+        assert ctx == 200000     # min(200000, 80000+126000) → capped
+        assert tokens == 7596    # min(8000, 4096+3500)
+
+
+# ---------------------------------------------------------------------------
+# _format_context breadth-first (min_messages_per_group)
+# ---------------------------------------------------------------------------
+
+
+class TestFormatContextBreadthFirst:
+    @staticmethod
+    def _make_results(groups):
+        """Build SearchResult lists from a dict of {chat_title: count}."""
+        results = []
+        for idx, (title, count) in enumerate(groups.items()):
+            for j in range(count):
+                results.append(
+                    SearchResult(
+                        message_id=idx * 100 + j,
+                        chat_id=idx + 1,
+                        chat_title=title,
+                        sender_name=f"User{j}",
+                        timestamp=f"2024-01-15T{10 + j}:00:00Z",
+                        text=f"msg-{title}-{j}",
+                        score=1.0,
+                    )
+                )
+        return results
+
+    def test_all_chats_represented(self):
+        """With min_messages_per_group, every chat should appear even with tight budget."""
+        results = self._make_results({"ChatA": 10, "ChatB": 10, "ChatC": 10})
+        context = ClaudeAssistant._format_context(
+            results, max_chars=2000, min_messages_per_group=2,
+        )
+        assert "=== ChatA ===" in context
+        assert "=== ChatB ===" in context
+        assert "=== ChatC ===" in context
+
+    def test_zero_preserves_single_pass(self):
+        """min_messages_per_group=0 should behave like the original single-pass."""
+        results = self._make_results({"ChatA": 5, "ChatB": 5})
+        ctx_zero = ClaudeAssistant._format_context(
+            results, max_chars=50000, min_messages_per_group=0,
+        )
+        ctx_default = ClaudeAssistant._format_context(
+            results, max_chars=50000,
+        )
+        assert ctx_zero == ctx_default
+
+    def test_single_pass_may_drop_later_chats(self):
+        """Single-pass with tight budget should drop later chats entirely."""
+        # ChatA has many long messages, ChatB should get dropped
+        results = []
+        for j in range(20):
+            results.append(
+                SearchResult(
+                    message_id=j,
+                    chat_id=1,
+                    chat_title="ChatA",
+                    sender_name="User",
+                    timestamp="2024-01-15T10:00:00Z",
+                    text="x" * 200,
+                    score=1.0,
+                )
+            )
+        for j in range(5):
+            results.append(
+                SearchResult(
+                    message_id=100 + j,
+                    chat_id=2,
+                    chat_title="ChatB",
+                    sender_name="User",
+                    timestamp="2024-01-15T10:00:00Z",
+                    text="hello",
+                    score=1.0,
+                )
+            )
+
+        ctx_single = ClaudeAssistant._format_context(
+            results, max_chars=2000, min_messages_per_group=0,
+        )
+        # Single-pass: ChatB likely dropped because ChatA ate the budget
+        assert "=== ChatA ===" in ctx_single
+
+        ctx_breadth = ClaudeAssistant._format_context(
+            results, max_chars=2000, min_messages_per_group=1,
+        )
+        # Breadth-first: both chats represented
+        assert "=== ChatA ===" in ctx_breadth
+        assert "=== ChatB ===" in ctx_breadth
+
+
+# ---------------------------------------------------------------------------
+# _mentions_scaling_params
+# ---------------------------------------------------------------------------
+
+
+class TestMentionsScalingParams:
+    def test_quick_1d(self):
+        limit, ctx, tokens = _mentions_scaling_params(1, "quick")
+        assert limit == 55       # min(160, 40+15)
+        assert ctx == 37000      # min(80000, 30000+7000)
+        assert tokens == 2200    # min(4096, 2000+200)
+
+    def test_quick_3d(self):
+        limit, ctx, tokens = _mentions_scaling_params(3, "quick")
+        assert limit == 85       # min(160, 40+45)
+        assert ctx == 51000      # min(80000, 30000+21000)
+        assert tokens == 2600    # min(4096, 2000+600)
+
+    def test_quick_7d(self):
+        limit, ctx, tokens = _mentions_scaling_params(7, "quick")
+        assert limit == 145      # min(160, 40+105)
+        assert ctx == 79000      # min(80000, 30000+49000)
+        assert tokens == 3400    # min(4096, 2000+1400)
+
+    def test_detailed_1d(self):
+        limit, ctx, tokens = _mentions_scaling_params(1, "detailed")
+        assert limit == 110      # min(300, 80+30)
+        assert ctx == 74000      # min(160000, 60000+14000)
+        assert tokens == 3400    # min(6000, 3000+400)
+
+    def test_detailed_3d(self):
+        limit, ctx, tokens = _mentions_scaling_params(3, "detailed")
+        assert limit == 170      # min(300, 80+90)
+        assert ctx == 102000     # min(160000, 60000+42000)
+        assert tokens == 4200    # min(6000, 3000+1200)
+
+    def test_detailed_7d(self):
+        limit, ctx, tokens = _mentions_scaling_params(7, "detailed")
+        assert limit == 290      # min(300, 80+210)
+        assert ctx == 158000     # min(160000, 60000+98000)
+        assert tokens == 5800    # min(6000, 3000+2800)
+
+
+# ---------------------------------------------------------------------------
+# _summary_scaling_params
+# ---------------------------------------------------------------------------
+
+
+class TestSummaryScalingParams:
+    def test_quick_1d(self):
+        chats, per_chat, ctx, tokens = _summary_scaling_params(1, "quick")
+        assert chats == 20       # min(50, 15+5)
+        assert per_chat == 8     # min(25, 5+3)
+        assert ctx == 37000      # min(80000, 30000+7000)
+        assert tokens == 2200    # min(4096, 2000+200)
+
+    def test_quick_3d(self):
+        chats, per_chat, ctx, tokens = _summary_scaling_params(3, "quick")
+        assert chats == 30       # min(50, 15+15)
+        assert per_chat == 14    # min(25, 5+9)
+        assert ctx == 51000      # min(80000, 30000+21000)
+        assert tokens == 2600    # min(4096, 2000+600)
+
+    def test_quick_7d(self):
+        chats, per_chat, ctx, tokens = _summary_scaling_params(7, "quick")
+        assert chats == 50       # min(50, 15+35)
+        assert per_chat == 25    # min(25, 5+21) → capped
+        assert ctx == 79000      # min(80000, 30000+49000)
+        assert tokens == 3400    # min(4096, 2000+1400)
+
+    def test_detailed_1d(self):
+        chats, per_chat, ctx, tokens = _summary_scaling_params(1, "detailed")
+        assert chats == 40       # min(100, 30+10)
+        assert per_chat == 15    # min(50, 10+5)
+        assert ctx == 74000      # min(160000, 60000+14000)
+        assert tokens == 3400    # min(6000, 3000+400)
+
+    def test_detailed_3d(self):
+        chats, per_chat, ctx, tokens = _summary_scaling_params(3, "detailed")
+        assert chats == 60       # min(100, 30+30)
+        assert per_chat == 25    # min(50, 10+15)
+        assert ctx == 102000     # min(160000, 60000+42000)
+        assert tokens == 4200    # min(6000, 3000+1200)
+
+    def test_detailed_7d(self):
+        chats, per_chat, ctx, tokens = _summary_scaling_params(7, "detailed")
+        assert chats == 100      # min(100, 30+70)
+        assert per_chat == 45    # min(50, 10+35)
+        assert ctx == 158000     # min(160000, 60000+98000)
+        assert tokens == 5800    # min(6000, 3000+2800)
+
+
+# ---------------------------------------------------------------------------
+# /mentions passes min_messages_per_group=2
+# ---------------------------------------------------------------------------
+
+
+class TestMentionsBreadthFirst:
+    @pytest.mark.asyncio
+    async def test_mentions_passes_min_messages_per_group(self):
+        result = SearchResult(
+            message_id=1, chat_id=1, chat_title="Ops",
+            sender_name="Alice", timestamp="2024-01-15T10:00:00Z",
+            text="@owner review?", score=1.0,
+        )
+        update, context, mock_search, mock_llm, mock_audit = _make_handler_context(
+            search_results=[result], llm_answer="Act Now: ...",
+        )
+        context.args = ["3d", "detailed"]
+        update.effective_user.username = "owner"
+
+        await handle_mentions(update, context)
+
+        llm_kwargs = mock_llm.query.call_args.kwargs
+        assert llm_kwargs["min_messages_per_group"] == 2
+
+    @pytest.mark.asyncio
+    async def test_mentions_quick_uses_haiku(self):
+        result = SearchResult(
+            message_id=1, chat_id=1, chat_title="Ops",
+            sender_name="Alice", timestamp="2024-01-15T10:00:00Z",
+            text="@owner review?", score=1.0,
+        )
+        update, context, mock_search, mock_llm, _ = _make_handler_context(
+            search_results=[result], llm_answer="Act Now: ...",
+        )
+        context.args = ["1d", "quick"]
+        update.effective_user.username = "owner"
+
+        await handle_mentions(update, context)
+
+        llm_kwargs = mock_llm.query.call_args.kwargs
+        assert llm_kwargs["model_override"] == _QUICK_MODE_MODEL
+
+
+# ---------------------------------------------------------------------------
+# /summary passes min_messages_per_group=2
+# ---------------------------------------------------------------------------
+
+
+class TestSummaryBreadthFirst:
+    @pytest.mark.asyncio
+    async def test_summary_passes_min_messages_per_group(self):
+        result = SearchResult(
+            message_id=1, chat_id=1, chat_title="Ops",
+            sender_name="Alice", timestamp="2024-01-15T10:00:00Z",
+            text="Status update", score=1.0,
+        )
+        update, context, mock_search, mock_llm, mock_audit = _make_handler_context(
+            search_results=[result], llm_answer="Summary",
+        )
+        context.args = ["1d", "quick"]
+
+        await handle_summary(update, context)
+
+        llm_kwargs = mock_llm.query.call_args.kwargs
+        assert llm_kwargs["min_messages_per_group"] == 2
+
+    @pytest.mark.asyncio
+    async def test_summary_quick_1d_scaling(self):
+        result = SearchResult(
+            message_id=1, chat_id=1, chat_title="Ops",
+            sender_name="Alice", timestamp="2024-01-15T10:00:00Z",
+            text="Status update", score=1.0,
+        )
+        update, context, mock_search, mock_llm, _ = _make_handler_context(
+            search_results=[result], llm_answer="Summary",
+        )
+        context.args = ["1d", "quick"]
+
+        await handle_summary(update, context)
+
+        call_kwargs = mock_search.recent_chat_summary_context.call_args.kwargs
+        assert call_kwargs["chat_limit"] == 20
+        assert call_kwargs["per_chat_messages"] == 8
+        llm_kwargs = mock_llm.query.call_args.kwargs
+        assert llm_kwargs["context_max_chars"] == 37000
+        assert llm_kwargs["max_tokens_override"] == 2200
