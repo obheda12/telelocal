@@ -593,6 +593,38 @@ async def _reply_answer(
     await _reply_chunks(update, context, chunks)
 
 
+async def _reply_sections(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    answer: str,
+) -> None:
+    """Split on ===SECTION=== markers and send each section as its own message.
+
+    Falls back to ``_reply_answer`` if no section markers are found.
+    Each section is sent immediately (not subject to auto_chunks gating)
+    since sections are intentional message boundaries, not overflow.
+    """
+    sections = [s.strip() for s in answer.split("===SECTION===") if s.strip()]
+    if len(sections) <= 1:
+        await _reply_answer(update, context, answer)
+        return
+
+    for section in sections:
+        sanitized = _sanitize_telegram_html(section)
+        for chunk in _split_message(sanitized):
+            try:
+                await update.message.reply_text(
+                    chunk, parse_mode=ParseMode.HTML,
+                )
+            except Exception:
+                logger.debug("HTML parse failed for section chunk, retrying as plain text")
+                plain = re.sub(r"<[^>]+>", "", chunk)
+                await update.message.reply_text(plain)
+
+    context.user_data.pop(_PENDING_RESPONSE_CHUNKS_KEY, None)
+    context.user_data[_LAST_RESPONSE_STATUS_KEY] = "complete"
+
+
 async def _get_sync_status_context(pool: asyncpg.Pool) -> str:
     """Check message/chat counts and return a sync-aware no-results message.
 
@@ -920,12 +952,19 @@ async def handle_bd(
         "Then list chats numbered, prioritizing actionable ones first. "
         "Scale detail with importance:\n"
         "- Chats needing my response: full context — who's waiting, what they need, "
-        "timestamps, and an explicit 'Action:' line so I know exactly what to do.\n"
+        "and an explicit <b>Action:</b> line so I know exactly what to do.\n"
         "- Chats with notable updates: brief status + what changed.\n"
         "- Quiet chats (no meaningful activity): collapse into a single line at the end "
         "(just list the chat names, don't summarize individually).\n\n"
-        "The goal is to save me time — give me enough context to act on important chats "
-        "without wading through low-priority noise."
+        "Only include timestamps when they add useful context (e.g. how long someone "
+        "has been waiting). Don't add them mechanically to every item.\n\n"
+        "Use Telegram HTML formatting to make the output scannable:\n"
+        "- <b>bold</b> for chat names and the Action: label\n"
+        "- <i>italic</i> for status/context lines\n"
+        "- Keep it clean — no horizontal rules or separators.\n\n"
+        "IMPORTANT: Separate each section with the exact marker ===SECTION=== on its own line. "
+        "Sections are: triage count, actionable chats, update chats, quiet chats. "
+        "Each section will be sent as its own message for readability."
     )
     owner_id = _resolve_owner_user_id(update, context)
     owner_aliases = _resolve_owner_mention_aliases(update, context)
@@ -939,7 +978,7 @@ async def handle_bd(
         model_override=_QUICK_MODE_MODEL if detail_mode == "quick" else None,
         min_messages_per_group=2,
     )
-    await _reply_answer(update, context, answer)
+    await _reply_sections(update, context, answer)
 
     await audit.log(
         "querybot",
