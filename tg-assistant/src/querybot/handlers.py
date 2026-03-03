@@ -913,28 +913,12 @@ async def handle_bd(
         await update.message.reply_text(no_results_msg)
         return
 
-    if detail_mode == "detailed":
-        detail_instruction = (
-            "For each chat in NEEDS RESPONSE and WATCH, include: "
-            "chat name, key participants, timestamps, context summary, "
-            "and what action (if any) I should take."
-        )
-    else:
-        detail_instruction = (
-            "For each chat in NEEDS RESPONSE and WATCH, give: "
-            "chat name + one-line summary."
-        )
     prompt = (
-        f"Triage my {chat_count} freshest chats from the last {days} day(s) "
-        f"into three buckets:\n"
-        "1. **NEEDS RESPONSE** — someone is waiting on me, open question directed "
-        "at me, or a commitment I made. These require my action.\n"
-        "2. **WATCH** — active discussion relevant to me, but no immediate action "
-        "needed right now.\n"
-        "3. **QUIET** — no significant activity. Group these into a single line "
-        "(just list the chat names, don't summarize individually).\n\n"
-        f"{detail_instruction}\n"
-        "If a bucket is empty, omit it."
+        f"Give me a {detail_mode} briefing of my {chat_count} freshest chats "
+        f"from the last {days} day(s). "
+        "For each chat, capture the current status, key updates, and whether I need to act. "
+        "Prioritize chats with actionable items first. "
+        "Keep each chat summary concise and include timestamps for important events."
     )
     owner_id = _resolve_owner_user_id(update, context)
     owner_aliases = _resolve_owner_mention_aliases(update, context)
