@@ -319,12 +319,12 @@ def _parse_bd_args(
 def _bd_scaling_params(days: int, detail_mode: str) -> Tuple[int, int, int]:
     """Return ``(per_chat_messages, context_max_chars, max_tokens)`` for /bd.
 
-    Retrieval is always timeframe-based (per_chat=0 means all messages in
-    window).  ``detailed`` gets a larger token budget for comprehensive
-    writeups; ``quick`` gets a smaller budget, forcing the LLM to filter
-    and be more concise.
+    Timeframe is the real filter.  ``per_chat`` is set generously so it
+    never clips real content but prevents the DB from returning an
+    unbounded result set.  ``detailed`` gets a larger token budget for
+    comprehensive writeups; ``quick`` gets a smaller budget.
     """
-    per_chat = 0  # all messages in the timeframe, no artificial cap
+    per_chat = min(500, 50 + days * 60)  # 1d→110, 3d→230, 7d→470 — generous safety cap
     if detail_mode == "detailed":
         ctx = min(200_000, 80_000 + days * 18_000)   # 1d→98k, 3d→134k, 7d→200k
         tokens = min(8_000, 4_096 + days * 500)      # 1d→4596, 3d→5596, 7d→7596
@@ -361,7 +361,7 @@ def _summary_scaling_params(
     messages and context/token budgets scale with the timeframe.
     """
     chats = 250  # let the timeframe be the filter, not an arbitrary chat cap
-    per_chat = 0  # 0 = all messages in the timeframe, no per-chat cap
+    per_chat = min(500, 50 + days * 60)  # generous safety cap (same as /bd)
     if detail_mode == "detailed":
         ctx = 200_000                                    # max context always
         tokens = min(16_000, 8_000 + days * 1_000)      # 1d→9k, 3d→11k, 7d→15k

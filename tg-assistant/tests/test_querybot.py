@@ -719,7 +719,7 @@ class TestScaffoldCommandHandlers:
 
         mock_search.recent_chat_summary_context.assert_called_once_with(
             chat_limit=50,
-            per_chat_messages=0,    # all messages in timeframe
+            per_chat_messages=470,  # min(500, 50+420) — generous safety cap
             days_back=7,
         )
         mock_llm.query.assert_called_once()
@@ -750,7 +750,7 @@ class TestScaffoldCommandHandlers:
 
         mock_search.recent_chat_summary_context.assert_called_once_with(
             chat_limit=250,       # all chats — timeframe is the filter
-            per_chat_messages=0,   # 0 = all messages in timeframe
+            per_chat_messages=230, # min(500, 50+180) — generous safety cap
             days_back=3,
         )
         llm_kwargs = mock_llm.query.call_args.kwargs
@@ -780,7 +780,7 @@ class TestScaffoldCommandHandlers:
 
         mock_search.recent_chat_summary_context.assert_called_once_with(
             chat_limit=25,
-            per_chat_messages=0,     # all messages in timeframe
+            per_chat_messages=230,   # min(500, 50+180) — generous safety cap
             days_back=3,
         )
         llm_kwargs = mock_llm.query.call_args.kwargs
@@ -1205,37 +1205,37 @@ class TestFastPathIntentExtraction:
 class TestBdScalingParams:
     def test_quick_1d(self):
         per_chat, ctx, tokens = _bd_scaling_params(1, "quick")
-        assert per_chat == 0     # all messages in timeframe
+        assert per_chat == 110   # min(500, 50+60)
         assert ctx == 98000      # min(200000, 80000+18000)
         assert tokens == 2348    # min(4096, 2048+300)
 
     def test_quick_3d(self):
         per_chat, ctx, tokens = _bd_scaling_params(3, "quick")
-        assert per_chat == 0
+        assert per_chat == 230   # min(500, 50+180)
         assert ctx == 134000     # min(200000, 80000+54000)
         assert tokens == 2948    # min(4096, 2048+900)
 
     def test_quick_7d(self):
         per_chat, ctx, tokens = _bd_scaling_params(7, "quick")
-        assert per_chat == 0
+        assert per_chat == 470   # min(500, 50+420)
         assert ctx == 200000     # min(200000, 80000+126000) → capped
         assert tokens == 4096    # min(4096, 2048+2100) → capped
 
     def test_detailed_1d(self):
         per_chat, ctx, tokens = _bd_scaling_params(1, "detailed")
-        assert per_chat == 0
+        assert per_chat == 110   # min(500, 50+60)
         assert ctx == 98000      # min(200000, 80000+18000)
         assert tokens == 4596    # min(8000, 4096+500)
 
     def test_detailed_3d(self):
         per_chat, ctx, tokens = _bd_scaling_params(3, "detailed")
-        assert per_chat == 0
+        assert per_chat == 230   # min(500, 50+180)
         assert ctx == 134000     # min(200000, 80000+54000)
         assert tokens == 5596    # min(8000, 4096+1500)
 
     def test_detailed_7d(self):
         per_chat, ctx, tokens = _bd_scaling_params(7, "detailed")
-        assert per_chat == 0
+        assert per_chat == 470   # min(500, 50+420)
         assert ctx == 200000     # min(200000, 80000+126000) → capped
         assert tokens == 7596    # min(8000, 4096+3500)
 
@@ -1381,42 +1381,42 @@ class TestSummaryScalingParams:
     def test_quick_1d(self):
         chats, per_chat, ctx, tokens = _summary_scaling_params(1, "quick")
         assert chats == 250      # all chats — timeframe is the filter
-        assert per_chat == 0     # 0 = all messages in timeframe
+        assert per_chat == 110   # min(500, 50+60) — generous safety cap
         assert ctx == 98000      # min(200000, 80000+18000)
         assert tokens == 4596    # min(8000, 4096+500)
 
     def test_quick_3d(self):
         chats, per_chat, ctx, tokens = _summary_scaling_params(3, "quick")
         assert chats == 250
-        assert per_chat == 0
+        assert per_chat == 230   # min(500, 50+180)
         assert ctx == 134000     # min(200000, 80000+54000)
         assert tokens == 5596    # min(8000, 4096+1500)
 
     def test_quick_7d(self):
         chats, per_chat, ctx, tokens = _summary_scaling_params(7, "quick")
         assert chats == 250
-        assert per_chat == 0
+        assert per_chat == 470   # min(500, 50+420)
         assert ctx == 200000     # min(200000, 80000+126000) → capped
         assert tokens == 7596    # min(8000, 4096+3500)
 
     def test_detailed_1d(self):
         chats, per_chat, ctx, tokens = _summary_scaling_params(1, "detailed")
         assert chats == 250
-        assert per_chat == 0
+        assert per_chat == 110   # min(500, 50+60)
         assert ctx == 200000     # always max
         assert tokens == 9000    # min(16000, 8000+1000)
 
     def test_detailed_3d(self):
         chats, per_chat, ctx, tokens = _summary_scaling_params(3, "detailed")
         assert chats == 250
-        assert per_chat == 0
+        assert per_chat == 230   # min(500, 50+180)
         assert ctx == 200000     # always max
         assert tokens == 11000   # min(16000, 8000+3000)
 
     def test_detailed_7d(self):
         chats, per_chat, ctx, tokens = _summary_scaling_params(7, "detailed")
         assert chats == 250
-        assert per_chat == 0
+        assert per_chat == 470   # min(500, 50+420)
         assert ctx == 200000     # always max
         assert tokens == 15000   # min(16000, 8000+7000)
 
@@ -1503,7 +1503,7 @@ class TestSummaryBreadthFirst:
 
         call_kwargs = mock_search.recent_chat_summary_context.call_args.kwargs
         assert call_kwargs["chat_limit"] == 250
-        assert call_kwargs["per_chat_messages"] == 0    # all messages in timeframe
+        assert call_kwargs["per_chat_messages"] == 110   # min(500, 50+60)
         llm_kwargs = mock_llm.query.call_args.kwargs
         assert llm_kwargs["context_max_chars"] == 98000  # min(200k, 80k+18k)
         assert llm_kwargs["max_tokens_override"] == 4596  # min(8k, 4096+500)
