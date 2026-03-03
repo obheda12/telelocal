@@ -355,19 +355,19 @@ def _summary_scaling_params(
 ) -> Tuple[int, int, int, int]:
     """Return ``(chat_limit, per_chat, context_max_chars, max_tokens)`` for /summary.
 
-    Scales retrieval depth with the timeframe so longer windows pull more
-    chats/messages and the context/token budget grows to match.
+    Chat limit is set to 250 (the hard max) so the timeframe is the real
+    filter — all chats with activity in the window are included. Per-chat
+    messages and context/token budgets scale with the timeframe.
     """
+    chats = 250  # let the timeframe be the filter, not an arbitrary chat cap
     if detail_mode == "detailed":
-        chats = min(100, 30 + days * 10)               # 1d→40, 3d→60, 7d→100
-        per_chat = min(50, 10 + days * 5)               # 1d→15, 3d→25, 7d→45
-        ctx = min(160_000, 60_000 + days * 14_000)      # 1d→74k, 3d→102k, 7d→158k
-        tokens = min(6_000, 3_000 + days * 400)         # 1d→3400, 3d→4200, 7d→5800
+        per_chat = min(75, 15 + days * 8)               # 1d→23, 3d→39, 7d→71
+        ctx = 200_000                                    # max context always
+        tokens = min(16_000, 8_000 + days * 1_000)      # 1d→9k, 3d→11k, 7d→15k
     else:
-        chats = min(50, 15 + days * 5)                  # 1d→20, 3d→30, 7d→50
-        per_chat = min(25, 5 + days * 3)                # 1d→8, 3d→14, 7d→26→capped 25
-        ctx = min(80_000, 30_000 + days * 7_000)        # 1d→37k, 3d→51k, 7d→79k
-        tokens = min(4_096, 2_000 + days * 200)         # 1d→2200, 3d→2600, 7d→3400
+        per_chat = min(40, 8 + days * 4)                # 1d→12, 3d→20, 7d→36
+        ctx = min(200_000, 80_000 + days * 18_000)      # 1d→98k, 3d→134k, 7d→200k
+        tokens = min(8_000, 4_096 + days * 500)         # 1d→4596, 3d→5596, 7d→7596
     return chats, per_chat, ctx, tokens
 
 
