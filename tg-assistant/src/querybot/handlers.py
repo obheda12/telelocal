@@ -990,7 +990,7 @@ async def handle_bd(
         "(e.g. 'Composable Security' not 'Monad Foundation <> Composable Security'). "
         "If the chat name doesn't follow that pattern, use it as-is.\n\n"
         "Formatting rules:\n"
-        "- Section headers: <blockquote><b>ALL CAPS HEADER</b></blockquote>\n"
+        "- Section headers: <code><b>ALL CAPS HEADER</b></code>\n"
         "- <b>bold</b> for chat/team names and the Action Items: label\n"
         "- <i>italic</i> for status/context\n"
         "- Use line breaks and bullets for legibility but don't over-space\n"
