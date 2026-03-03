@@ -21,7 +21,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import re
 import time
 from collections import OrderedDict
 from datetime import datetime, timezone
@@ -255,74 +254,6 @@ class ClaudeAssistant:
         return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
     @staticmethod
-    def _chat_deep_link(chat_id: int) -> Optional[str]:
-        """Generate a t.me deep link for supergroups/channels."""
-        s = str(chat_id)
-        if s.startswith("-100") and len(s) > 4:
-            return f"https://t.me/c/{s[4:]}/1"
-        return None
-
-    @staticmethod
-    def _chat_header(safe_title: str, chat_id: int) -> str:
-        """Build a context header line, including a deep link when available."""
-        link = ClaudeAssistant._chat_deep_link(chat_id)
-        if link:
-            return f"=== {safe_title} | {link} ===\n"
-        return f"=== {safe_title} ===\n"
-
-    # Pattern to strip common org prefixes from chat titles
-    _COUNTERPARTY_RE = re.compile(
-        r"^(?:Monad(?:\s+Foundation)?\s*(?:<>|x|×|—|-)\s*)", re.IGNORECASE,
-    )
-
-    @classmethod
-    def _counterparty_name(cls, title: str) -> Optional[str]:
-        """Extract the counterparty portion of a chat title, if any."""
-        stripped = cls._COUNTERPARTY_RE.sub("", title).strip()
-        return stripped if stripped and stripped != title else None
-
-    @staticmethod
-    def _inject_chat_links(text: str, link_map: Dict[str, str]) -> str:
-        """Inject clickable deep links around chat names in LLM output.
-
-        Handles <b>Name</b>, bare Name, and case variations.
-        Processes longest names first to avoid partial matches.
-        """
-        sorted_items = sorted(
-            link_map.items(), key=lambda kv: len(kv[0]), reverse=True,
-        )
-        for name, url in sorted_items:
-            escaped = re.escape(name)
-
-            # Already linked for this name? skip
-            if re.search(
-                r'<a\s+href="[^"]*">\s*<b>' + escaped + r'</b>',
-                text, re.IGNORECASE,
-            ):
-                continue
-
-            # Replace bolded form: <b>Name</b> → <a href><b>Name</b></a>
-            bold_pat = re.compile(
-                r'<b>(' + escaped + r')</b>', re.IGNORECASE,
-            )
-            text = bold_pat.sub(
-                lambda m, u=url: f'<a href="{u}"><b>{m.group(1)}</b></a>',
-                text,
-            )
-
-            # Also replace bare occurrences not inside HTML tags.
-            # (?<![>\w]) prevents matching right after a tag like <b>.
-            # (?![<\w]) prevents matching right before a closing tag.
-            bare_pat = re.compile(
-                r'(?<![>\w])(' + escaped + r')(?![<\w])', re.IGNORECASE,
-            )
-            text = bare_pat.sub(
-                lambda m, u=url: f'<a href="{u}"><b>{m.group(1)}</b></a>',
-                text,
-            )
-        return text
-
-    @staticmethod
     def _to_et(iso_ts: str) -> str:
         """Convert an ISO-format UTC timestamp to ET (e.g. '2025-03-01 14:30 ET')."""
         if not iso_ts:
@@ -402,9 +333,9 @@ class ClaudeAssistant:
 
         if min_messages_per_group <= 0:
             # Original single-pass behavior
-            for (chat_id, chat_title), msgs in chat_groups.items():
+            for (_, chat_title), msgs in chat_groups.items():
                 safe_title = ClaudeAssistant._escape_xml(chat_title)
-                header = ClaudeAssistant._chat_header(safe_title, chat_id)
+                header = f"=== {safe_title} ===\n"
                 if total_len + len(header) > max_chars:
                     break
                 parts.append(header)
@@ -427,9 +358,9 @@ class ClaudeAssistant:
             # Pass 1 — up to min_messages_per_group per chat
             remaining: OrderedDict[tuple[int, str], List[SearchResult]] = OrderedDict()
             for key, msgs in chat_groups.items():
-                chat_id, chat_title = key
+                _, chat_title = key
                 safe_title = ClaudeAssistant._escape_xml(chat_title)
-                header = ClaudeAssistant._chat_header(safe_title, chat_id)
+                header = f"=== {safe_title} ===\n"
                 if total_len + len(header) > max_chars:
                     break
                 parts.append(header)
@@ -465,10 +396,10 @@ class ClaudeAssistant:
                         exhausted_keys.append(key)
                         continue
                     r = msgs.pop(0)
-                    chat_id_r, chat_title = key
+                    _, chat_title = key
                     safe_title = ClaudeAssistant._escape_xml(chat_title)
                     # Re-emit the header so the message lands under the right chat
-                    header = ClaudeAssistant._chat_header(safe_title, chat_id_r)
+                    header = f"=== {safe_title} ===\n"
                     entry = ClaudeAssistant._format_entry(
                         r, per_message_chars, owner_user_id,
                     )
@@ -552,22 +483,6 @@ class ClaudeAssistant:
                 + "- In context rows, owner_message=true marks the owner's own messages.\n\n"
             )
 
-        # Build name → URL mapping for deterministic post-processing
-        chat_link_map: Dict[str, str] = {}
-        seen_chat_ids: set[int] = set()
-        for r in context_results:
-            if r.chat_id in seen_chat_ids:
-                continue
-            link = self._chat_deep_link(r.chat_id)
-            if link:
-                seen_chat_ids.add(r.chat_id)
-                title = r.chat_title or "Unknown Chat"
-                # Map both the full title and the counterparty-only form
-                chat_link_map[title] = link
-                cp = self._counterparty_name(title)
-                if cp:
-                    chat_link_map[cp] = link
-
         response = await self._client.messages.create(
             model=effective_model,
             max_tokens=max_tokens,
@@ -596,10 +511,7 @@ class ClaudeAssistant:
                 response.usage.output_tokens,
             )
 
-        answer = response.content[0].text
-        if chat_link_map:
-            answer = self._inject_chat_links(answer, chat_link_map)
-        return answer
+        return response.content[0].text
 
     # ------------------------------------------------------------------
     # Cost tracking
