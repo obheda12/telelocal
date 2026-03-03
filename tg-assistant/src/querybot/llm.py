@@ -254,6 +254,22 @@ class ClaudeAssistant:
         return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
     @staticmethod
+    def _chat_deep_link(chat_id: int) -> Optional[str]:
+        """Generate a t.me deep link for supergroups/channels."""
+        s = str(chat_id)
+        if s.startswith("-100") and len(s) > 4:
+            return f"https://t.me/c/{s[4:]}/1"
+        return None
+
+    @staticmethod
+    def _chat_header(safe_title: str, chat_id: int) -> str:
+        """Build a context header line, including a deep link when available."""
+        link = ClaudeAssistant._chat_deep_link(chat_id)
+        if link:
+            return f"=== {safe_title} | {link} ===\n"
+        return f"=== {safe_title} ===\n"
+
+    @staticmethod
     def _to_et(iso_ts: str) -> str:
         """Convert an ISO-format UTC timestamp to ET (e.g. '2025-03-01 14:30 ET')."""
         if not iso_ts:
@@ -333,9 +349,9 @@ class ClaudeAssistant:
 
         if min_messages_per_group <= 0:
             # Original single-pass behavior
-            for (_, chat_title), msgs in chat_groups.items():
+            for (chat_id, chat_title), msgs in chat_groups.items():
                 safe_title = ClaudeAssistant._escape_xml(chat_title)
-                header = f"=== {safe_title} ===\n"
+                header = ClaudeAssistant._chat_header(safe_title, chat_id)
                 if total_len + len(header) > max_chars:
                     break
                 parts.append(header)
@@ -358,9 +374,9 @@ class ClaudeAssistant:
             # Pass 1 — up to min_messages_per_group per chat
             remaining: OrderedDict[tuple[int, str], List[SearchResult]] = OrderedDict()
             for key, msgs in chat_groups.items():
-                _, chat_title = key
+                chat_id, chat_title = key
                 safe_title = ClaudeAssistant._escape_xml(chat_title)
-                header = f"=== {safe_title} ===\n"
+                header = ClaudeAssistant._chat_header(safe_title, chat_id)
                 if total_len + len(header) > max_chars:
                     break
                 parts.append(header)
@@ -396,10 +412,10 @@ class ClaudeAssistant:
                         exhausted_keys.append(key)
                         continue
                     r = msgs.pop(0)
-                    _, chat_title = key
+                    chat_id_r, chat_title = key
                     safe_title = ClaudeAssistant._escape_xml(chat_title)
                     # Re-emit the header so the message lands under the right chat
-                    header = f"=== {safe_title} ===\n"
+                    header = ClaudeAssistant._chat_header(safe_title, chat_id_r)
                     entry = ClaudeAssistant._format_entry(
                         r, per_message_chars, owner_user_id,
                     )
@@ -483,6 +499,14 @@ class ClaudeAssistant:
                 + "- In context rows, owner_message=true marks the owner's own messages.\n\n"
             )
 
+        chat_link_note = ""
+        if "| https://t.me/" in context:
+            chat_link_note = (
+                "Chat link rendering: context headers with a URL "
+                "(=== Name | URL ===) should use "
+                '<a href="URL"><b>Name</b></a> in your response.\n\n'
+            )
+
         response = await self._client.messages.create(
             model=effective_model,
             max_tokens=max_tokens,
@@ -494,6 +518,7 @@ class ClaudeAssistant:
                     "content": (
                         f"{identity_block}"
                         f"Context:\n{context}\n\n"
+                        f"{chat_link_note}"
                         f"Question: {user_question}"
                     ),
                 }
