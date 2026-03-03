@@ -1061,27 +1061,13 @@ async def handle_summary(
         await update.message.reply_text(no_results_msg)
         return
 
-    if detail_mode == "detailed":
-        item_instruction = (
-            "Use bullet points. For ACTION ITEMS include: chat name, "
-            "what's needed, who's involved, and timestamp. "
-            "For KEY UPDATES give a per-chat breakdown: chat name as a header, "
-            "then the key points — make it easy to scan chat by chat."
-        )
-    else:
-        item_instruction = (
-            "Use bullet points. Each bullet: chat name + one-line summary."
-        )
     prompt = (
-        f"Summarize my chats from the last {days} day(s). "
-        "Lead with anything requiring my action.\n\n"
-        "Sections (in this order, omit empty ones):\n"
-        "1. <b>ACTION ITEMS</b> — decisions or tasks requiring my follow-up.\n"
-        "2. <b>KEY UPDATES</b> — significant developments across chats.\n"
-        "3. <b>QUIET</b> — chats with no meaningful activity "
-        "(group into a single line, just list chat names).\n\n"
-        f"{item_instruction}\n"
-        "Be thorough — the goal is to never fall behind on any chat."
+        f"Create a {detail_mode} summary for the last {days} day(s) across my chats. "
+        "Go chat by chat and give me detailed contextual information about what happened — "
+        "key decisions, developments, who said what, blockers, and any action items for me. "
+        "Start with the highest-priority chats first (ones with action items or important updates), "
+        "then cover the rest. Include chat name, sender, and relevant context for each point. "
+        "Be thorough — I want to understand everything that happened so I never fall behind."
     )
     owner_id = _resolve_owner_user_id(update, context)
     owner_aliases = _resolve_owner_mention_aliases(update, context)
