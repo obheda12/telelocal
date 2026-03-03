@@ -915,27 +915,26 @@ async def handle_bd(
 
     if detail_mode == "detailed":
         detail_instruction = (
-            "Use bullet points. For each chat in NEEDS RESPONSE and WATCH, include: "
-            "chat name, who's waiting, what they need, enough context to act, "
-            "and timestamp."
+            "For each chat in NEEDS RESPONSE and WATCH, include: "
+            "chat name, key participants, timestamps, context summary, "
+            "and what action (if any) I should take."
         )
     else:
         detail_instruction = (
-            "Use bullet points. Each bullet: chat name + one-line context."
+            "For each chat in NEEDS RESPONSE and WATCH, give: "
+            "chat name + one-line summary."
         )
     prompt = (
-        f"Triage my {chat_count} freshest chats from the last {days} day(s). "
-        "Put what needs my response FIRST — I need to see that immediately.\n\n"
-        "Sections (in this order, omit empty ones):\n"
-        "1. <b>NEEDS RESPONSE</b> — someone is waiting on me, open question directed "
+        f"Triage my {chat_count} freshest chats from the last {days} day(s) "
+        f"into three buckets:\n"
+        "1. **NEEDS RESPONSE** — someone is waiting on me, open question directed "
         "at me, or a commitment I made. These require my action.\n"
-        "2. <b>WATCH</b> — active discussion relevant to me, but no immediate action "
+        "2. **WATCH** — active discussion relevant to me, but no immediate action "
         "needed right now.\n"
-        "3. <b>QUIET</b> — no significant activity. Group into a single line "
-        "(just list chat names).\n\n"
+        "3. **QUIET** — no significant activity. Group these into a single line "
+        "(just list the chat names, don't summarize individually).\n\n"
         f"{detail_instruction}\n"
-        "Order items within each section by urgency. "
-        "Be thorough — list every qualifying chat, don't summarize them away."
+        "If a bucket is empty, omit it."
     )
     owner_id = _resolve_owner_user_id(update, context)
     owner_aliases = _resolve_owner_mention_aliases(update, context)
