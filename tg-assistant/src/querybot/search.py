@@ -639,22 +639,40 @@ class MessageSearch:
             r")(?:\W|$)"
         )
 
-        params: List[Any] = [int(owner_id), cutoff, commitment_regex, limit]
+        # Per-chat cap ensures breadth across all chats, not just the most active.
+        per_chat_cap = max(20, limit // 25)
+
+        params: List[Any] = [
+            int(owner_id), cutoff, commitment_regex, per_chat_cap, limit,
+        ]
 
         sql = f"""
-            WITH {self._fresh_chats_cte_sql()}
-            SELECT m.message_id, m.chat_id, c.title, m.sender_name, m.sender_id,
-                   m.reply_to_msg_id, m.thread_top_msg_id, m.is_topic_message,
-                   m.timestamp, m.text,
-                   CASE WHEN COALESCE(m.text, '') ~* $3
-                        THEN 2.0 ELSE 1.0 END AS score
-            FROM messages m
-            JOIN chats c ON c.chat_id = m.chat_id
-            WHERE {self._fresh_chats_condition("m")}
-              AND m.sender_id = $1
-              AND m.timestamp >= $2
-            ORDER BY score DESC, m.timestamp DESC, m.message_id DESC
-            LIMIT $4
+            WITH {self._fresh_chats_cte_sql()},
+            ranked AS (
+                SELECT m.message_id, m.chat_id, c.title, m.sender_name, m.sender_id,
+                       m.reply_to_msg_id, m.thread_top_msg_id, m.is_topic_message,
+                       m.timestamp, m.text,
+                       CASE WHEN COALESCE(m.text, '') ~* $3
+                            THEN 2.0 ELSE 1.0 END AS score,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY m.chat_id
+                           ORDER BY
+                               CASE WHEN COALESCE(m.text, '') ~* $3 THEN 0 ELSE 1 END,
+                               m.timestamp DESC, m.message_id DESC
+                       ) AS rn
+                FROM messages m
+                JOIN chats c ON c.chat_id = m.chat_id
+                WHERE {self._fresh_chats_condition("m")}
+                  AND m.sender_id = $1
+                  AND m.timestamp >= $2
+            )
+            SELECT message_id, chat_id, title, sender_name, sender_id,
+                   reply_to_msg_id, thread_top_msg_id, is_topic_message,
+                   timestamp, text, score
+            FROM ranked
+            WHERE rn <= $4
+            ORDER BY score DESC, timestamp DESC, message_id DESC
+            LIMIT $5
         """
 
         rows = await self._pool.fetch(sql, *params)
