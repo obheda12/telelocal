@@ -107,10 +107,21 @@ def _inject_chat_links(text: str, link_map: Dict[str, str]) -> str:
     if not link_map:
         return text
 
+    # Sort keys longest-first for substring fallback matching
+    sorted_keys = sorted(link_map.keys(), key=len, reverse=True)
+
     def _replacer(match: re.Match) -> str:
         inner = match.group(1)
         key = inner.strip().lower()
-        url = link_map.get(key)
+        # Strip trailing punctuation the LLM commonly puts inside <b> tags
+        cleaned = key.rstrip(":;,.\u2014\u2013-!? ")
+        url = link_map.get(key) or link_map.get(cleaned)
+        # Fallback: check if any chat name is contained in the bold text
+        if url is None:
+            for map_key in sorted_keys:
+                if len(map_key) >= 4 and map_key in cleaned:
+                    url = link_map[map_key]
+                    break
         if url is None:
             return match.group(0)
         # Skip if already inside an <a> tag

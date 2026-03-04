@@ -1749,6 +1749,41 @@ class TestInjectChatLinks:
         assert "<b>Action Items:</b>" in result
         assert '<a href="https://t.me/c/123/1"><b>Acme</b></a>' in result
 
+    def test_trailing_colon_stripped(self):
+        link_map = {"acme corp": "https://t.me/c/123/1"}
+        text = "<b>Acme Corp:</b> needs attention"
+        result = _inject_chat_links(text, link_map)
+        assert '<a href="https://t.me/c/123/1"><b>Acme Corp:</b></a>' in result
+
+    def test_trailing_dash_stripped(self):
+        link_map = {"acme corp": "https://t.me/c/123/1"}
+        text = "<b>Acme Corp —</b> update pending"
+        result = _inject_chat_links(text, link_map)
+        assert '<a href="https://t.me/c/123/1">' in result
+
+    def test_substring_fallback(self):
+        link_map = {"acme corp": "https://t.me/c/123/1"}
+        text = "<b>Acme Corp team</b> sent a message"
+        result = _inject_chat_links(text, link_map)
+        assert '<a href="https://t.me/c/123/1"><b>Acme Corp team</b></a>' in result
+
+    def test_substring_fallback_longest_wins(self):
+        link_map = {
+            "alpha": "https://t.me/c/1/1",
+            "alpha beta": "https://t.me/c/2/1",
+        }
+        text = "<b>Alpha Beta group</b>"
+        result = _inject_chat_links(text, link_map)
+        # Should match "alpha beta" (longer), not just "alpha"
+        assert '<a href="https://t.me/c/2/1">' in result
+
+    def test_substring_fallback_skips_short_keys(self):
+        """Keys shorter than 4 chars should not match via substring."""
+        link_map = {"ops": "https://t.me/c/123/1"}
+        text = "<b>Operations Team</b>"
+        result = _inject_chat_links(text, link_map)
+        assert result == text  # "ops" is too short for substring match
+
 
 class TestChatLinksIntegration:
     """Verify _sanitize_telegram_html preserves injected <a> tags."""
