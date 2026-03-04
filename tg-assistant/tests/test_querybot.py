@@ -1626,14 +1626,17 @@ class TestChatDeepLink:
         url = _chat_deep_link(chat_id)
         assert url == "https://t.me/c/1234567890/1"
 
-    def test_regular_group_returns_none(self):
-        assert _chat_deep_link(-123456) is None
+    def test_regular_group_returns_tg_scheme(self):
+        assert _chat_deep_link(-4578576379) == "tg://openmessage?chat_id=4578576379"
+
+    def test_small_regular_group(self):
+        assert _chat_deep_link(-123456) == "tg://openmessage?chat_id=123456"
 
     def test_private_chat_returns_none(self):
         assert _chat_deep_link(999999) is None
 
     def test_boundary_value(self):
-        assert _chat_deep_link(-1_000_000_000_000) is None
+        assert _chat_deep_link(-1_000_000_000_000) == "tg://openmessage?chat_id=1000000000000"
         assert _chat_deep_link(-1_000_000_000_001) == "https://t.me/c/1/1"
 
 
@@ -1672,11 +1675,23 @@ class TestBuildChatLinkMap:
         assert link_map["monad <> acme corp"] == url
         assert link_map["acme corp"] == url
 
-    def test_skips_non_linkable(self):
+    def test_regular_group_uses_tg_scheme(self):
         results = [
             SearchResult(
                 message_id=1, chat_id=-123456,
                 chat_title="Small Group",
+                sender_name="Bob", timestamp="2024-01-01T00:00:00Z",
+                text="hi", score=1.0,
+            ),
+        ]
+        link_map = _build_chat_link_map(results)
+        assert link_map["small group"] == "tg://openmessage?chat_id=123456"
+
+    def test_skips_positive_chat_id(self):
+        results = [
+            SearchResult(
+                message_id=1, chat_id=999999,
+                chat_title="DM Chat",
                 sender_name="Bob", timestamp="2024-01-01T00:00:00Z",
                 text="hi", score=1.0,
             ),

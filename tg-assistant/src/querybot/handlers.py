@@ -75,12 +75,15 @@ def _chat_deep_link(chat_id: int) -> Optional[str]:
 
     Supergroups/channels (Telethon marked ID < -1 trillion):
         ``https://t.me/c/{internal_id}/1`` — standard web deep link.
-    Regular groups (small negative IDs) cannot be deep-linked via ``t.me``
-    because ``t.me/c/`` resolves in the channel namespace, not the chat one.
+    Regular groups (small negative IDs):
+        ``tg://openmessage?chat_id={raw_id}`` — internal Telegram scheme
+        handled by Desktop, iOS, and Android clients.
     """
     if chat_id < -1_000_000_000_000:
         internal_id = abs(chat_id) - 1_000_000_000_000
         return f"https://t.me/c/{internal_id}/1"
+    if chat_id < 0:
+        return f"tg://openmessage?chat_id={abs(chat_id)}"
     return None
 
 
