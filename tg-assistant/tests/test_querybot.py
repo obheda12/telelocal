@@ -768,13 +768,13 @@ class TestScaffoldCommandHandlers:
         await handle_bd(update, context)
 
         mock_search.recent_chat_summary_context.assert_called_once_with(
-            chat_limit=25,
-            per_chat_messages=110,   # min(500, 50+60) — 1d default
-            days_back=1,
+            chat_limit=50,           # _bd_chat_count(3) = 50
+            per_chat_messages=230,   # min(500, 50+180) — 3d default
+            days_back=3,
         )
         llm_kwargs = mock_llm.query.call_args.kwargs
-        assert llm_kwargs["context_max_chars"] == 98000    # min(200k, 80k+18k)
-        assert llm_kwargs["max_tokens_override"] == 3400   # min(6000, 3000+400) — quick default
+        assert llm_kwargs["context_max_chars"] == 134000   # min(200k, 80k+54k)
+        assert llm_kwargs["max_tokens_override"] == 4200   # min(6000, 3000+1200) — quick default
         assert llm_kwargs["min_messages_per_group"] == 2
         assert mock_audit.log.call_args[0][1] == "command_bd"
 

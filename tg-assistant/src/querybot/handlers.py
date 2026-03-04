@@ -934,13 +934,13 @@ async def handle_help(
     help_text = (
         "Briefing commands:\n"
         "  /bd [1d|3d|1w] [quick|detailed]\n"
-        "      Chat triage — needs response / watch / quiet (default 1d quick)\n"
+        "      Chat triage — needs response / watch / quiet (default 3d quick)\n"
         "  /mentions [3d|1w|2w]\n"
         "      Mention triage — Act Now / Reply Soon / FYI (default 3d)\n"
         "  /commitments [1d|3d|1w]\n"
         "      Your open promises — Likely Dropped / In Progress / Completed (default 3d)\n"
         "  /summary [1d|3d|1w] [quick|detailed]\n"
-        "      Cross-chat recap — Action Items / Key Updates / Quiet (default 1d quick)\n\n"
+        "      Cross-chat recap — Action Items / Key Updates / Quiet (default 3d quick)\n\n"
         "Parameters (all optional, any order):\n"
         "  Time window: 1d, 3d, 1w (default varies by command)\n"
         "  Detail mode: quick (concise, faster) or detailed (thorough)\n\n"
@@ -1204,7 +1204,7 @@ async def handle_bd(
     """Handle ``/bd`` — freshest-chat briefing with status and actions.
 
     Accepts a timeframe (``1d``, ``3d``, ``1w``) and a detail mode
-    (``quick`` or ``detailed``) in any order.  Defaults: 1 day, quick mode.
+    (``quick`` or ``detailed``) in any order.  Defaults: 3 days, quick mode.
     Chat count scales automatically with the timeframe.
     """
     search: MessageSearch = context.bot_data["search"]
@@ -1213,7 +1213,7 @@ async def handle_bd(
 
     days, detail_mode, parse_err = _parse_window_and_detail_args(
         context.args or [],
-        default_days=1,
+        default_days=3,
     )
     if parse_err:
         await update.message.reply_text(
@@ -1334,7 +1334,7 @@ async def handle_summary(
 
     days, detail_mode, parse_err = _parse_window_and_detail_args(
         context.args or [],
-        default_days=1,
+        default_days=3,
     )
     if parse_err:
         await update.message.reply_text(
