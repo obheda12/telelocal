@@ -353,15 +353,17 @@ def _mentions_scaling_params(days: int, detail_mode: str) -> Tuple[int, int, int
     return limit, ctx, tokens
 
 
-def _commitments_scaling_params(days: int) -> Tuple[int, int, int]:
-    """Return ``(limit, context_max_chars, max_tokens)`` for commitments queries.
+def _commitments_scaling_params(days: int) -> Tuple[int, int, int, int]:
+    """Return ``(limit, per_chat, context_max_chars, max_tokens)`` for commitments.
 
-    Always uses "detailed" scaling — commitment triage needs full context.
+    Scales with timeframe — longer windows get deeper per-chat context.
+    Context always maxed so nothing is missed; output tokens stay concise.
     """
-    limit = 500  # effectively uncapped — get all commitments in the timeframe
-    ctx = min(200_000, 80_000 + days * 18_000)     # 1d→98k, 3d→134k, 7d→200k
-    tokens = min(8_000, 4_096 + days * 500)        # 1d→4596, 3d→5596, 7d→7596
-    return limit, ctx, tokens
+    limit = 1000                                        # generous overall cap
+    per_chat = min(500, 50 + days * 60)                 # 1d→110, 3d→230, 7d→470
+    ctx = 200_000                                       # always max — don't miss anything
+    tokens = min(8_000, 4_096 + days * 500)             # 1d→4596, 3d→5596, 7d→7596
+    return limit, per_chat, ctx, tokens
 
 
 def _summary_scaling_params(
@@ -982,11 +984,12 @@ async def handle_commitments(
     await _send_typing(update, context)
     owner_id = _resolve_owner_user_id(update, context)
 
-    limit, context_max_chars, max_tokens = _commitments_scaling_params(days)
+    limit, per_chat, context_max_chars, max_tokens = _commitments_scaling_params(days)
     results = await search.owner_commitments(
         owner_id=owner_id,
         days_back=days,
         limit=limit,
+        per_chat=per_chat,
     )
 
     if not results:

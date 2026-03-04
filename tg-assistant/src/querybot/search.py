@@ -613,7 +613,8 @@ class MessageSearch:
         *,
         owner_id: int,
         days_back: int = 3,
-        limit: int = 500,
+        limit: int = 1000,
+        per_chat: int = 230,
     ) -> List[SearchResult]:
         """Return all owner outbound messages, scored by commitment language.
 
@@ -621,9 +622,13 @@ class MessageSearch:
         matching commitment phrases (I'll, will do, let me, etc.) are scored
         2.0 as a hint; all others scored 1.0. The LLM makes the final call
         on what constitutes a commitment — the regex is a signal, not a gate.
+
+        ``per_chat`` caps messages per chat (commitment-language matches
+        prioritized) to ensure breadth while scaling with timeframe.
         """
         limit = max(1, int(limit))
         days_back = max(1, int(days_back))
+        per_chat = max(1, int(per_chat))
 
         cutoff = datetime.now(timezone.utc) - timedelta(days=days_back)
 
@@ -639,11 +644,8 @@ class MessageSearch:
             r")(?:\W|$)"
         )
 
-        # Per-chat cap ensures breadth across all chats, not just the most active.
-        per_chat_cap = max(20, limit // 25)
-
         params: List[Any] = [
-            int(owner_id), cutoff, commitment_regex, per_chat_cap, limit,
+            int(owner_id), cutoff, commitment_regex, per_chat, limit,
         ]
 
         sql = f"""

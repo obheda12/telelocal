@@ -1519,22 +1519,25 @@ class TestSummaryBreadthFirst:
 
 class TestCommitmentsScalingParams:
     def test_1d(self):
-        limit, ctx, tokens = _commitments_scaling_params(1)
-        assert limit == 500      # all commitments in timeframe
-        assert ctx == 98000      # min(200000, 80000+18000)
-        assert tokens == 4596    # min(8000, 4096+500)
+        limit, per_chat, ctx, tokens = _commitments_scaling_params(1)
+        assert limit == 1000         # generous overall cap
+        assert per_chat == 110       # min(500, 50+60)
+        assert ctx == 200000         # always max — don't miss anything
+        assert tokens == 4596        # min(8000, 4096+500)
 
     def test_3d(self):
-        limit, ctx, tokens = _commitments_scaling_params(3)
-        assert limit == 500
-        assert ctx == 134000     # min(200000, 80000+54000)
-        assert tokens == 5596    # min(8000, 4096+1500)
+        limit, per_chat, ctx, tokens = _commitments_scaling_params(3)
+        assert limit == 1000
+        assert per_chat == 230       # min(500, 50+180)
+        assert ctx == 200000         # always max
+        assert tokens == 5596        # min(8000, 4096+1500)
 
     def test_7d(self):
-        limit, ctx, tokens = _commitments_scaling_params(7)
-        assert limit == 500
-        assert ctx == 200000     # min(200000, 80000+126000) → capped
-        assert tokens == 7596    # min(8000, 4096+3500)
+        limit, per_chat, ctx, tokens = _commitments_scaling_params(7)
+        assert limit == 1000
+        assert per_chat == 470       # min(500, 50+420)
+        assert ctx == 200000         # always max
+        assert tokens == 7596        # min(8000, 4096+3500)
 
 
 # ---------------------------------------------------------------------------
@@ -1564,11 +1567,12 @@ class TestCommitmentsCommandPipeline:
 
         mock_search.owner_commitments.assert_called_once()
         call_kwargs = mock_search.owner_commitments.call_args.kwargs
-        assert call_kwargs["limit"] == 500  # all commitments in timeframe
+        assert call_kwargs["limit"] == 1000    # generous overall cap
+        assert call_kwargs["per_chat"] == 230  # min(500, 50+180) — scales with timeframe
         mock_llm.query.assert_called_once()
         llm_kwargs = mock_llm.query.call_args.kwargs
-        assert llm_kwargs["context_max_chars"] == 134000  # min(200k, 80k+3*18k)
-        assert llm_kwargs["max_tokens_override"] == 5596  # min(8000, 4096+3*500) — always detailed
+        assert llm_kwargs["context_max_chars"] == 200000  # always max
+        assert llm_kwargs["max_tokens_override"] == 5596   # min(8k, 4096+1500)
         assert llm_kwargs["min_messages_per_group"] == 2
         assert mock_audit.log.call_args[0][1] == "command_commitments"
 
