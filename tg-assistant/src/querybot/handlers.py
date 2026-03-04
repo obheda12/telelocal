@@ -140,6 +140,7 @@ def _inject_chat_links(text: str, link_map: Dict[str, str]) -> str:
                     url = link_map[map_key]
                     break
         if url is None:
+            unmatched.append(cleaned)
             return match.group(0)
         # Skip if already inside an <a> tag
         before = text[:match.start()]
@@ -149,7 +150,16 @@ def _inject_chat_links(text: str, link_map: Dict[str, str]) -> str:
             return match.group(0)
         return f'<a href="{url}"><b>{inner}</b></a>'
 
-    return _BOLD_TAG_RE.sub(_replacer, text)
+    unmatched: list[str] = []
+    result = _BOLD_TAG_RE.sub(_replacer, text)
+    if unmatched:
+        logger.warning(
+            "Chat link inject: %d bold tags unmatched: %s | map keys: %s",
+            len(unmatched),
+            unmatched,
+            list(link_map.keys()),
+        )
+    return result
 
 
 # ---------------------------------------------------------------------------
