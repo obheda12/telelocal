@@ -12,6 +12,7 @@ from querybot.handlers import (
     _chat_deep_link,
     _commitments_scaling_params,
     _counterparty_name,
+    _name_variants,
     _extract_mentions_window_days,
     _extract_open_questions_window_days,
     _inject_chat_links,
@@ -1658,6 +1659,42 @@ class TestCounterpartyName:
 
     def test_empty_after_strip_returns_full(self):
         assert _counterparty_name("Monad <> ") == "Monad <> "
+
+
+class TestNameVariants:
+    def test_monad_prefix(self):
+        assert "Composable Security" in _name_variants("Monad <> Composable Security")
+
+    def test_monad_suffix(self):
+        assert "Octane" in _name_variants("Octane <> Monad")
+
+    def test_monad_dash(self):
+        assert "Morpho" in _name_variants("Monad - Morpho")
+
+    def test_monad_parenthetical(self):
+        variants = _name_variants("Monad (Ecosystem) <> Zenith/Zellic/C4")
+        assert "Zenith/Zellic/C4" in variants
+
+    def test_multi_part_with_pipe(self):
+        variants = _name_variants("USG | Monad x RareSkills")
+        assert "USG" in variants
+        assert "RareSkills" in variants
+        assert "USG | RareSkills" in variants
+
+    def test_monad_foundation_suffix(self):
+        assert "Bean Exchange" in _name_variants("Bean Exchange <> Monad Foundation")
+
+    def test_no_monad(self):
+        assert "Folks Finance" in _name_variants("Folks Finance")
+
+    def test_no_separators(self):
+        variants = _name_variants("Peridot<>Monad")
+        assert "Peridot" in variants
+
+    def test_pipe_and_ampersand(self):
+        variants = _name_variants("Omar | Monad & Mosin Shaikh")
+        assert "Omar" in variants
+        assert "Mosin Shaikh" in variants
 
 
 class TestBuildChatLinkMap:

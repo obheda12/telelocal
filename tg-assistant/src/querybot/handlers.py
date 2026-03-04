@@ -68,6 +68,13 @@ _COUNTERPARTY_PREFIX_RE = re.compile(
     r"^(?:Monad(?:\s+Foundation)?\s*(?:<>|x)\s*)", re.IGNORECASE,
 )
 _BOLD_TAG_RE = re.compile(r"<b>(.*?)</b>", re.IGNORECASE | re.DOTALL)
+# Separators used between company names in chat titles
+_CHAT_NAME_SEP_RE = re.compile(
+    r"\s*<>\s*|\s+x\s+|\s+-\s+|\s+&\s+", re.IGNORECASE,
+)
+_MONAD_SEGMENT_RE = re.compile(
+    r"^monad(?:\s*\(.*?\))?(?:\s+foundation)?$", re.IGNORECASE,
+)
 
 
 def _chat_deep_link(chat_id: int) -> Optional[str]:
@@ -93,6 +100,32 @@ def _counterparty_name(title: str) -> str:
     return stripped or title
 
 
+def _name_variants(title: str) -> List[str]:
+    """Extract non-Monad name segments from a chat title.
+
+    Handles separators ``<>``, ``x``, ``-``, ``&`` and ``|``, plus
+    parenthetical suffixes like ``Monad (Ecosystem)``.
+    """
+    # Split by <>, x, -, &
+    parts = [p.strip() for p in _CHAT_NAME_SEP_RE.split(title) if p.strip()]
+    # Further split by | (e.g. "USG | Monad x RareSkills")
+    expanded: list[str] = []
+    for part in parts:
+        expanded.extend(s.strip() for s in part.split("|") if s.strip())
+    # Filter out Monad segments
+    non_monad = [p for p in expanded if not _MONAD_SEGMENT_RE.match(p)]
+    variants: list[str] = []
+    for p in non_monad:
+        if len(p) >= 3:
+            variants.append(p)
+    # Multi-part join (e.g. "USG | RareSkills" from "USG | Monad x RareSkills")
+    if len(non_monad) > 1:
+        joined = " | ".join(non_monad)
+        if joined.lower() != title.lower():
+            variants.append(joined)
+    return variants
+
+
 def _build_chat_link_map(results: List[SearchResult]) -> Dict[str, str]:
     """Build a lowercase chat-name -> deep-link map from search results."""
     seen_chat_ids: set[int] = set()
@@ -107,9 +140,8 @@ def _build_chat_link_map(results: List[SearchResult]) -> Dict[str, str]:
             skipped.append((r.chat_id, r.chat_title))
             continue
         link_map[r.chat_title.lower()] = url
-        cp = _counterparty_name(r.chat_title)
-        if cp.lower() != r.chat_title.lower():
-            link_map[cp.lower()] = url
+        for variant in _name_variants(r.chat_title):
+            link_map[variant.lower()] = url
     if skipped:
         logger.warning(
             "Chat link map: %d linkable, %d skipped (non-supergroup IDs: %s)",
