@@ -615,19 +615,19 @@ class MessageSearch:
         days_back: int = 3,
         limit: int = 500,
     ) -> List[SearchResult]:
-        """Return owner messages containing commitment language, plus context.
+        """Return all owner outbound messages, scored by commitment language.
 
-        First finds owner messages matching commitment phrases (I'll, will do,
-        let me, etc.), then includes other owner messages from the same chats
-        so the LLM can see follow-through context (e.g. a later message
-        fulfilling an earlier promise).
+        Returns every message sent by the owner in the timeframe. Messages
+        matching commitment phrases (I'll, will do, let me, etc.) are scored
+        2.0 as a hint; all others scored 1.0. The LLM makes the final call
+        on what constitutes a commitment — the regex is a signal, not a gate.
         """
         limit = max(1, int(limit))
         days_back = max(1, int(days_back))
 
         cutoff = datetime.now(timezone.utc) - timedelta(days=days_back)
 
-        # Commitment-language regex — passed as $4 to avoid apostrophe quoting issues.
+        # Commitment-language regex — passed as $3 to avoid apostrophe quoting issues.
         commitment_regex = (
             r"(?:^|\W)("
             r"i'll|i will|let me|i can|will do|"
@@ -642,26 +642,18 @@ class MessageSearch:
         params: List[Any] = [int(owner_id), cutoff, commitment_regex, limit]
 
         sql = f"""
-            WITH {self._fresh_chats_cte_sql()},
-            commitment_chats AS (
-                SELECT DISTINCT m.chat_id
-                FROM messages m
-                WHERE {self._fresh_chats_condition("m")}
-                  AND m.sender_id = $1
-                  AND m.timestamp >= $2
-                  AND COALESCE(m.text, '') ~* $3
-            )
+            WITH {self._fresh_chats_cte_sql()}
             SELECT m.message_id, m.chat_id, c.title, m.sender_name, m.sender_id,
                    m.reply_to_msg_id, m.thread_top_msg_id, m.is_topic_message,
                    m.timestamp, m.text,
-                   CASE WHEN COALESCE(m.text, '') ~* $3 THEN 2.0 ELSE 1.0 END AS score
+                   CASE WHEN COALESCE(m.text, '') ~* $3
+                        THEN 2.0 ELSE 1.0 END AS score
             FROM messages m
             JOIN chats c ON c.chat_id = m.chat_id
-            JOIN commitment_chats cc ON cc.chat_id = m.chat_id
             WHERE {self._fresh_chats_condition("m")}
               AND m.sender_id = $1
               AND m.timestamp >= $2
-            ORDER BY m.timestamp DESC, m.message_id DESC
+            ORDER BY score DESC, m.timestamp DESC, m.message_id DESC
             LIMIT $4
         """
 

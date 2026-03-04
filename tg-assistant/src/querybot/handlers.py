@@ -996,13 +996,17 @@ async def handle_commitments(
         return
 
     prompt = (
-        f"Triage my outbound commitments/promises from the last {days} day(s). "
+        f"Review ALL my outbound messages from the last {days} day(s). "
+        "Give me a full overview of what I've done, said I would do, or committed to. "
+        "Messages with score=2.0 matched commitment-language patterns (I'll, will do, "
+        "let me, etc.) — use these as strong signals but also look at ALL messages "
+        "for implicit commitments, action items, or follow-ups I may have taken on.\n\n"
         "I need to see what I may have dropped FIRST.\n\n"
         "Sections (in this order, omit empty ones):\n"
-        "1. <code><b>LIKELY DROPPED</b></code> — I promised something but there's no visible follow-through.\n"
+        "1. <code><b>LIKELY DROPPED</b></code> — I promised or took on something but there's no visible follow-through.\n"
         "2. <code><b>IN PROGRESS</b></code> — commitment appears ongoing or partially addressed.\n"
         "3. <code><b>COMPLETED</b></code> — commitment appears fulfilled based on later messages.\n\n"
-        "Use bullet points for each item. Include: chat name, what was promised, "
+        "Use bullet points for each item. Include: chat name, what was promised or taken on, "
         "when, enough context to act, and timestamp.\n"
         "Order items within each section by urgency. "
         "All times are in ET (Eastern Time). "
