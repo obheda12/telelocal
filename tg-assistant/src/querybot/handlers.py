@@ -13,7 +13,7 @@ import html
 import logging
 import re
 from functools import wraps
-from typing import Any, Callable, Coroutine, List, Optional, Tuple
+from typing import Any, Callable, Coroutine, Dict, List, Optional, Tuple
 
 from telegram import Update
 from telegram.constants import ChatAction, ParseMode
@@ -22,7 +22,7 @@ from telegram.ext import ContextTypes
 import asyncpg
 
 from querybot.llm import ClaudeAssistant
-from querybot.search import MessageSearch
+from querybot.search import MessageSearch, SearchResult
 from shared.audit import AuditLogger
 from shared.safety import ContentSanitizer, InputValidator
 
@@ -64,6 +64,64 @@ _WINDOW_DAY_RE = re.compile(
     r"\b(?:(?:past|last)\s+)?(\d{1,3})\s*(day|days|d|week|weeks|w)\b",
     re.IGNORECASE,
 )
+_COUNTERPARTY_PREFIX_RE = re.compile(
+    r"^(?:Monad(?:\s+Foundation)?\s*(?:<>|x)\s*)", re.IGNORECASE,
+)
+_BOLD_TAG_RE = re.compile(r"<b>(.*?)</b>", re.IGNORECASE | re.DOTALL)
+
+
+def _chat_deep_link(chat_id: int) -> Optional[str]:
+    """Build a ``t.me`` deep link for a supergroup/channel chat ID."""
+    if chat_id < -1_000_000_000_000:
+        internal_id = abs(chat_id) - 1_000_000_000_000
+        return f"https://t.me/c/{internal_id}/1"
+    return None
+
+
+def _counterparty_name(title: str) -> str:
+    """Strip ``Monad <> `` / ``Monad x `` / ``Monad Foundation <> `` prefix."""
+    stripped = _COUNTERPARTY_PREFIX_RE.sub("", title).strip()
+    return stripped or title
+
+
+def _build_chat_link_map(results: List[SearchResult]) -> Dict[str, str]:
+    """Build a lowercase chat-name -> deep-link map from search results."""
+    seen_chat_ids: set[int] = set()
+    link_map: Dict[str, str] = {}
+    for r in results:
+        if r.chat_id in seen_chat_ids:
+            continue
+        seen_chat_ids.add(r.chat_id)
+        url = _chat_deep_link(r.chat_id)
+        if not url:
+            continue
+        link_map[r.chat_title.lower()] = url
+        cp = _counterparty_name(r.chat_title)
+        if cp.lower() != r.chat_title.lower():
+            link_map[cp.lower()] = url
+    return link_map
+
+
+def _inject_chat_links(text: str, link_map: Dict[str, str]) -> str:
+    """Wrap ``<b>ChatName</b>`` in ``<a href="URL">`` when name is in link_map."""
+    if not link_map:
+        return text
+
+    def _replacer(match: re.Match) -> str:
+        inner = match.group(1)
+        key = inner.strip().lower()
+        url = link_map.get(key)
+        if url is None:
+            return match.group(0)
+        # Skip if already inside an <a> tag
+        before = text[:match.start()]
+        last_a_open = before.rfind("<a ")
+        last_a_close = before.rfind("</a>")
+        if last_a_open > last_a_close:
+            return match.group(0)
+        return f'<a href="{url}"><b>{inner}</b></a>'
+
+    return _BOLD_TAG_RE.sub(_replacer, text)
 
 
 # ---------------------------------------------------------------------------
@@ -602,8 +660,13 @@ async def _reply_answer(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
     answer: str,
+    search_results: Optional[List[SearchResult]] = None,
 ) -> None:
     """Sanitize, split, and send an assistant answer."""
+    if search_results:
+        link_map = _build_chat_link_map(search_results)
+        if link_map:
+            answer = _inject_chat_links(answer, link_map)
     chunks = _split_message(_sanitize_telegram_html(answer))
     await _reply_chunks(update, context, chunks)
 
@@ -625,6 +688,7 @@ async def _reply_sections(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
     answer: str,
+    search_results: Optional[List[SearchResult]] = None,
 ) -> None:
     """Split on ===SECTION=== markers and send each section as its own message.
 
@@ -632,6 +696,11 @@ async def _reply_sections(
     Each section is sent immediately (not subject to auto_chunks gating)
     since sections are intentional message boundaries, not overflow.
     """
+    if search_results:
+        link_map = _build_chat_link_map(search_results)
+        if link_map:
+            answer = _inject_chat_links(answer, link_map)
+
     sections = [s.strip() for s in answer.split("===SECTION===") if s.strip()]
     if len(sections) <= 1:
         await _reply_answer(update, context, _clean_response(answer))
@@ -940,7 +1009,7 @@ async def handle_mentions(
         model_override=_QUICK_MODE_MODEL if detail_mode == "quick" else None,
         min_messages_per_group=2,
     )
-    await _reply_answer(update, context, answer)
+    await _reply_answer(update, context, answer, search_results=results)
 
     await audit.log(
         "querybot",
@@ -1034,7 +1103,7 @@ async def handle_commitments(
         model_override=None,
         min_messages_per_group=2,
     )
-    await _reply_answer(update, context, answer)
+    await _reply_answer(update, context, answer, search_results=results)
 
     await audit.log(
         "querybot",
@@ -1158,7 +1227,7 @@ async def handle_bd(
         model_override=_QUICK_MODE_MODEL if detail_mode == "quick" else None,
         min_messages_per_group=2,
     )
-    await _reply_sections(update, context, answer)
+    await _reply_sections(update, context, answer, search_results=results)
 
     await audit.log(
         "querybot",
@@ -1262,7 +1331,7 @@ async def handle_summary(
         model_override=_QUICK_MODE_MODEL if detail_mode == "quick" else None,
         min_messages_per_group=2,
     )
-    await _reply_sections(update, context, answer)
+    await _reply_sections(update, context, answer, search_results=results)
 
     await audit.log(
         "querybot",
@@ -1382,7 +1451,7 @@ async def handle_message(
             owner_aliases=aliases,
             min_messages_per_group=2,
         )
-        await _reply_answer(update, context, answer)
+        await _reply_answer(update, context, answer, search_results=mention_results)
         await audit.log(
             "querybot",
             "query_mentions",
@@ -1439,7 +1508,7 @@ async def handle_message(
             model_override=_QUICK_MODE_MODEL if detail_mode == "quick" else None,
             min_messages_per_group=2,
         )
-        await _reply_answer(update, context, answer)
+        await _reply_answer(update, context, answer, search_results=open_questions)
         await audit.log(
             "querybot",
             "query_bd",
@@ -1570,7 +1639,7 @@ async def handle_message(
     )
 
     # 6. Reply
-    await _reply_answer(update, context, answer)
+    await _reply_answer(update, context, answer, search_results=results)
 
     # 7. Audit (metadata only — never log message content)
     await audit.log(

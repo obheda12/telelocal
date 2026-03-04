@@ -8,9 +8,13 @@ import pytest
 
 from querybot.handlers import (
     _bd_scaling_params,
+    _build_chat_link_map,
+    _chat_deep_link,
     _commitments_scaling_params,
+    _counterparty_name,
     _extract_mentions_window_days,
     _extract_open_questions_window_days,
+    _inject_chat_links,
     _mentions_scaling_params,
     _parse_bd_args,
     _parse_window_and_detail_args,
@@ -1609,3 +1613,151 @@ class TestCommitmentsCommandPipeline:
 
         llm_kwargs = mock_llm.query.call_args.kwargs
         assert llm_kwargs.get("model_override") is None
+
+
+# ---------------------------------------------------------------------------
+# Chat deep-link helpers
+# ---------------------------------------------------------------------------
+
+
+class TestChatDeepLink:
+    def test_supergroup_returns_url(self):
+        chat_id = -1_001_234_567_890
+        url = _chat_deep_link(chat_id)
+        assert url == "https://t.me/c/1234567890/1"
+
+    def test_regular_group_returns_none(self):
+        assert _chat_deep_link(-123456) is None
+
+    def test_private_chat_returns_none(self):
+        assert _chat_deep_link(999999) is None
+
+    def test_boundary_value(self):
+        assert _chat_deep_link(-1_000_000_000_000) is None
+        assert _chat_deep_link(-1_000_000_000_001) == "https://t.me/c/1/1"
+
+
+class TestCounterpartyName:
+    def test_monad_arrow_prefix(self):
+        assert _counterparty_name("Monad <> Composable Security") == "Composable Security"
+
+    def test_monad_x_prefix(self):
+        assert _counterparty_name("Monad x PartnerCo") == "PartnerCo"
+
+    def test_monad_foundation_prefix(self):
+        assert _counterparty_name("Monad Foundation <> Acme Corp") == "Acme Corp"
+
+    def test_no_prefix(self):
+        assert _counterparty_name("Internal Team") == "Internal Team"
+
+    def test_case_insensitive(self):
+        assert _counterparty_name("monad <> FooBar") == "FooBar"
+
+    def test_empty_after_strip_returns_full(self):
+        assert _counterparty_name("Monad <> ") == "Monad <> "
+
+
+class TestBuildChatLinkMap:
+    def test_builds_both_keys(self):
+        results = [
+            SearchResult(
+                message_id=1, chat_id=-1_001_111_111_111,
+                chat_title="Monad <> Acme Corp",
+                sender_name="Alice", timestamp="2024-01-01T00:00:00Z",
+                text="hello", score=1.0,
+            ),
+        ]
+        link_map = _build_chat_link_map(results)
+        url = "https://t.me/c/1111111111/1"
+        assert link_map["monad <> acme corp"] == url
+        assert link_map["acme corp"] == url
+
+    def test_skips_non_linkable(self):
+        results = [
+            SearchResult(
+                message_id=1, chat_id=-123456,
+                chat_title="Small Group",
+                sender_name="Bob", timestamp="2024-01-01T00:00:00Z",
+                text="hi", score=1.0,
+            ),
+        ]
+        assert _build_chat_link_map(results) == {}
+
+    def test_deduplicates_by_chat_id(self):
+        results = [
+            SearchResult(
+                message_id=1, chat_id=-1_001_111_111_111,
+                chat_title="Monad <> Foo",
+                sender_name="A", timestamp="2024-01-01T00:00:00Z",
+                text="a", score=1.0,
+            ),
+            SearchResult(
+                message_id=2, chat_id=-1_001_111_111_111,
+                chat_title="Monad <> Foo",
+                sender_name="B", timestamp="2024-01-01T00:00:00Z",
+                text="b", score=1.0,
+            ),
+        ]
+        link_map = _build_chat_link_map(results)
+        assert len(link_map) == 2  # full title + counterparty
+
+
+class TestInjectChatLinks:
+    def test_basic_injection(self):
+        link_map = {"acme": "https://t.me/c/123/1"}
+        text = "Check <b>Acme</b> for updates"
+        result = _inject_chat_links(text, link_map)
+        assert result == 'Check <a href="https://t.me/c/123/1"><b>Acme</b></a> for updates'
+
+    def test_case_insensitive_match(self):
+        link_map = {"acme corp": "https://t.me/c/123/1"}
+        text = "<b>ACME Corp</b> needs review"
+        result = _inject_chat_links(text, link_map)
+        assert '<a href="https://t.me/c/123/1"><b>ACME Corp</b></a>' in result
+
+    def test_no_match_leaves_unchanged(self):
+        link_map = {"acme": "https://t.me/c/123/1"}
+        text = "<b>Unknown Chat</b> info"
+        result = _inject_chat_links(text, link_map)
+        assert result == text
+
+    def test_skip_already_linked(self):
+        link_map = {"acme": "https://t.me/c/123/1"}
+        text = '<a href="https://other.url"><b>Acme</b></a>'
+        result = _inject_chat_links(text, link_map)
+        assert result == text
+
+    def test_empty_link_map_passthrough(self):
+        text = "<b>Foo</b> bar"
+        assert _inject_chat_links(text, {}) == text
+
+    def test_multiple_bold_tags(self):
+        link_map = {
+            "alpha": "https://t.me/c/1/1",
+            "beta": "https://t.me/c/2/1",
+        }
+        text = "<b>Alpha</b> and <b>Beta</b> and <b>Gamma</b>"
+        result = _inject_chat_links(text, link_map)
+        assert '<a href="https://t.me/c/1/1"><b>Alpha</b></a>' in result
+        assert '<a href="https://t.me/c/2/1"><b>Beta</b></a>' in result
+        assert "<b>Gamma</b>" in result
+
+    def test_preserves_non_chat_bold(self):
+        link_map = {"acme": "https://t.me/c/123/1"}
+        text = "<b>Action Items:</b> Check <b>Acme</b>"
+        result = _inject_chat_links(text, link_map)
+        assert "<b>Action Items:</b>" in result
+        assert '<a href="https://t.me/c/123/1"><b>Acme</b></a>' in result
+
+
+class TestChatLinksIntegration:
+    """Verify _sanitize_telegram_html preserves injected <a> tags."""
+
+    def test_links_survive_sanitization(self):
+        link_map = {"acme": "https://t.me/c/123/1"}
+        text = "Check <b>Acme</b> for P&L updates"
+        linked = _inject_chat_links(text, link_map)
+        sanitized = _sanitize_telegram_html(linked)
+        assert 'href="https://t.me/c/123/1"' in sanitized
+        assert "<b>Acme</b>" in sanitized
+        assert "P&amp;L" in sanitized
