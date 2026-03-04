@@ -71,7 +71,13 @@ _BOLD_TAG_RE = re.compile(r"<b>(.*?)</b>", re.IGNORECASE | re.DOTALL)
 
 
 def _chat_deep_link(chat_id: int) -> Optional[str]:
-    """Build a ``t.me`` deep link for a supergroup/channel chat ID."""
+    """Build a deep link for a Telegram chat.
+
+    Supergroups/channels (Telethon marked ID < -1 trillion):
+        ``https://t.me/c/{internal_id}/1`` — standard web deep link.
+    Regular groups (small negative IDs) cannot be deep-linked via ``t.me``
+    because ``t.me/c/`` resolves in the channel namespace, not the chat one.
+    """
     if chat_id < -1_000_000_000_000:
         internal_id = abs(chat_id) - 1_000_000_000_000
         return f"https://t.me/c/{internal_id}/1"
@@ -88,17 +94,25 @@ def _build_chat_link_map(results: List[SearchResult]) -> Dict[str, str]:
     """Build a lowercase chat-name -> deep-link map from search results."""
     seen_chat_ids: set[int] = set()
     link_map: Dict[str, str] = {}
+    skipped: list[tuple[int, str]] = []
     for r in results:
         if r.chat_id in seen_chat_ids:
             continue
         seen_chat_ids.add(r.chat_id)
         url = _chat_deep_link(r.chat_id)
         if not url:
+            skipped.append((r.chat_id, r.chat_title))
             continue
         link_map[r.chat_title.lower()] = url
         cp = _counterparty_name(r.chat_title)
         if cp.lower() != r.chat_title.lower():
             link_map[cp.lower()] = url
+    if skipped:
+        logger.warning(
+            "Chat link map: %d linkable, %d skipped (non-supergroup IDs: %s)",
+            len(link_map), len(skipped),
+            ", ".join(f"{cid} ({t})" for cid, t in skipped),
+        )
     return link_map
 
 
