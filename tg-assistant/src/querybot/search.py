@@ -608,6 +608,55 @@ class MessageSearch:
         rows = await self._pool.fetch(sql, *params)
         return self._rows_to_results(rows)
 
+    async def owner_commitments(
+        self,
+        *,
+        owner_id: int,
+        days_back: int = 3,
+        limit: int = 500,
+    ) -> List[SearchResult]:
+        """Return recent messages sent by the owner containing commitment language.
+
+        Matches phrases like "I'll", "I will", "let me", "will do", etc.
+        to surface promises the owner may have dropped.
+        """
+        limit = max(1, int(limit))
+        days_back = max(1, int(days_back))
+
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days_back)
+        params: List[Any] = [int(owner_id), cutoff, limit]
+
+        # PostgreSQL case-insensitive regex for commitment phrases
+        commitment_regex = (
+            r"(?:^|\W)("
+            r"i'll|i will|let me|i can|will do|"
+            r"i'm going to|i need to|i should|"
+            r"i'm on it|on it|"
+            r"will send|will follow up|will check|will look|"
+            r"will get back|will share|will review|will update|"
+            r"will handle|will take care"
+            r")(?:\W|$)"
+        )
+
+        sql = f"""
+            WITH {self._fresh_chats_cte_sql()}
+            SELECT m.message_id, m.chat_id, c.title, m.sender_name, m.sender_id,
+                   m.reply_to_msg_id, m.thread_top_msg_id, m.is_topic_message,
+                   m.timestamp, m.text,
+                   1.0 AS score
+            FROM messages m
+            JOIN chats c ON c.chat_id = m.chat_id
+            WHERE {self._fresh_chats_condition("m")}
+              AND m.sender_id = $1
+              AND m.timestamp >= $2
+              AND COALESCE(m.text, '') ~* '{commitment_regex}'
+            ORDER BY m.timestamp DESC, m.message_id DESC
+            LIMIT $3
+        """
+
+        rows = await self._pool.fetch(sql, *params)
+        return self._rows_to_results(rows)
+
     # ------------------------------------------------------------------
     # Full-text search (PostgreSQL tsvector / tsquery)
     # ------------------------------------------------------------------

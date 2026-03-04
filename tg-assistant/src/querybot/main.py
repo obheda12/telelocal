@@ -30,6 +30,7 @@ from telegram.ext import (
 
 from querybot.handlers import (
     handle_bd,
+    handle_commitments,
     handle_help,
     handle_iam,
     handle_message,
@@ -216,7 +217,8 @@ def build_application(config: Dict[str, Any]) -> Application:
         try:
             commands = [
                 BotCommand("bd", "Chat triage briefing (1d|3d|1w, 10-100, quick|detailed)"),
-                BotCommand("mentions", "Triage your mentions (1d|3d|1w, quick|detailed)"),
+                BotCommand("mentions", "Triage your mentions (3d|1w|2w, default 1w)"),
+                BotCommand("commitments", "Track your open promises (1d|3d|1w, default 3d)"),
                 BotCommand("summary", "Cross-chat recap (1d|3d|1w, quick|detailed)"),
                 BotCommand("iam", "Show/set owner identity binding"),
                 BotCommand("stats", "Sync and usage statistics"),
@@ -250,6 +252,7 @@ def build_application(config: Dict[str, Any]) -> Application:
     app.add_handler(CommandHandler("help", handle_help, filters=owner_filter))
     app.add_handler(CommandHandler("stats", handle_stats, filters=owner_filter))
     app.add_handler(CommandHandler("mentions", handle_mentions, filters=owner_filter))
+    app.add_handler(CommandHandler("commitments", handle_commitments, filters=owner_filter))
     app.add_handler(CommandHandler("bd", handle_bd, filters=owner_filter))
     app.add_handler(CommandHandler("summary", handle_summary, filters=owner_filter))
     app.add_handler(CommandHandler("more", handle_more, filters=owner_filter))

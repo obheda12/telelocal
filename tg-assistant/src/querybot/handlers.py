@@ -49,6 +49,8 @@ _WINDOW_TO_DAYS = {
     "72h": 3,
     "1w": 7,
     "7d": 7,
+    "2w": 14,
+    "14d": 14,
 }
 _DETAIL_ALIASES = {
     "quick": "quick",
@@ -253,7 +255,7 @@ def _parse_window_and_detail_args(
     Accepted detail modes: ``quick`` or ``detailed``.
     """
     days = int(default_days)
-    detail_mode = "quick"
+    detail_mode = "detailed"
     unknown: List[str] = []
 
     for raw in args:
@@ -289,7 +291,7 @@ def _parse_bd_args(
     """
     chat_count = int(default_count)
     days = int(default_days)
-    detail_mode = "quick"
+    detail_mode = "detailed"
     unknown: List[str] = []
 
     for raw in args:
@@ -348,6 +350,17 @@ def _mentions_scaling_params(days: int, detail_mode: str) -> Tuple[int, int, int
     else:
         ctx = min(200_000, 80_000 + days * 18_000)     # same context for good triage
         tokens = min(4_096, 2_048 + days * 300)        # 1d→2348, 3d→2948, 7d→4096
+    return limit, ctx, tokens
+
+
+def _commitments_scaling_params(days: int) -> Tuple[int, int, int]:
+    """Return ``(limit, context_max_chars, max_tokens)`` for commitments queries.
+
+    Always uses "detailed" scaling — commitment triage needs full context.
+    """
+    limit = 500  # effectively uncapped — get all commitments in the timeframe
+    ctx = min(200_000, 80_000 + days * 18_000)     # 1d→98k, 3d→134k, 7d→200k
+    tokens = min(8_000, 4_096 + days * 500)        # 1d→4596, 3d→5596, 7d→7596
     return limit, ctx, tokens
 
 
@@ -770,8 +783,10 @@ async def handle_help(
         "Briefing commands:\n"
         "  /bd [1d|3d|1w] [10|25|50|100] [quick|detailed]\n"
         "      Chat triage — needs response / watch / quiet\n"
-        "  /mentions [1d|3d|1w] [quick|detailed]\n"
-        "      Mention triage — Act Now / Reply Soon / FYI\n"
+        "  /mentions [3d|1w|2w]\n"
+        "      Mention triage — Act Now / Reply Soon / FYI (default 1w)\n"
+        "  /commitments [1d|3d|1w]\n"
+        "      Your open promises — Likely Dropped / In Progress / Completed (default 3d)\n"
         "  /summary [1d|3d|1w] [quick|detailed]\n"
         "      Cross-chat recap — Action Items / Key Updates / Quiet\n\n"
         "Parameters (all optional, any order):\n"
@@ -845,13 +860,20 @@ async def handle_mentions(
     llm: ClaudeAssistant = context.bot_data["llm"]
     audit: AuditLogger = context.bot_data["audit"]
 
-    days, detail_mode, parse_err = _parse_window_and_detail_args(
+    _MENTIONS_ALLOWED_DAYS = {3, 7, 14}
+    days, _, parse_err = _parse_window_and_detail_args(
         context.args or [],
-        default_days=3,
+        default_days=7,
     )
+    detail_mode = "detailed"
     if parse_err:
         await update.message.reply_text(
-            f"{parse_err}\nUsage: /mentions [1d|3d|1w] [quick|detailed]"
+            f"{parse_err}\nUsage: /mentions [3d|1w|2w]"
+        )
+        return
+    if days not in _MENTIONS_ALLOWED_DAYS:
+        await update.message.reply_text(
+            f"Invalid window for /mentions. Use 3d, 1w, or 2w."
         )
         return
 
@@ -926,6 +948,94 @@ async def handle_mentions(
             "detail_mode": detail_mode,
             "results_count": len(results),
             "alias_count": len(normalized_aliases),
+        },
+        success=True,
+    )
+
+
+@owner_only
+async def handle_commitments(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle `/commitments` for tracking owner's open promises."""
+    search: MessageSearch = context.bot_data["search"]
+    llm: ClaudeAssistant = context.bot_data["llm"]
+    audit: AuditLogger = context.bot_data["audit"]
+
+    _COMMITMENTS_ALLOWED_DAYS = {1, 3, 7}
+    days, _, parse_err = _parse_window_and_detail_args(
+        context.args or [],
+        default_days=3,
+    )
+    detail_mode = "detailed"
+    if parse_err:
+        await update.message.reply_text(
+            f"{parse_err}\nUsage: /commitments [1d|3d|1w]"
+        )
+        return
+    if days not in _COMMITMENTS_ALLOWED_DAYS:
+        await update.message.reply_text(
+            f"Invalid window for /commitments. Use 1d, 3d, or 1w."
+        )
+        return
+
+    await _send_typing(update, context)
+    owner_id = _resolve_owner_user_id(update, context)
+
+    limit, context_max_chars, max_tokens = _commitments_scaling_params(days)
+    results = await search.owner_commitments(
+        owner_id=owner_id,
+        days_back=days,
+        limit=limit,
+    )
+
+    if not results:
+        await update.message.reply_text(
+            f"No commitment-like messages found in the last {days} day(s)."
+        )
+        return
+
+    prompt = (
+        f"Triage my outbound commitments/promises from the last {days} day(s). "
+        "I need to see what I may have dropped FIRST.\n\n"
+        "Sections (in this order, omit empty ones):\n"
+        "1. <code><b>LIKELY DROPPED</b></code> — I promised something but there's no visible follow-through.\n"
+        "2. <code><b>IN PROGRESS</b></code> — commitment appears ongoing or partially addressed.\n"
+        "3. <code><b>COMPLETED</b></code> — commitment appears fulfilled based on later messages.\n\n"
+        "Use bullet points for each item. Include: chat name, what was promised, "
+        "when, enough context to act, and timestamp.\n"
+        "Order items within each section by urgency. "
+        "All times are in ET (Eastern Time). "
+        "Be thorough — list every qualifying item, don't summarize them away.\n\n"
+        "Chat name rules:\n"
+        "- Chat titles are usually 'Monad <> CompanyName' or similar. "
+        "Drop the 'Monad <> ' / 'Monad x ' / 'Monad Foundation <> ' prefix — "
+        "just use the counterparty name "
+        "(e.g. 'Composable Security' not 'Monad Foundation <> Composable Security'). "
+        "If the chat name doesn't follow that pattern, use it as-is.\n\n"
+        "Formatting rules:\n"
+        "- Section headers MUST use exactly: <code><b>HEADER</b></code>\n"
+        "- <b>bold</b> for chat names\n"
+        "- NEVER use --- or *** or === as separators"
+    )
+    answer = await llm.query(
+        prompt,
+        results,
+        context_max_chars=context_max_chars,
+        max_tokens_override=max_tokens,
+        owner_user_id=owner_id,
+        model_override=None,
+        min_messages_per_group=2,
+    )
+    await _reply_answer(update, context, answer)
+
+    await audit.log(
+        "querybot",
+        "command_commitments",
+        {
+            "days_back": days,
+            "detail_mode": detail_mode,
+            "results_count": len(results),
         },
         success=True,
     )
@@ -1173,7 +1283,7 @@ async def handle_more(
             await update.message.reply_text(
                 "No pending response. That was the full previous response. "
                 "For deeper coverage, rerun with detailed mode "
-                "(e.g. /bd 3d detailed or /mentions 1w detailed)."
+                "(e.g. /bd 3d detailed or /mentions 1w)."
             )
         else:
             await update.message.reply_text("No pending response. Ask a new question first.")
@@ -1223,11 +1333,10 @@ async def handle_message(
     mention_days = _extract_mentions_window_days(question)
     if mention_days is not None:
         await _send_typing(update, context)
-        detail_mode = "detailed" if "detail" in question.lower() else "quick"
         owner_id = _resolve_owner_user_id(update, context)
         aliases = _resolve_owner_mention_aliases(update, context)
         limit, context_max_chars, max_tokens = _mentions_scaling_params(
-            mention_days, detail_mode,
+            mention_days, "detailed",
         )
         mention_results = await search.mentions_needing_attention(
             owner_id=owner_id,
@@ -1241,15 +1350,10 @@ async def handle_message(
             )
             return
 
-        if detail_mode == "detailed":
-            item_instruction = (
-                "Use bullet points for each item. Include: chat name, who said it, "
-                "what they need, enough context to act, and timestamp."
-            )
-        else:
-            item_instruction = (
-                "Use bullet points. Each bullet: chat name + one-line context."
-            )
+        item_instruction = (
+            "Use bullet points for each item. Include: chat name, who said it, "
+            "what they need, enough context to act, and timestamp."
+        )
         prompt = (
             f"Triage my mentions/replies from the last {mention_days} day(s). "
             "Put what needs my response FIRST — I need to see that immediately.\n\n"
@@ -1269,7 +1373,6 @@ async def handle_message(
             max_tokens_override=max_tokens,
             owner_user_id=owner_id,
             owner_aliases=aliases,
-            model_override=_QUICK_MODE_MODEL if detail_mode == "quick" else None,
             min_messages_per_group=2,
         )
         await _reply_answer(update, context, answer)
@@ -1279,7 +1382,7 @@ async def handle_message(
             {
                 "question_length": len(question),
                 "days_back": mention_days,
-                "detail_mode": detail_mode,
+                "detail_mode": "detailed",
                 "results_count": len(mention_results),
                 "alias_count": len(aliases),
             },

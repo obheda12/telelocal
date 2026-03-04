@@ -8,6 +8,7 @@ import pytest
 
 from querybot.handlers import (
     _bd_scaling_params,
+    _commitments_scaling_params,
     _extract_mentions_window_days,
     _extract_open_questions_window_days,
     _mentions_scaling_params,
@@ -20,6 +21,7 @@ from querybot.handlers import (
     _summary_scaling_params,
     _try_recent_summary_fast_path,
     handle_bd,
+    handle_commitments,
     handle_iam,
     handle_message,
     handle_mentions,
@@ -226,7 +228,7 @@ class TestCommandArgParsing:
     def test_parse_window_and_detail_defaults(self):
         days, detail_mode, err = _parse_window_and_detail_args([], default_days=1)
         assert days == 1
-        assert detail_mode == "quick"
+        assert detail_mode == "detailed"
         assert err is None
 
     def test_parse_window_and_detail_values(self):
@@ -245,7 +247,7 @@ class TestCommandArgParsing:
         count, days, detail_mode, err = _parse_bd_args([])
         assert count == 25
         assert days == 3
-        assert detail_mode == "quick"
+        assert detail_mode == "detailed"
         assert err is None
 
     def test_parse_bd_all_params(self):
@@ -259,7 +261,7 @@ class TestCommandArgParsing:
         count, days, detail_mode, err = _parse_bd_args(["1d"])
         assert count == 25
         assert days == 1
-        assert detail_mode == "quick"
+        assert detail_mode == "detailed"
         assert err is None
 
     def test_parse_bd_count_only(self):
@@ -318,6 +320,7 @@ def _make_handler_context(
     mock_search.recent_chat_summary_context.return_value = search_results or []
     mock_search.mentions_needing_attention.return_value = search_results or []
     mock_search.open_questions_needing_reply.return_value = search_results or []
+    mock_search.owner_commitments.return_value = search_results or []
 
     mock_llm = AsyncMock()
     mock_llm.extract_query_intent.return_value = intent or QueryIntent(
@@ -683,7 +686,7 @@ class TestScaffoldCommandHandlers:
             search_results=[result],
             llm_answer="Act Now: ...",
         )
-        context.args = ["1d", "quick"]
+        context.args = ["3d"]
         update.effective_user.username = "owner"
 
         await handle_mentions(update, context)
@@ -693,8 +696,8 @@ class TestScaffoldCommandHandlers:
         assert call_kwargs["limit"] == 500  # all mentions in timeframe
         mock_llm.query.assert_called_once()
         llm_kwargs = mock_llm.query.call_args.kwargs
-        assert llm_kwargs["context_max_chars"] == 98000   # min(200k, 80k+18k)
-        assert llm_kwargs["max_tokens_override"] == 2348  # min(4096, 2048+300) — quick
+        assert llm_kwargs["context_max_chars"] == 134000  # min(200k, 80k+3*18k)
+        assert llm_kwargs["max_tokens_override"] == 5596  # min(8000, 4096+3*500) — always detailed
         assert llm_kwargs["min_messages_per_group"] == 2
         assert mock_audit.log.call_args[0][1] == "command_mentions"
 
@@ -785,7 +788,7 @@ class TestScaffoldCommandHandlers:
         )
         llm_kwargs = mock_llm.query.call_args.kwargs
         assert llm_kwargs["context_max_chars"] == 134000   # min(200k, 80k+54k)
-        assert llm_kwargs["max_tokens_override"] == 2948   # min(4096, 2048+900) — quick
+        assert llm_kwargs["max_tokens_override"] == 5596   # min(8000, 4096+1500) — detailed default
         assert llm_kwargs["min_messages_per_group"] == 2
         assert mock_audit.log.call_args[0][1] == "command_bd"
 
@@ -999,7 +1002,7 @@ class TestTypingIndicators:
         update, context, mock_search, mock_llm, _ = _make_handler_context(
             search_results=[result], llm_answer="Triage",
         )
-        context.args = ["1d"]
+        context.args = ["3d"]
         update.effective_user.username = "owner"
 
         await handle_mentions(update, context)
@@ -1068,8 +1071,8 @@ class TestModelRouting:
         assert llm_kwargs["model_override"] is None
 
     @pytest.mark.asyncio
-    async def test_mentions_quick_uses_haiku(self):
-        """quick mode /mentions should pass model_override=Haiku."""
+    async def test_mentions_always_uses_detailed(self):
+        """/mentions always uses detailed mode (no Haiku override)."""
         result = SearchResult(
             message_id=1, chat_id=1, chat_title="Chat",
             sender_name="User", timestamp="2024-01-15T10:00:00Z",
@@ -1078,13 +1081,13 @@ class TestModelRouting:
         update, context, mock_search, mock_llm, _ = _make_handler_context(
             search_results=[result], llm_answer="Triage",
         )
-        context.args = ["1d", "quick"]
+        context.args = ["3d"]
         update.effective_user.username = "owner"
 
         await handle_mentions(update, context)
 
         llm_kwargs = mock_llm.query.call_args.kwargs
-        assert llm_kwargs["model_override"] == _QUICK_MODE_MODEL
+        assert llm_kwargs.get("model_override") is None
 
     @pytest.mark.asyncio
     async def test_free_text_never_uses_model_override(self):
@@ -1446,7 +1449,7 @@ class TestMentionsBreadthFirst:
         assert llm_kwargs["min_messages_per_group"] == 2
 
     @pytest.mark.asyncio
-    async def test_mentions_quick_uses_haiku(self):
+    async def test_mentions_always_detailed_no_haiku(self):
         result = SearchResult(
             message_id=1, chat_id=1, chat_title="Ops",
             sender_name="Alice", timestamp="2024-01-15T10:00:00Z",
@@ -1455,13 +1458,13 @@ class TestMentionsBreadthFirst:
         update, context, mock_search, mock_llm, _ = _make_handler_context(
             search_results=[result], llm_answer="Act Now: ...",
         )
-        context.args = ["1d", "quick"]
+        context.args = ["3d"]
         update.effective_user.username = "owner"
 
         await handle_mentions(update, context)
 
         llm_kwargs = mock_llm.query.call_args.kwargs
-        assert llm_kwargs["model_override"] == _QUICK_MODE_MODEL
+        assert llm_kwargs.get("model_override") is None
 
 
 # ---------------------------------------------------------------------------
@@ -1507,3 +1510,98 @@ class TestSummaryBreadthFirst:
         llm_kwargs = mock_llm.query.call_args.kwargs
         assert llm_kwargs["context_max_chars"] == 98000  # min(200k, 80k+18k)
         assert llm_kwargs["max_tokens_override"] == 4596  # min(8k, 4096+500)
+
+
+# ---------------------------------------------------------------------------
+# _commitments_scaling_params
+# ---------------------------------------------------------------------------
+
+
+class TestCommitmentsScalingParams:
+    def test_1d(self):
+        limit, ctx, tokens = _commitments_scaling_params(1)
+        assert limit == 500      # all commitments in timeframe
+        assert ctx == 98000      # min(200000, 80000+18000)
+        assert tokens == 4596    # min(8000, 4096+500)
+
+    def test_3d(self):
+        limit, ctx, tokens = _commitments_scaling_params(3)
+        assert limit == 500
+        assert ctx == 134000     # min(200000, 80000+54000)
+        assert tokens == 5596    # min(8000, 4096+1500)
+
+    def test_7d(self):
+        limit, ctx, tokens = _commitments_scaling_params(7)
+        assert limit == 500
+        assert ctx == 200000     # min(200000, 80000+126000) → capped
+        assert tokens == 7596    # min(8000, 4096+3500)
+
+
+# ---------------------------------------------------------------------------
+# /commitments command pipeline
+# ---------------------------------------------------------------------------
+
+
+class TestCommitmentsCommandPipeline:
+    @pytest.mark.asyncio
+    async def test_commitments_command_pipeline(self):
+        result = SearchResult(
+            message_id=1,
+            chat_id=1,
+            chat_title="Ops Chat",
+            sender_name="Owner",
+            timestamp="2024-01-15T10:00:00Z",
+            text="I'll send the report tomorrow",
+            score=1.0,
+        )
+        update, context, mock_search, mock_llm, mock_audit = _make_handler_context(
+            search_results=[result],
+            llm_answer="Likely Dropped: ...",
+        )
+        context.args = ["3d"]
+
+        await handle_commitments(update, context)
+
+        mock_search.owner_commitments.assert_called_once()
+        call_kwargs = mock_search.owner_commitments.call_args.kwargs
+        assert call_kwargs["limit"] == 500  # all commitments in timeframe
+        mock_llm.query.assert_called_once()
+        llm_kwargs = mock_llm.query.call_args.kwargs
+        assert llm_kwargs["context_max_chars"] == 134000  # min(200k, 80k+3*18k)
+        assert llm_kwargs["max_tokens_override"] == 5596  # min(8000, 4096+3*500) — always detailed
+        assert llm_kwargs["min_messages_per_group"] == 2
+        assert mock_audit.log.call_args[0][1] == "command_commitments"
+
+    @pytest.mark.asyncio
+    async def test_commitments_passes_min_messages_per_group(self):
+        result = SearchResult(
+            message_id=1, chat_id=1, chat_title="Ops",
+            sender_name="Owner", timestamp="2024-01-15T10:00:00Z",
+            text="I'll handle it", score=1.0,
+        )
+        update, context, mock_search, mock_llm, mock_audit = _make_handler_context(
+            search_results=[result], llm_answer="Likely Dropped: ...",
+        )
+        context.args = ["1d"]
+
+        await handle_commitments(update, context)
+
+        llm_kwargs = mock_llm.query.call_args.kwargs
+        assert llm_kwargs["min_messages_per_group"] == 2
+
+    @pytest.mark.asyncio
+    async def test_commitments_always_detailed_no_haiku(self):
+        result = SearchResult(
+            message_id=1, chat_id=1, chat_title="Ops",
+            sender_name="Owner", timestamp="2024-01-15T10:00:00Z",
+            text="Will follow up on this", score=1.0,
+        )
+        update, context, mock_search, mock_llm, _ = _make_handler_context(
+            search_results=[result], llm_answer="Likely Dropped: ...",
+        )
+        context.args = ["3d"]
+
+        await handle_commitments(update, context)
+
+        llm_kwargs = mock_llm.query.call_args.kwargs
+        assert llm_kwargs.get("model_override") is None
