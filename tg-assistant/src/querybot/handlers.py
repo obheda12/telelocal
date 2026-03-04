@@ -383,7 +383,7 @@ def _parse_window_and_detail_args(
     Accepted detail modes: ``quick`` or ``detailed``.
     """
     days = int(default_days)
-    detail_mode = "detailed"
+    detail_mode = "quick"
     unknown: List[str] = []
 
     for raw in args:
@@ -417,9 +417,9 @@ def _parse_bd_args(
 
     Returns ``(chat_count, days, detail_mode, error_or_none)``.
     """
-    chat_count = int(default_count)
+    chat_count: Optional[int] = None
     days = int(default_days)
-    detail_mode = "detailed"
+    detail_mode = "quick"
     unknown: List[str] = []
 
     for raw in args:
@@ -441,9 +441,20 @@ def _parse_bd_args(
             continue
         unknown.append(raw)
 
+    # Scale default chat count with timeframe when not explicitly set
+    if chat_count is None:
+        _DEFAULT_CHATS_BY_DAYS = {1: 25, 3: 50, 7: 100}
+        chat_count = _DEFAULT_CHATS_BY_DAYS.get(days, int(default_count))
+
     if unknown:
         return chat_count, days, detail_mode, f"Unknown option(s): {' '.join(unknown)}"
     return chat_count, days, detail_mode, None
+
+
+def _bd_chat_count(days: int) -> int:
+    """Return default chat count for /bd based on timeframe."""
+    _DEFAULT_CHATS = {1: 25, 3: 50, 7: 100}
+    return _DEFAULT_CHATS.get(days, 25)
 
 
 def _bd_scaling_params(days: int, detail_mode: str) -> Tuple[int, int, int]:
@@ -460,7 +471,7 @@ def _bd_scaling_params(days: int, detail_mode: str) -> Tuple[int, int, int]:
         tokens = min(8_000, 4_096 + days * 500)      # 1d→4596, 3d→5596, 7d→7596
     else:
         ctx = min(200_000, 80_000 + days * 18_000)   # same context so LLM sees everything
-        tokens = min(4_096, 2_048 + days * 300)      # 1d→2348, 3d→2948, 7d→4096
+        tokens = min(6_000, 3_000 + days * 400)      # 1d→3400, 3d→4200, 7d→5800
     return per_chat, ctx, tokens
 
 
@@ -510,7 +521,7 @@ def _summary_scaling_params(
         tokens = min(16_000, 8_000 + days * 1_000)      # 1d→9k, 3d→11k, 7d→15k
     else:
         ctx = min(200_000, 80_000 + days * 18_000)      # 1d→98k, 3d→134k, 7d→200k
-        tokens = min(8_000, 4_096 + days * 500)         # 1d→4596, 3d→5596, 7d→7596
+        tokens = min(12_000, 6_000 + days * 800)         # 1d→6800, 3d→8400, 7d→11600
     return chats, per_chat, ctx, tokens
 
 
@@ -922,18 +933,17 @@ async def handle_help(
     """Handle the ``/help`` command."""
     help_text = (
         "Briefing commands:\n"
-        "  /bd [1d|3d|1w] [10|25|50|100] [quick|detailed]\n"
-        "      Chat triage — needs response / watch / quiet\n"
+        "  /bd [1d|3d|1w] [quick|detailed]\n"
+        "      Chat triage — needs response / watch / quiet (default 1d quick)\n"
         "  /mentions [3d|1w|2w]\n"
-        "      Mention triage — Act Now / Reply Soon / FYI (default 1w)\n"
+        "      Mention triage — Act Now / Reply Soon / FYI (default 3d)\n"
         "  /commitments [1d|3d|1w]\n"
         "      Your open promises — Likely Dropped / In Progress / Completed (default 3d)\n"
         "  /summary [1d|3d|1w] [quick|detailed]\n"
-        "      Cross-chat recap — Action Items / Key Updates / Quiet\n\n"
+        "      Cross-chat recap — Action Items / Key Updates / Quiet (default 1d quick)\n\n"
         "Parameters (all optional, any order):\n"
         "  Time window: 1d, 3d, 1w (default varies by command)\n"
-        "  Detail mode: quick (concise, faster) or detailed (thorough)\n"
-        "  Chat count (/bd only): 10, 25, 50, 100\n\n"
+        "  Detail mode: quick (concise, faster) or detailed (thorough)\n\n"
         "Utility commands:\n"
         "  /iam [@alias1 ...] — bind your identity for accurate mention detection\n"
         "  /stats — sync status and LLM usage\n"
@@ -1004,7 +1014,7 @@ async def handle_mentions(
     _MENTIONS_ALLOWED_DAYS = {3, 7, 14}
     days, _, parse_err = _parse_window_and_detail_args(
         context.args or [],
-        default_days=7,
+        default_days=3,
     )
     detail_mode = "detailed"
     if parse_err:
@@ -1193,26 +1203,25 @@ async def handle_bd(
 ) -> None:
     """Handle ``/bd`` — freshest-chat briefing with status and actions.
 
-    Accepts a timeframe (``1d``, ``3d``, ``1w``), a chat count
-    (``10``, ``25``, ``50``, ``100``), and a detail mode
-    (``quick`` or ``detailed``) in any order.  Defaults: 25 chats, 3 days,
-    quick mode.
+    Accepts a timeframe (``1d``, ``3d``, ``1w``) and a detail mode
+    (``quick`` or ``detailed``) in any order.  Defaults: 1 day, quick mode.
+    Chat count scales automatically with the timeframe.
     """
     search: MessageSearch = context.bot_data["search"]
     llm: ClaudeAssistant = context.bot_data["llm"]
     audit: AuditLogger = context.bot_data["audit"]
 
-    chat_count, days, detail_mode, parse_err = _parse_bd_args(
+    days, detail_mode, parse_err = _parse_window_and_detail_args(
         context.args or [],
-        default_count=25,
-        default_days=3,
+        default_days=1,
     )
     if parse_err:
         await update.message.reply_text(
             f"{parse_err}\n"
-            "Usage: /bd [1d|3d|1w] [10|25|50|100] [quick|detailed]"
+            "Usage: /bd [1d|3d|1w] [quick|detailed]"
         )
         return
+    chat_count = _bd_chat_count(days)
 
     await _send_typing(update, context)
     per_chat_messages, context_max_chars, max_tokens = _bd_scaling_params(
@@ -1249,7 +1258,8 @@ async def handle_bd(
     else:
         updates_instruction = (
             "UPDATES section:\n"
-            "Use bullets. Chat name + one-line status."
+            "Use bullets. For each chat: status + what changed + one line of context on why it matters.\n"
+            "Don't skimp — cover every chat with activity, not just the biggest updates."
         )
 
     prompt = (
@@ -1361,9 +1371,9 @@ async def handle_summary(
         depth_instruction = (
             "Within each category, number the chats. For each chat give:\n"
             "- <b>Bold team name</b> (drop 'Monad <> ' / 'Monad x ' prefix, just the counterparty)\n"
-            "- 1-2 lines of what happened: key development + who's involved\n"
-            "- Only include timestamps when staleness matters\n"
-            "- Filter aggressively — only include chats with meaningful activity"
+            "- 2-3 lines: key development, who's involved, what changed and why it matters\n"
+            "- Include timestamps when staleness or urgency matters\n"
+            "- Include every chat with meaningful activity — don't filter out borderline cases"
         )
 
     prompt = (

@@ -17,7 +17,7 @@ from querybot.handlers import (
     _extract_open_questions_window_days,
     _inject_chat_links,
     _mentions_scaling_params,
-    _parse_bd_args,
+    _bd_chat_count,
     _parse_window_and_detail_args,
     _get_sync_status_context,
     _QUICK_MODE_MODEL,
@@ -233,7 +233,7 @@ class TestCommandArgParsing:
     def test_parse_window_and_detail_defaults(self):
         days, detail_mode, err = _parse_window_and_detail_args([], default_days=1)
         assert days == 1
-        assert detail_mode == "detailed"
+        assert detail_mode == "quick"
         assert err is None
 
     def test_parse_window_and_detail_values(self):
@@ -248,36 +248,17 @@ class TestCommandArgParsing:
         _, _, err = _parse_window_and_detail_args(["bad"], default_days=1)
         assert err is not None
 
-    def test_parse_bd_defaults(self):
-        count, days, detail_mode, err = _parse_bd_args([])
-        assert count == 25
-        assert days == 3
-        assert detail_mode == "detailed"
-        assert err is None
+    def test_bd_chat_count_1d(self):
+        assert _bd_chat_count(1) == 25
 
-    def test_parse_bd_all_params(self):
-        count, days, detail_mode, err = _parse_bd_args(["1w", "50", "detailed"])
-        assert count == 50
-        assert days == 7
-        assert detail_mode == "detailed"
-        assert err is None
+    def test_bd_chat_count_3d(self):
+        assert _bd_chat_count(3) == 50
 
-    def test_parse_bd_timeframe_only(self):
-        count, days, detail_mode, err = _parse_bd_args(["1d"])
-        assert count == 25
-        assert days == 1
-        assert detail_mode == "detailed"
-        assert err is None
+    def test_bd_chat_count_7d(self):
+        assert _bd_chat_count(7) == 100
 
-    def test_parse_bd_count_only(self):
-        count, days, detail_mode, err = _parse_bd_args(["100"])
-        assert count == 100
-        assert days == 3
-        assert err is None
-
-    def test_parse_bd_invalid_count(self):
-        _, _, _, err = _parse_bd_args(["11"])
-        assert err is not None
+    def test_bd_chat_count_fallback(self):
+        assert _bd_chat_count(14) == 25  # unknown days → default
 
     def test_extract_mentions_window_days_week(self):
         days = _extract_mentions_window_days("show me my mentions over the past week")
@@ -721,19 +702,19 @@ class TestScaffoldCommandHandlers:
             search_results=[result],
             llm_answer="Briefing: ...",
         )
-        context.args = ["1w", "50", "quick"]
+        context.args = ["1w", "quick"]
 
         await handle_bd(update, context)
 
         mock_search.recent_chat_summary_context.assert_called_once_with(
-            chat_limit=50,
-            per_chat_messages=470,  # min(500, 50+420) — generous safety cap
+            chat_limit=100,          # _bd_chat_count(7) = 100
+            per_chat_messages=470,   # min(500, 50+420) — generous safety cap
             days_back=7,
         )
         mock_llm.query.assert_called_once()
         llm_kwargs = mock_llm.query.call_args.kwargs
         assert llm_kwargs["context_max_chars"] == 200000   # min(200k, 80k+126k) → capped
-        assert llm_kwargs["max_tokens_override"] == 4096   # min(4096, 2048+2100) → capped quick
+        assert llm_kwargs["max_tokens_override"] == 5800   # min(6000, 3000+2800) — quick
         assert llm_kwargs["min_messages_per_group"] == 2
         assert mock_audit.log.call_args[0][1] == "command_bd"
 
@@ -788,12 +769,12 @@ class TestScaffoldCommandHandlers:
 
         mock_search.recent_chat_summary_context.assert_called_once_with(
             chat_limit=25,
-            per_chat_messages=230,   # min(500, 50+180) — generous safety cap
-            days_back=3,
+            per_chat_messages=110,   # min(500, 50+60) — 1d default
+            days_back=1,
         )
         llm_kwargs = mock_llm.query.call_args.kwargs
-        assert llm_kwargs["context_max_chars"] == 134000   # min(200k, 80k+54k)
-        assert llm_kwargs["max_tokens_override"] == 5596   # min(8000, 4096+1500) — detailed default
+        assert llm_kwargs["context_max_chars"] == 98000    # min(200k, 80k+18k)
+        assert llm_kwargs["max_tokens_override"] == 3400   # min(6000, 3000+400) — quick default
         assert llm_kwargs["min_messages_per_group"] == 2
         assert mock_audit.log.call_args[0][1] == "command_bd"
 
@@ -1215,19 +1196,19 @@ class TestBdScalingParams:
         per_chat, ctx, tokens = _bd_scaling_params(1, "quick")
         assert per_chat == 110   # min(500, 50+60)
         assert ctx == 98000      # min(200000, 80000+18000)
-        assert tokens == 2348    # min(4096, 2048+300)
+        assert tokens == 3400    # min(6000, 3000+400)
 
     def test_quick_3d(self):
         per_chat, ctx, tokens = _bd_scaling_params(3, "quick")
         assert per_chat == 230   # min(500, 50+180)
         assert ctx == 134000     # min(200000, 80000+54000)
-        assert tokens == 2948    # min(4096, 2048+900)
+        assert tokens == 4200    # min(6000, 3000+1200)
 
     def test_quick_7d(self):
         per_chat, ctx, tokens = _bd_scaling_params(7, "quick")
         assert per_chat == 470   # min(500, 50+420)
         assert ctx == 200000     # min(200000, 80000+126000) → capped
-        assert tokens == 4096    # min(4096, 2048+2100) → capped
+        assert tokens == 5800    # min(6000, 3000+2800)
 
     def test_detailed_1d(self):
         per_chat, ctx, tokens = _bd_scaling_params(1, "detailed")
@@ -1391,21 +1372,21 @@ class TestSummaryScalingParams:
         assert chats == 250      # all chats — timeframe is the filter
         assert per_chat == 110   # min(500, 50+60) — generous safety cap
         assert ctx == 98000      # min(200000, 80000+18000)
-        assert tokens == 4596    # min(8000, 4096+500)
+        assert tokens == 6800    # min(12000, 6000+800)
 
     def test_quick_3d(self):
         chats, per_chat, ctx, tokens = _summary_scaling_params(3, "quick")
         assert chats == 250
         assert per_chat == 230   # min(500, 50+180)
         assert ctx == 134000     # min(200000, 80000+54000)
-        assert tokens == 5596    # min(8000, 4096+1500)
+        assert tokens == 8400    # min(12000, 6000+2400)
 
     def test_quick_7d(self):
         chats, per_chat, ctx, tokens = _summary_scaling_params(7, "quick")
         assert chats == 250
         assert per_chat == 470   # min(500, 50+420)
         assert ctx == 200000     # min(200000, 80000+126000) → capped
-        assert tokens == 7596    # min(8000, 4096+3500)
+        assert tokens == 11600   # min(12000, 6000+5600)
 
     def test_detailed_1d(self):
         chats, per_chat, ctx, tokens = _summary_scaling_params(1, "detailed")
@@ -1514,7 +1495,7 @@ class TestSummaryBreadthFirst:
         assert call_kwargs["per_chat_messages"] == 110   # min(500, 50+60)
         llm_kwargs = mock_llm.query.call_args.kwargs
         assert llm_kwargs["context_max_chars"] == 98000  # min(200k, 80k+18k)
-        assert llm_kwargs["max_tokens_override"] == 4596  # min(8k, 4096+500)
+        assert llm_kwargs["max_tokens_override"] == 6800  # min(12k, 6000+800)
 
 
 # ---------------------------------------------------------------------------
