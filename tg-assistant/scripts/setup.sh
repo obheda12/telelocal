@@ -567,7 +567,7 @@ phase_service_activation() {
         if [[ -x "${VENV_DIR}/bin/python3" ]]; then
             log_info "Opening chat selector (supports keyword pre-filter; checked = included)..."
             if PYTHONPATH="${INSTALL_DIR}/src" TG_ASSISTANT_CONFIG="${CONFIG_DIR}/settings.toml" \
-                "${VENV_DIR}/bin/python3" -m syncer.manage_chats --skip-chat-type-prompt; then
+                "${VENV_DIR}/bin/python3" -m syncer.manage_chats; then
                 log_success "Chat include/exclude list saved"
             else
                 log_warn "Chat selector failed; continuing with configured include_chat_types behavior"

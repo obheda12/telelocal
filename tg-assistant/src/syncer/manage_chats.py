@@ -337,15 +337,8 @@ async def _fetch_chats_from_telegram(config: Dict[str, Any]) -> list[dict]:
                 os.remove(path)
 
 
-async def interactive_main(skip_chat_type_prompt: bool = False) -> None:
-    """Run the interactive exclusion manager.
-
-    Args:
-        skip_chat_type_prompt: When ``True``, use the chat types already
-            saved in ``settings.toml`` instead of re-asking.  The setup
-            script sets this flag because it already collected the user's
-            chat-type preferences moments earlier.
-    """
+async def interactive_main() -> None:
+    """Run the interactive exclusion manager."""
     try:
         from InquirerPy import inquirer
     except ImportError:
@@ -373,40 +366,38 @@ async def interactive_main(skip_chat_type_prompt: bool = False) -> None:
         sys.exit(1)
 
     include_chat_types = resolve_include_chat_types(config)
+    include_user_dms = await inquirer.confirm(
+        message="Include user DMs in sync?",
+        default=("user" in include_chat_types),
+    ).execute_async()
+    include_channels = await inquirer.confirm(
+        message="Include channels in sync?",
+        default=("channel" in include_chat_types),
+    ).execute_async()
+    include_groups = await inquirer.confirm(
+        message="Include groups in sync?",
+        default=("group" in include_chat_types),
+    ).execute_async()
 
-    if not skip_chat_type_prompt:
-        include_user_dms = await inquirer.confirm(
-            message="Include user DMs in sync?",
-            default=("user" in include_chat_types),
-        ).execute_async()
-        include_channels = await inquirer.confirm(
-            message="Include channels in sync?",
-            default=("channel" in include_chat_types),
-        ).execute_async()
-        include_groups = await inquirer.confirm(
-            message="Include groups in sync?",
-            default=("group" in include_chat_types),
-        ).execute_async()
-
-        include_chat_types = set()
-        if include_groups:
-            include_chat_types.add("group")
-        if include_channels:
-            include_chat_types.add("channel")
-        if include_user_dms:
-            include_chat_types.add("user")
-        if not include_chat_types:
-            include_chat_types = {"group"}
-            print("No chat types selected; defaulting to group-only.")
-        original_include_types = resolve_include_chat_types(config)
-        if include_chat_types != original_include_types:
-            settings_path = save_include_chat_types(config, include_chat_types)
-            config.setdefault("syncer", {})["include_chat_types"] = sorted(include_chat_types)
-            print(
-                "Saved include_chat_types "
-                f"({_format_include_chat_types(include_chat_types)}) to {settings_path}"
-            )
-            print()
+    include_chat_types = set()
+    if include_groups:
+        include_chat_types.add("group")
+    if include_channels:
+        include_chat_types.add("channel")
+    if include_user_dms:
+        include_chat_types.add("user")
+    if not include_chat_types:
+        include_chat_types = {"group"}
+        print("No chat types selected; defaulting to group-only.")
+    original_include_types = resolve_include_chat_types(config)
+    if include_chat_types != original_include_types:
+        settings_path = save_include_chat_types(config, include_chat_types)
+        config.setdefault("syncer", {})["include_chat_types"] = sorted(include_chat_types)
+        print(
+            "Saved include_chat_types "
+            f"({_format_include_chat_types(include_chat_types)}) to {settings_path}"
+        )
+        print()
 
     if include_chat_types != _VALID_CHAT_TYPES:
         before = len(chats)
@@ -546,8 +537,7 @@ def main() -> None:
         level=logging.WARNING,
         format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
     )
-    skip = "--skip-chat-type-prompt" in sys.argv
-    asyncio.run(interactive_main(skip_chat_type_prompt=skip))
+    asyncio.run(interactive_main())
 
 
 if __name__ == "__main__":
