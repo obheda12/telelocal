@@ -13,7 +13,7 @@
 #   telelocal status         Check service health
 #   telelocal sync-status    Show sync progress (messages per chat, last activity)
 #   telelocal benchmark      Measure ingestion + query latency
-#   telelocal manage-chats   Interactively include/exclude chats from sync (requires sudo)
+#   telelocal manage-chats   Manage chat exclusions (requires sudo)
 #   telelocal logs [service] Tail service logs (syncer|querybot|both)
 #   telelocal restart        Restart both services
 #   telelocal stop           Stop both services
@@ -43,7 +43,7 @@ usage() {
     echo "  status         Show service health and key info"
     echo "  sync-status    Show sync progress (messages per chat, last activity)"
     echo "  benchmark      Measure ingestion + query latency"
-    echo "  manage-chats   Interactively include/exclude chats from sync (requires sudo)"
+    echo "  manage-chats   Manage chat exclusions (requires sudo)"
     echo "  logs           Tail both service logs (Ctrl+C to stop)"
     echo "  logs syncer    Tail syncer logs only"
     echo "  logs querybot  Tail querybot logs only"

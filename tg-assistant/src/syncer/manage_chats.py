@@ -14,6 +14,7 @@ exclusions to ``config/excluded_chats.json``.
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import json
 import logging
@@ -337,34 +338,59 @@ async def _fetch_chats_from_telegram(config: Dict[str, Any]) -> list[dict]:
                 os.remove(path)
 
 
-async def interactive_main() -> None:
-    """Run the interactive exclusion manager."""
-    try:
-        from InquirerPy import inquirer
-    except ImportError:
-        print("Error: InquirerPy is required. Install with: pip install InquirerPy")
-        sys.exit(1)
+def _chat_label(chat: dict) -> str:
+    """Format a single chat dict as a human-readable label."""
+    title = chat["title"] or "(untitled)"
+    chat_type = chat["chat_type"] or "unknown"
+    last_activity = chat.get("last_activity")
+    if isinstance(last_activity, datetime):
+        activity_str = last_activity.strftime("%Y-%m-%d")
+    else:
+        activity_str = "unknown"
+    return f"[{chat_type}] {title} (last: {activity_str}, id: {chat['chat_id']})"
 
-    config = _load_config()
-    chats: list[dict] = []
-    source = "telegram"
-    try:
-        chats = await _fetch_chats_from_telegram(config)
-    except Exception:
-        logger.warning("Could not fetch chats from Telegram", exc_info=True)
-        source = "database"
-        try:
-            chats = await _fetch_chats(config)
-        except Exception:
-            logger.warning("Could not fetch chats from database", exc_info=True)
-            chats = []
 
-    if not chats:
-        print("No chats found.")
-        print("Could not load chats from Telegram session or database.")
-        print("Check credentials/session and try again.")
-        sys.exit(1)
+def _show_diff_and_save(
+    config: Dict[str, Any],
+    chats: list[dict],
+    current_excluded_map: dict[int, str],
+    new_excluded_ids: set[int],
+) -> None:
+    """Print what changed and save the new exclusion set."""
+    current_excluded = set(current_excluded_map.keys())
+    title_map = {c["chat_id"]: c["title"] or "(untitled)" for c in chats}
+    new_excluded = {
+        cid: title_map.get(cid, current_excluded_map.get(cid, f"Chat {cid}"))
+        for cid in new_excluded_ids
+    }
 
+    newly_excluded = new_excluded_ids - current_excluded
+    newly_included = current_excluded - new_excluded_ids
+
+    print()
+    if newly_excluded:
+        print(f"Newly excluded ({len(newly_excluded)}):")
+        for cid in sorted(newly_excluded):
+            print(f"  - {title_map.get(cid, str(cid))}")
+    if newly_included:
+        print(f"Newly included ({len(newly_included)}):")
+        for cid in sorted(newly_included):
+            print(f"  + {title_map.get(cid, str(cid))}")
+    if not newly_excluded and not newly_included:
+        print("No changes.")
+        return
+
+    path = save_excluded_chats(config, new_excluded)
+    print()
+    print(f"Saved {len(new_excluded)} exclusion(s) to {path}")
+    print("The syncer will skip these chats on the next sync pass.")
+
+
+async def _prompt_chat_types(inquirer: Any, config: Dict[str, Any]) -> set[str]:
+    """Run the 3 chat-type confirm prompts and save if changed.
+
+    Returns the (possibly updated) include_chat_types set.
+    """
     include_chat_types = resolve_include_chat_types(config)
     include_user_dms = await inquirer.confirm(
         message="Include user DMs in sync?",
@@ -379,52 +405,84 @@ async def interactive_main() -> None:
         default=("group" in include_chat_types),
     ).execute_async()
 
-    include_chat_types = set()
+    new_types: set[str] = set()
     if include_groups:
-        include_chat_types.add("group")
+        new_types.add("group")
     if include_channels:
-        include_chat_types.add("channel")
+        new_types.add("channel")
     if include_user_dms:
-        include_chat_types.add("user")
-    if not include_chat_types:
-        include_chat_types = {"group"}
+        new_types.add("user")
+    if not new_types:
+        new_types = {"group"}
         print("No chat types selected; defaulting to group-only.")
+
     original_include_types = resolve_include_chat_types(config)
-    if include_chat_types != original_include_types:
-        settings_path = save_include_chat_types(config, include_chat_types)
-        config.setdefault("syncer", {})["include_chat_types"] = sorted(include_chat_types)
+    if new_types != original_include_types:
+        settings_path = save_include_chat_types(config, new_types)
+        config.setdefault("syncer", {})["include_chat_types"] = sorted(new_types)
         print(
             "Saved include_chat_types "
-            f"({_format_include_chat_types(include_chat_types)}) to {settings_path}"
+            f"({_format_include_chat_types(new_types)}) to {settings_path}"
         )
         print()
 
-    if include_chat_types != _VALID_CHAT_TYPES:
-        before = len(chats)
-        chats = [
-            c for c in chats
-            if (str(c.get("chat_type") or "user").lower() in include_chat_types)
-        ]
-        hidden = before - len(chats)
-        print(
-            "Applying include_chat_types filter "
-            f"({', '.join(sorted(include_chat_types))}); hidden {hidden} chat(s)."
-        )
-        if not chats:
-            print("No chats remain after chat-type filtering.")
-            print("Adjust syncer.include_chat_types in settings.toml and retry.")
-            sys.exit(1)
+    return new_types
 
-    # Newest chats first and hard-cap to freshest subset for faster UX.
+
+def _apply_type_filter(chats: list[dict], include_chat_types: set[str]) -> list[dict]:
+    """Filter chats by type and print summary. Exits if none remain."""
+    if include_chat_types == _VALID_CHAT_TYPES:
+        return chats
+
+    before = len(chats)
+    filtered = [
+        c for c in chats
+        if (str(c.get("chat_type") or "user").lower() in include_chat_types)
+    ]
+    hidden = before - len(filtered)
+    print(
+        "Applying include_chat_types filter "
+        f"({', '.join(sorted(include_chat_types))}); hidden {hidden} chat(s)."
+    )
+    if not filtered:
+        print("No chats remain after chat-type filtering.")
+        print("Adjust syncer.include_chat_types in settings.toml and retry.")
+        sys.exit(1)
+    return filtered
+
+
+def _sort_and_cap(chats: list[dict]) -> tuple[list[dict], int]:
+    """Sort by freshness and cap to _FRESHEST_CHAT_LIMIT.
+
+    Returns (capped_chats, hidden_count).
+    """
     chats = sorted(chats, key=chat_freshness_sort_key, reverse=True)
-    hidden_older_chats = 0
+    hidden = 0
     if len(chats) > _FRESHEST_CHAT_LIMIT:
-        hidden_older_chats = len(chats) - _FRESHEST_CHAT_LIMIT
+        hidden = len(chats) - _FRESHEST_CHAT_LIMIT
         chats = chats[:_FRESHEST_CHAT_LIMIT]
+    return chats, hidden
 
-    # Load current exclusions
+
+# ---------------------------------------------------------------------------
+# Setup flow (full wizard — used by setup.sh --setup)
+# ---------------------------------------------------------------------------
+
+
+async def _run_setup_flow(
+    inquirer: Any,
+    config: Dict[str, Any],
+    chats: list[dict],
+    source: str,
+) -> None:
+    """Full setup wizard: chat-type prompts, keyword filter, full checkbox."""
+    include_chat_types = await _prompt_chat_types(inquirer, config)
+    chats = _apply_type_filter(chats, include_chat_types)
+    chats, hidden_older_chats = _sort_and_cap(chats)
+
     current_excluded_map = load_excluded_chats(config)
     current_excluded = set(current_excluded_map.keys())
+
     keyword = (
         await inquirer.text(
             message=(
@@ -447,22 +505,12 @@ async def interactive_main() -> None:
         )
         print()
 
-    # Build choices: pre-checked = included (NOT excluded)
     choices = []
     for chat in visible_chats:
-        chat_id = chat["chat_id"]
-        title = chat["title"] or "(untitled)"
-        chat_type = chat["chat_type"] or "unknown"
-        last_activity = chat.get("last_activity")
-        if isinstance(last_activity, datetime):
-            activity_str = last_activity.strftime("%Y-%m-%d")
-        else:
-            activity_str = "unknown"
-        label = f"[{chat_type}] {title} (last: {activity_str}, id: {chat_id})"
         choices.append({
-            "name": label,
-            "value": chat_id,
-            "enabled": (chat_id not in current_excluded),
+            "name": _chat_label(chat),
+            "value": chat["chat_id"],
+            "enabled": (chat["chat_id"] not in current_excluded),
         })
 
     print()
@@ -494,41 +542,173 @@ async def interactive_main() -> None:
     else:
         included_ids = []
 
-    # Compute new exclusion set
     all_ids = {c["chat_id"] for c in chats}
     included_set = set(included_ids)
-    # Keep exclusions outside current 250-chat window stable.
     new_excluded_ids = (all_ids - included_set) | (current_excluded - all_ids)
+    _show_diff_and_save(config, chats, current_excluded_map, new_excluded_ids)
 
-    # Build the exclusion dict with titles for readability
-    title_map = {c["chat_id"]: c["title"] or "(untitled)" for c in chats}
-    new_excluded = {
-        cid: title_map.get(cid, current_excluded_map.get(cid, f"Chat {cid}"))
-        for cid in new_excluded_ids
-    }
 
-    # Show diff
-    newly_excluded = new_excluded_ids - current_excluded
-    newly_included = current_excluded - new_excluded_ids
+# ---------------------------------------------------------------------------
+# Manage flow (quick action menu — default for standalone use)
+# ---------------------------------------------------------------------------
+
+
+async def _run_manage_flow(
+    inquirer: Any,
+    config: Dict[str, Any],
+    chats: list[dict],
+    source: str,
+) -> None:
+    """Quick action menu for returning users."""
+    include_chat_types = resolve_include_chat_types(config)
+    chats = _apply_type_filter(chats, include_chat_types)
+    chats, _hidden = _sort_and_cap(chats)
+
+    current_excluded_map = load_excluded_chats(config)
+    current_excluded = set(current_excluded_map.keys())
+    included_count = len(chats) - sum(1 for c in chats if c["chat_id"] in current_excluded)
+    excluded_count = len(current_excluded)
+    types_str = ", ".join(sorted(include_chat_types))
 
     print()
-    if newly_excluded:
-        print(f"Newly excluded ({len(newly_excluded)}):")
-        for cid in sorted(newly_excluded):
-            print(f"  - {title_map.get(cid, str(cid))}")
-    if newly_included:
-        print(f"Newly included ({len(newly_included)}):")
-        for cid in sorted(newly_included):
-            print(f"  + {title_map.get(cid, str(cid))}")
-    if not newly_excluded and not newly_included:
-        print("No changes.")
+    print(f"Syncing {included_count} chats ({excluded_count} excluded) | Types: {types_str}")
+    print()
+
+    action = await inquirer.select(
+        message="What would you like to do?",
+        choices=[
+            {"name": "Exclude chats — hide chats from sync", "value": "exclude"},
+            {"name": "Re-include chats — bring back excluded chats", "value": "reinclude"},
+            {"name": "Edit chat types — change which types sync (DMs/channels/groups)", "value": "types"},
+            {"name": "Full reconfigure — run the complete setup wizard", "value": "full"},
+        ],
+    ).execute_async()
+
+    if action == "full":
+        await _run_setup_flow(inquirer, config, chats, source)
         return
 
-    # Save
-    path = save_excluded_chats(config, new_excluded)
-    print()
-    print(f"Saved {len(new_excluded)} exclusion(s) to {path}")
-    print(f"The syncer will skip these chats on the next sync pass.")
+    if action == "types":
+        await _prompt_chat_types(inquirer, config)
+        return
+
+    if action == "exclude":
+        # Show only currently-included chats
+        included_chats = [c for c in chats if c["chat_id"] not in current_excluded]
+        if not included_chats:
+            print("All chats are already excluded.")
+            return
+
+        choices = []
+        for chat in included_chats:
+            choices.append({
+                "name": _chat_label(chat),
+                "value": chat["chat_id"],
+                "enabled": True,  # checked = keep included
+            })
+
+        print()
+        print(f"Showing {len(included_chats)} currently included chat(s).")
+        print("Uncheck chats to EXCLUDE them from sync. Press ENTER to confirm.")
+        print()
+
+        keep_ids = await inquirer.checkbox(
+            message="Included chats (uncheck to exclude):",
+            choices=choices,
+            cycle=True,
+            keybindings=_CHAT_SELECTION_KEYBINDINGS,
+        ).execute_async()
+
+        keep_set = set(keep_ids)
+        all_included_ids = {c["chat_id"] for c in included_chats}
+        newly_excluded_ids = all_included_ids - keep_set
+        new_excluded_ids = current_excluded | newly_excluded_ids
+        _show_diff_and_save(config, chats, current_excluded_map, new_excluded_ids)
+        return
+
+    if action == "reinclude":
+        # Show only currently-excluded chats that exist in the fetched list
+        excluded_chats = [c for c in chats if c["chat_id"] in current_excluded]
+        # Also include excluded chats not in fetched list (from excluded_chats.json)
+        fetched_ids = {c["chat_id"] for c in chats}
+        orphan_excluded = {
+            cid: title for cid, title in current_excluded_map.items()
+            if cid not in fetched_ids
+        }
+
+        if not excluded_chats and not orphan_excluded:
+            print("No chats are currently excluded.")
+            return
+
+        choices = []
+        for chat in excluded_chats:
+            choices.append({
+                "name": _chat_label(chat),
+                "value": chat["chat_id"],
+                "enabled": False,  # unchecked = stays excluded
+            })
+        for cid, title in sorted(orphan_excluded.items(), key=lambda x: x[1]):
+            choices.append({
+                "name": f"[?] {title} (id: {cid})",
+                "value": cid,
+                "enabled": False,
+            })
+
+        print()
+        print(f"Showing {len(choices)} currently excluded chat(s).")
+        print("Check chats to RE-INCLUDE them in sync. Press ENTER to confirm.")
+        print()
+
+        reinclude_ids = await inquirer.checkbox(
+            message="Excluded chats (check to re-include):",
+            choices=choices,
+            cycle=True,
+            keybindings=_CHAT_SELECTION_KEYBINDINGS,
+        ).execute_async()
+
+        reinclude_set = set(reinclude_ids)
+        new_excluded_ids = current_excluded - reinclude_set
+        _show_diff_and_save(config, chats, current_excluded_map, new_excluded_ids)
+        return
+
+
+# ---------------------------------------------------------------------------
+# Entry points
+# ---------------------------------------------------------------------------
+
+
+async def interactive_main(setup_mode: bool = False) -> None:
+    """Run the interactive exclusion manager."""
+    try:
+        from InquirerPy import inquirer
+    except ImportError:
+        print("Error: InquirerPy is required. Install with: pip install InquirerPy")
+        sys.exit(1)
+
+    config = _load_config()
+    chats: list[dict] = []
+    source = "telegram"
+    try:
+        chats = await _fetch_chats_from_telegram(config)
+    except Exception:
+        logger.warning("Could not fetch chats from Telegram", exc_info=True)
+        source = "database"
+        try:
+            chats = await _fetch_chats(config)
+        except Exception:
+            logger.warning("Could not fetch chats from database", exc_info=True)
+            chats = []
+
+    if not chats:
+        print("No chats found.")
+        print("Could not load chats from Telegram session or database.")
+        print("Check credentials/session and try again.")
+        sys.exit(1)
+
+    if setup_mode:
+        await _run_setup_flow(inquirer, config, chats, source)
+    else:
+        await _run_manage_flow(inquirer, config, chats, source)
 
 
 def main() -> None:
@@ -537,7 +717,14 @@ def main() -> None:
         level=logging.WARNING,
         format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
     )
-    asyncio.run(interactive_main())
+    parser = argparse.ArgumentParser(description="Manage chat sync exclusions")
+    parser.add_argument(
+        "--setup",
+        action="store_true",
+        help="Run full setup wizard (used by setup.sh)",
+    )
+    args = parser.parse_args()
+    asyncio.run(interactive_main(setup_mode=args.setup))
 
 
 if __name__ == "__main__":
