@@ -458,6 +458,15 @@ def _bd_chat_count(days: int) -> int:
     return _DEFAULT_CHATS.get(days, 25)
 
 
+def _get_unique_chat_names(results: List[SearchResult]) -> List[str]:
+    """Return unique counterparty names from results, preserving first-seen order."""
+    seen: Dict[int, str] = {}
+    for r in results:
+        if r.chat_id not in seen:
+            seen[r.chat_id] = _counterparty_name(r.chat_title)
+    return list(seen.values())
+
+
 def _bd_scaling_params(days: int, detail_mode: str) -> Tuple[int, int, int]:
     """Return ``(per_chat_messages, context_max_chars, max_tokens)`` for /bd.
 
@@ -1202,123 +1211,88 @@ async def handle_commitments(
 async def handle_bd(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Handle ``/bd`` — freshest-chat briefing with status and actions.
+    """Handle ``/bd`` — BD relationship triage: OPEN and COOLING chats.
 
-    Accepts a timeframe (``1d``, ``3d``, ``1w``) and a detail mode
-    (``quick`` or ``detailed``) in any order.  Defaults: 3 days, quick mode.
-    Chat count scales automatically with the timeframe.
+    Usage: /bd [1d|3d|1w]  (defaults to 3 days)
+
+    OPEN: chats where the partner spoke last with no reply from the owner.
+    COOLING: chats that went quiet in the cooling window (days_back * 4).
     """
     search: MessageSearch = context.bot_data["search"]
     llm: ClaudeAssistant = context.bot_data["llm"]
     audit: AuditLogger = context.bot_data["audit"]
 
-    days, detail_mode, parse_err = _parse_window_and_detail_args(
+    days, _detail_mode, parse_err = _parse_window_and_detail_args(
         context.args or [],
         default_days=3,
     )
     if parse_err:
         await update.message.reply_text(
-            f"{parse_err}\n"
-            "Usage: /bd [1d|3d|1w] [quick|detailed]"
+            f"{parse_err}\nUsage: /bd [1d|3d|1w]"
         )
         return
-    chat_count = _bd_chat_count(days)
+
+    context_max_chars = 98_000
+    max_tokens = 2500
 
     await _send_typing(update, context)
-    per_chat_messages, context_max_chars, max_tokens = _bd_scaling_params(
-        days, detail_mode,
-    )
-    results = await search.recent_chat_summary_context(
-        chat_limit=chat_count,
-        per_chat_messages=per_chat_messages,
+    owner_id = _resolve_owner_user_id(update, context)
+    open_results, cooling_results = await search.bd_attention_context(
+        owner_id=owner_id,
         days_back=days,
     )
-    if not results:
+
+    all_results = open_results + cooling_results
+    if not all_results:
         no_results_msg = await _get_sync_status_context(search._pool)
         await update.message.reply_text(no_results_msg)
         return
 
-    # NEEDS RESPONSE always gets full detail — it's the most important section.
-    needs_response_instruction = (
-        "NEEDS RESPONSE section:\n"
-        "These are teams/people that need something from me — a reply, a decision, "
-        "a review, a deliverable, a connection, anything. Not just questions.\n"
-        "Number each team. For each one, give a detailed writeup — who's involved, "
-        "what they need, the full conversation context so I understand the situation, "
-        "key specifics where relevant, and how long it's been pending. "
-        "Then end each team with <b>Action Items:</b> followed by a numbered list "
-        "of the specific things I need to do for them. A single team can have "
-        "multiple action items if the conversation warrants it.\n"
-        "This section needs enough depth that I can act without going back to read the chat."
-    )
-    if detail_mode == "detailed":
-        updates_instruction = (
-            "UPDATES section:\n"
-            "Use bullets. Status + what changed + enough context to understand why it matters."
-        )
-    else:
-        updates_instruction = (
-            "UPDATES section:\n"
-            "Use bullets. For each chat: status + what changed + one line of context on why it matters.\n"
-            "Don't skimp — cover every chat with activity, not just the biggest updates."
-        )
+    open_names = _get_unique_chat_names(open_results)
+    cooling_names = _get_unique_chat_names(cooling_results)
+    cooling_days = days * 4
 
     prompt = (
-        f"Give me a {detail_mode} briefing of my {chat_count} freshest chats "
-        f"from the last {days} day(s).\n\n"
-        "Start with a one-line triage count (e.g. '5 need response · 8 updates · 12 quiet').\n\n"
-        "BREADTH IS CRITICAL — scan every single chat and do not miss anything that "
-        "needs my response. Even borderline cases should be included. "
-        "I'd rather see a false positive than miss something.\n\n"
-        "Scale detail with importance:\n\n"
-        "BLAST DETECTION: If you see the same or very similar message sent across "
-        "multiple chats (e.g. an event invite, announcement, or news blast), "
-        "don't list each chat individually. Instead, collapse into one brief note "
-        "like 'Monad sent [topic] to N chats' in the UPDATES section. "
-        "These are broadcast messages, not conversations needing a response.\n\n"
-        f"{needs_response_instruction}\n\n"
-        f"{updates_instruction}\n\n"
-        "QUIET section:\n"
-        "Collapse into a single line — just list the chat names.\n\n"
-        "Chat name rules:\n"
-        "- Chat titles are usually 'Monad <> CompanyName' or similar. "
-        "Drop the 'Monad <> ' / 'Monad x ' prefix — just use the counterparty name "
-        "(e.g. 'Composable Security' not 'Monad Foundation <> Composable Security'). "
-        "If the chat name doesn't follow that pattern, use it as-is.\n\n"
-        "Formatting rules:\n"
-        "- Section headers: <code><b>ALL CAPS HEADER</b></code>\n"
-        "- <b>bold</b> for chat/team names and the Action Items: label\n"
-        "- <i>italic</i> for status/context\n"
-        "- Use line breaks and bullets for legibility but don't over-space\n"
-        "- NEVER use --- or *** or === as separators or horizontal rules. Do not output them.\n"
-        "- Timestamps only when they add context (e.g. how long someone's been waiting)\n"
-        "- All times are in ET (Eastern Time). Use ET when displaying any time.\n\n"
-        "IMPORTANT: Separate each section with the exact marker ===SECTION=== on its own line. "
-        "Each section will be sent as its own message."
+        "Triage my BD conversations. I've provided two groups of chats with "
+        "their recent message threads.\n\n"
+        f"OPEN ({len(open_names)} chats — partner's message is most recent, "
+        "no reply from me yet):\n"
+        f"{', '.join(open_names) if open_names else '(none)'}\n\n"
+        f"COOLING ({len(cooling_names)} chats — went quiet in last {cooling_days}d):\n"
+        f"{', '.join(cooling_names) if cooling_names else '(none)'}\n\n"
+        "For each chat I've provided the last several messages as thread context. "
+        "Use these to verify status — if I or a team member already replied, "
+        "skip that chat entirely.\n\n"
+        "Output two sections. Keep each entry to ONE line — no writeups, no action items.\n\n"
+        "<code><b>OPEN</b></code>\n"
+        "• <b>ChatName</b> — what they asked/said and how long it's been waiting\n\n"
+        "<code><b>COOLING</b></code>\n"
+        "• <b>ChatName</b> — last topic and how long it's been quiet\n\n"
+        "Omit a section entirely if empty.\n\n"
+        "Chat name rules: drop 'Monad <> ' / 'Monad x ' / 'Monad Foundation <> ' prefix.\n"
+        "Formatting: <b>bold</b> for chat names. All times in ET. "
+        "NEVER use --- or *** or === separators."
     )
-    owner_id = _resolve_owner_user_id(update, context)
+
     owner_aliases = _resolve_owner_mention_aliases(update, context)
     answer = await llm.query(
         prompt,
-        results,
+        all_results,
         context_max_chars=context_max_chars,
         max_tokens_override=max_tokens,
         owner_user_id=owner_id,
         owner_aliases=owner_aliases,
-        model_override=_QUICK_MODE_MODEL if detail_mode == "quick" else None,
         min_messages_per_group=2,
     )
-    await _reply_sections(update, context, answer, search_results=results)
+    await _reply_answer(update, context, answer, search_results=all_results)
 
     await audit.log(
         "querybot",
         "command_bd",
         {
-            "chat_count": chat_count,
             "days_back": days,
-            "detail_mode": detail_mode,
-            "per_chat_messages": per_chat_messages,
-            "results_count": len(results),
+            "open_count": len(open_results),
+            "cooling_count": len(cooling_results),
         },
         success=True,
     )

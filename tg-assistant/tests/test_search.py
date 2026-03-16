@@ -427,3 +427,133 @@ class TestOpenQuestionsNeedingReply:
         sql = mock_pool.fetch.call_args[0][0]
         assert "COALESCE(q.text, '') ~ '\\?'" in sql
         assert "r.reply_to_msg_id = q.message_id" in sql
+
+
+class TestBdAttentionContext:
+    @pytest.mark.asyncio
+    async def test_returns_tuple_of_two_result_lists(self):
+        """bd_attention_context returns (open_results, cooling_results)."""
+        mock_pool = MagicMock()
+        mock_pool.fetch = AsyncMock(return_value=[])
+        mock_embedder = MagicMock()
+        mock_embedder.dimension = 384
+
+        search = MessageSearch(mock_pool, mock_embedder)
+        result = await search.bd_attention_context(owner_id=123)
+
+        assert isinstance(result, tuple)
+        assert len(result) == 2
+        open_results, cooling_results = result
+        assert isinstance(open_results, list)
+        assert isinstance(cooling_results, list)
+
+    @pytest.mark.asyncio
+    async def test_runs_two_concurrent_queries(self):
+        """Both OPEN and COOLING queries execute (via asyncio.gather)."""
+        mock_pool = MagicMock()
+        mock_pool.fetch = AsyncMock(return_value=[])
+        mock_embedder = MagicMock()
+        mock_embedder.dimension = 384
+
+        search = MessageSearch(mock_pool, mock_embedder)
+        await search.bd_attention_context(owner_id=123, days_back=3)
+
+        assert mock_pool.fetch.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_open_query_filters_owner_and_service_messages(self):
+        """OPEN SQL uses IS DISTINCT FROM owner_id and excludes NULL senders."""
+        mock_pool = MagicMock()
+        mock_pool.fetch = AsyncMock(return_value=[])
+        mock_embedder = MagicMock()
+        mock_embedder.dimension = 384
+
+        search = MessageSearch(mock_pool, mock_embedder)
+        await search.bd_attention_context(owner_id=123, days_back=3)
+
+        open_sql = mock_pool.fetch.call_args_list[0][0][0]
+        assert "IS DISTINCT FROM $2" in open_sql
+        assert "sender_id IS NOT NULL" in open_sql
+        assert "DISTINCT ON (m.chat_id)" in open_sql
+
+    @pytest.mark.asyncio
+    async def test_cooling_query_excludes_fresh_window(self):
+        """COOLING SQL restricts to messages NOT in the fresh window."""
+        mock_pool = MagicMock()
+        mock_pool.fetch = AsyncMock(return_value=[])
+        mock_embedder = MagicMock()
+        mock_embedder.dimension = 384
+
+        search = MessageSearch(mock_pool, mock_embedder)
+        await search.bd_attention_context(owner_id=123, days_back=3)
+
+        cooling_sql = mock_pool.fetch.call_args_list[1][0][0]
+        assert "m.timestamp < $2" in cooling_sql
+        assert "m.timestamp >= $1" in cooling_sql
+
+    @pytest.mark.asyncio
+    async def test_open_thread_depth_passed_as_param(self):
+        """open_thread_depth becomes $5 in the OPEN query."""
+        mock_pool = MagicMock()
+        mock_pool.fetch = AsyncMock(return_value=[])
+        mock_embedder = MagicMock()
+        mock_embedder.dimension = 384
+
+        search = MessageSearch(mock_pool, mock_embedder)
+        await search.bd_attention_context(
+            owner_id=42,
+            days_back=1,
+            open_thread_depth=7,
+        )
+
+        open_args = mock_pool.fetch.call_args_list[0][0]
+        # open_sql params: fresh_cutoff, owner_id, open_chat_limit, thread_cutoff, open_thread_depth
+        assert open_args[5] == 7
+
+    @pytest.mark.asyncio
+    async def test_cooling_thread_depth_passed_as_param(self):
+        """cooling_thread_depth becomes $4 in the COOLING query."""
+        mock_pool = MagicMock()
+        mock_pool.fetch = AsyncMock(return_value=[])
+        mock_embedder = MagicMock()
+        mock_embedder.dimension = 384
+
+        search = MessageSearch(mock_pool, mock_embedder)
+        await search.bd_attention_context(
+            owner_id=42,
+            days_back=1,
+            cooling_thread_depth=3,
+        )
+
+        cooling_args = mock_pool.fetch.call_args_list[1][0]
+        # cooling_sql params: cooling_cutoff, fresh_cutoff, cooling_chat_limit, cooling_thread_depth
+        assert cooling_args[4] == 3
+
+    @pytest.mark.asyncio
+    async def test_open_score_is_1_cooling_score_is_0_5(self):
+        """OPEN rows use score 1.0 and COOLING rows use score 0.5."""
+        mock_pool = MagicMock()
+        mock_pool.fetch = AsyncMock(return_value=[])
+        mock_embedder = MagicMock()
+        mock_embedder.dimension = 384
+
+        search = MessageSearch(mock_pool, mock_embedder)
+        await search.bd_attention_context(owner_id=123, days_back=3)
+
+        open_sql = mock_pool.fetch.call_args_list[0][0][0]
+        cooling_sql = mock_pool.fetch.call_args_list[1][0][0]
+        assert "1.0 AS score" in open_sql
+        assert "0.5 AS score" in cooling_sql
+
+    @pytest.mark.asyncio
+    async def test_owner_id_zero_does_not_crash(self):
+        """owner_id=0 should be accepted without error."""
+        mock_pool = MagicMock()
+        mock_pool.fetch = AsyncMock(return_value=[])
+        mock_embedder = MagicMock()
+        mock_embedder.dimension = 384
+
+        search = MessageSearch(mock_pool, mock_embedder)
+        open_results, cooling_results = await search.bd_attention_context(owner_id=0)
+        assert isinstance(open_results, list)
+        assert isinstance(cooling_results, list)
