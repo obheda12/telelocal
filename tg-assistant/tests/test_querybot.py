@@ -2,7 +2,7 @@
 Unit tests for querybot: handlers, message splitting, owner_only filter, LLM.
 """
 
-from unittest.mock import ANY, AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -307,7 +307,6 @@ def _make_handler_context(
     mock_search.mentions_needing_attention.return_value = search_results or []
     mock_search.open_questions_needing_reply.return_value = search_results or []
     mock_search.owner_commitments.return_value = search_results or []
-    mock_search.active_chat_context.return_value = search_results or []
 
     mock_llm = AsyncMock()
     mock_llm.extract_query_intent.return_value = intent or QueryIntent(
@@ -703,24 +702,20 @@ class TestScaffoldCommandHandlers:
             search_results=[result],
             llm_answer="Briefing: ...",
         )
-        context.args = ["1w"]
+        context.args = ["1w", "quick"]
 
         await handle_bd(update, context)
 
-        mock_search.mentions_needing_attention.assert_called_once_with(
-            owner_id=12345,
-            mention_aliases=ANY,
-            days_back=7,
-            limit=500,
-        )
-        mock_search.active_chat_context.assert_called_once_with(
-            owner_id=12345,
+        mock_search.recent_chat_summary_context.assert_called_once_with(
+            chat_limit=100,          # _bd_chat_count(7) = 100
+            per_chat_messages=470,   # min(500, 50+420) — generous safety cap
             days_back=7,
         )
         mock_llm.query.assert_called_once()
         llm_kwargs = mock_llm.query.call_args.kwargs
-        assert llm_kwargs["context_max_chars"] == 120_000
-        assert llm_kwargs["max_tokens_override"] == 2500
+        assert llm_kwargs["context_max_chars"] == 200000   # min(200k, 80k+126k) → capped
+        assert llm_kwargs["max_tokens_override"] == 5800   # min(6000, 3000+2800) — quick
+        assert llm_kwargs["min_messages_per_group"] == 2
         assert mock_audit.log.call_args[0][1] == "command_bd"
 
     @pytest.mark.asyncio
@@ -772,19 +767,15 @@ class TestScaffoldCommandHandlers:
 
         await handle_bd(update, context)
 
-        mock_search.mentions_needing_attention.assert_called_once_with(
-            owner_id=12345,
-            mention_aliases=ANY,
-            days_back=3,
-            limit=500,
-        )
-        mock_search.active_chat_context.assert_called_once_with(
-            owner_id=12345,
+        mock_search.recent_chat_summary_context.assert_called_once_with(
+            chat_limit=50,           # _bd_chat_count(3) = 50
+            per_chat_messages=230,   # min(500, 50+180) — 3d default
             days_back=3,
         )
         llm_kwargs = mock_llm.query.call_args.kwargs
-        assert llm_kwargs["context_max_chars"] == 120_000
-        assert llm_kwargs["max_tokens_override"] == 2500
+        assert llm_kwargs["context_max_chars"] == 134000   # min(200k, 80k+54k)
+        assert llm_kwargs["max_tokens_override"] == 4200   # min(6000, 3000+1200) — quick default
+        assert llm_kwargs["min_messages_per_group"] == 2
         assert mock_audit.log.call_args[0][1] == "command_bd"
 
     @pytest.mark.asyncio
@@ -1030,8 +1021,8 @@ class TestTypingIndicators:
 
 class TestModelRouting:
     @pytest.mark.asyncio
-    async def test_bd_uses_fixed_token_budget(self):
-        """/bd always uses fixed context_max_chars and max_tokens regardless of timeframe."""
+    async def test_bd_quick_uses_haiku(self):
+        """quick mode /bd should pass model_override=Haiku to llm.query()."""
         result = SearchResult(
             message_id=1, chat_id=1, chat_title="Chat",
             sender_name="User", timestamp="2024-01-15T10:00:00Z",
@@ -1040,15 +1031,30 @@ class TestModelRouting:
         update, context, mock_search, mock_llm, _ = _make_handler_context(
             search_results=[result], llm_answer="Briefing",
         )
-        context.args = ["1d"]
+        context.args = ["1d", "quick"]
 
         await handle_bd(update, context)
 
         llm_kwargs = mock_llm.query.call_args.kwargs
-        assert llm_kwargs["context_max_chars"] == 120_000
-        assert llm_kwargs["max_tokens_override"] == 2500
-        # No model_override — always uses default model
-        assert "model_override" not in llm_kwargs
+        assert llm_kwargs["model_override"] == _QUICK_MODE_MODEL
+
+    @pytest.mark.asyncio
+    async def test_bd_detailed_uses_sonnet(self):
+        """detailed mode /bd should not pass model_override (uses default Sonnet)."""
+        result = SearchResult(
+            message_id=1, chat_id=1, chat_title="Chat",
+            sender_name="User", timestamp="2024-01-15T10:00:00Z",
+            text="Status update", score=1.0,
+        )
+        update, context, mock_search, mock_llm, _ = _make_handler_context(
+            search_results=[result], llm_answer="Briefing",
+        )
+        context.args = ["1d", "detailed"]
+
+        await handle_bd(update, context)
+
+        llm_kwargs = mock_llm.query.call_args.kwargs
+        assert llm_kwargs.get("model_override") is None
 
     @pytest.mark.asyncio
     async def test_mentions_always_uses_detailed(self):

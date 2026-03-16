@@ -1211,102 +1211,123 @@ async def handle_commitments(
 async def handle_bd(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Handle ``/bd`` — smart mentions triage: NEED REPLY, FYI, CLOSED OUT.
+    """Handle ``/bd`` — high-signal BD briefing with triage and action items.
 
-    Usage: /bd [1d|3d|1w]  (defaults to 3 days)
-
-    Combines explicit mentions/replies with thread context from recently
-    active chats.  The LLM filters heavily — only surfaces clearly relevant
-    items.
+    Accepts a timeframe (``1d``, ``3d``, ``1w``) and a detail mode
+    (``quick`` or ``detailed``) in any order.  Defaults: 3 days, quick mode.
+    Chat count scales automatically with the timeframe.
     """
     search: MessageSearch = context.bot_data["search"]
     llm: ClaudeAssistant = context.bot_data["llm"]
     audit: AuditLogger = context.bot_data["audit"]
 
-    days, _detail_mode, parse_err = _parse_window_and_detail_args(
+    days, detail_mode, parse_err = _parse_window_and_detail_args(
         context.args or [],
         default_days=3,
     )
     if parse_err:
         await update.message.reply_text(
-            f"{parse_err}\nUsage: /bd [1d|3d|1w]"
+            f"{parse_err}\n"
+            "Usage: /bd [1d|3d|1w] [quick|detailed]"
         )
         return
-
-    context_max_chars = 120_000
-    max_tokens = 2500
+    chat_count = _bd_chat_count(days)
 
     await _send_typing(update, context)
-    owner_id = _resolve_owner_user_id(update, context)
-    owner_aliases = _resolve_owner_mention_aliases(update, context)
-
-    mention_results, thread_results = await asyncio.gather(
-        search.mentions_needing_attention(
-            owner_id=owner_id,
-            mention_aliases=owner_aliases,
-            days_back=days,
-            limit=500,
-        ),
-        search.active_chat_context(
-            owner_id=owner_id,
-            days_back=days,
-        ),
+    per_chat_messages, context_max_chars, max_tokens = _bd_scaling_params(
+        days, detail_mode,
     )
-
-    # Explicit mentions win on overlap
-    seen = {(r.message_id, r.chat_id): r for r in reversed(mention_results)}
-    for r in thread_results:
-        key = (r.message_id, r.chat_id)
-        if key not in seen:
-            seen[key] = r
-    all_results = list(seen.values())
-
-    if not all_results:
+    results = await search.recent_chat_summary_context(
+        chat_limit=chat_count,
+        per_chat_messages=per_chat_messages,
+        days_back=days,
+    )
+    if not results:
         no_results_msg = await _get_sync_status_context(search._pool)
         await update.message.reply_text(no_results_msg)
         return
 
-    prompt = (
-        "Review these messages from my active conversations. I've provided explicit "
-        "replies/mentions to me, plus thread context from chats I've been recently active in "
-        "(including my own replies, so you can see what's already been handled).\n\n"
-        "Triage into three compact sections. Be selective — if you're not confident something "
-        "needs my attention, skip it entirely. One line per entry.\n\n"
-        "<code><b>NEED REPLY</b></code>\n"
-        "• <b>ChatName</b> — what they need and how long it's been waiting\n"
-        "[Only if I clearly haven't replied yet and genuinely need to act]\n\n"
-        "<code><b>FYI</b></code>\n"
-        "• <b>ChatName</b> — what happened / why it matters\n"
-        "[Important updates — informational, no action needed]\n\n"
-        "<code><b>CLOSED OUT</b></code>\n"
-        "• <b>ChatName</b>, <b>ChatName</b> (comma-separated, one line)\n"
-        "[Things that had an open request and appear resolved. Omit section if empty.]\n\n"
-        "Rules:\n"
-        "- If my reply already addressed something, it belongs in CLOSED OUT, not NEED REPLY.\n"
-        "- Omit any section that's empty.\n"
-        "- Drop 'Monad <> ' / 'Monad x ' / 'Monad Foundation <> ' prefix from chat names.\n"
-        "- <b>bold</b> for chat names. All times in ET.\n"
-        "- NEVER use --- or *** or === separators."
+    # NEEDS RESPONSE always gets full detail — it's the most important section.
+    needs_response_instruction = (
+        "NEEDS RESPONSE section:\n"
+        "These are teams/people that need something from me — a reply, a decision, "
+        "a review, a deliverable, a connection, anything. Not just questions.\n"
+        "Number each team. For each one, give a detailed writeup — who's involved, "
+        "what they need, the full conversation context so I understand the situation, "
+        "key specifics where relevant, and how long it's been pending. "
+        "Then end each team with <b>Action Items:</b> followed by a numbered list "
+        "of the specific things I need to do for them. A single team can have "
+        "multiple action items if the conversation warrants it.\n"
+        "This section needs enough depth that I can act without going back to read the chat."
     )
+    if detail_mode == "detailed":
+        updates_instruction = (
+            "UPDATES section:\n"
+            "Use bullets. Status + what changed + enough context to understand why it matters."
+        )
+    else:
+        updates_instruction = (
+            "UPDATES section:\n"
+            "Use bullets. For each chat with a meaningful update: status + what changed + "
+            "one line of context on why it matters. Skip routine check-ins, pleasantries, "
+            "and chats with no substantive new information."
+        )
 
+    prompt = (
+        f"Give me a {detail_mode} briefing of my {chat_count} freshest chats "
+        f"from the last {days} day(s).\n\n"
+        "Start with a one-line triage count (e.g. '5 need response · 8 updates · 12 quiet').\n\n"
+        "SIGNAL IS CRITICAL — focus on what genuinely matters. Surface chats that need "
+        "my attention or have meaningful updates. Skip chats with only routine messages, "
+        "pleasantries, or no actionable content.\n\n"
+        "BLAST DETECTION: If you see the same or very similar message sent across "
+        "multiple chats (e.g. an event invite, announcement, or news blast), "
+        "don't list each chat individually. Instead, collapse into one brief note "
+        "like 'Monad sent [topic] to N chats' in the UPDATES section. "
+        "These are broadcast messages, not conversations needing a response.\n\n"
+        f"{needs_response_instruction}\n\n"
+        f"{updates_instruction}\n\n"
+        "QUIET section:\n"
+        "Collapse into a single line — just list the chat names.\n\n"
+        "Chat name rules:\n"
+        "- Chat titles are usually 'Monad <> CompanyName' or similar. "
+        "Drop the 'Monad <> ' / 'Monad x ' prefix — just use the counterparty name "
+        "(e.g. 'Composable Security' not 'Monad Foundation <> Composable Security'). "
+        "If the chat name doesn't follow that pattern, use it as-is.\n\n"
+        "Formatting rules:\n"
+        "- Section headers: <code><b>ALL CAPS HEADER</b></code>\n"
+        "- <b>bold</b> for chat/team names and the Action Items: label\n"
+        "- <i>italic</i> for status/context\n"
+        "- Use line breaks and bullets for legibility but don't over-space\n"
+        "- NEVER use --- or *** or === as separators or horizontal rules. Do not output them.\n"
+        "- Timestamps only when they add context (e.g. how long someone's been waiting)\n"
+        "- All times are in ET (Eastern Time). Use ET when displaying any time.\n\n"
+        "IMPORTANT: Separate each section with the exact marker ===SECTION=== on its own line. "
+        "Each section will be sent as its own message."
+    )
+    owner_id = _resolve_owner_user_id(update, context)
+    owner_aliases = _resolve_owner_mention_aliases(update, context)
     answer = await llm.query(
         prompt,
-        all_results,
+        results,
         context_max_chars=context_max_chars,
         max_tokens_override=max_tokens,
         owner_user_id=owner_id,
         owner_aliases=owner_aliases,
+        model_override=_QUICK_MODE_MODEL if detail_mode == "quick" else None,
+        min_messages_per_group=2,
     )
-    await _reply_answer(update, context, answer, search_results=all_results)
+    await _reply_sections(update, context, answer, search_results=results)
 
     await audit.log(
         "querybot",
         "command_bd",
         {
+            "chat_count": chat_count,
             "days_back": days,
-            "mention_count": len(mention_results),
-            "thread_count": len(thread_results),
-            "total_count": len(all_results),
+            "detail_mode": detail_mode,
+            "per_chat_messages": per_chat_messages,
+            "results_count": len(results),
         },
         success=True,
     )
