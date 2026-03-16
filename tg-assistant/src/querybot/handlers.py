@@ -77,18 +77,19 @@ _MONAD_SEGMENT_RE = re.compile(
 )
 
 
-def _chat_deep_link(chat_id: int) -> Optional[str]:
+def _chat_deep_link(chat_id: int, message_id: int) -> Optional[str]:
     """Build a deep link for a Telegram chat.
 
     Supergroups/channels (Telethon marked ID < -1 trillion):
-        ``https://t.me/c/{internal_id}/1`` — standard web deep link.
+        ``https://t.me/c/{internal_id}/{message_id}`` — links to a known
+        existing message so Telegram can reliably open the chat.
     Regular groups (small negative IDs):
         ``tg://openmessage?chat_id={raw_id}`` — internal Telegram scheme
         handled by Desktop, iOS, and Android clients.
     """
     if chat_id < -1_000_000_000_000:
         internal_id = abs(chat_id) - 1_000_000_000_000
-        return f"https://t.me/c/{internal_id}/1"
+        return f"https://t.me/c/{internal_id}/{message_id}"
     if chat_id < 0:
         return f"tg://openmessage?chat_id={abs(chat_id)}"
     return None
@@ -135,7 +136,7 @@ def _build_chat_link_map(results: List[SearchResult]) -> Dict[str, str]:
         if r.chat_id in seen_chat_ids:
             continue
         seen_chat_ids.add(r.chat_id)
-        url = _chat_deep_link(r.chat_id)
+        url = _chat_deep_link(r.chat_id, r.message_id)
         if not url:
             skipped.append((r.chat_id, r.chat_title))
             continue

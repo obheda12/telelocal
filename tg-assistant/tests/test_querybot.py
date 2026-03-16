@@ -1605,21 +1605,24 @@ class TestCommitmentsCommandPipeline:
 class TestChatDeepLink:
     def test_supergroup_returns_url(self):
         chat_id = -1_001_234_567_890
-        url = _chat_deep_link(chat_id)
-        assert url == "https://t.me/c/1234567890/1"
+        url = _chat_deep_link(chat_id, 42000)
+        assert url == "https://t.me/c/1234567890/42000"
+
+    def test_supergroup_uses_message_id(self):
+        assert _chat_deep_link(-1_001_234_567_890, 9999) == "https://t.me/c/1234567890/9999"
 
     def test_regular_group_returns_tg_scheme(self):
-        assert _chat_deep_link(-4578576379) == "tg://openmessage?chat_id=4578576379"
+        assert _chat_deep_link(-4578576379, 1) == "tg://openmessage?chat_id=4578576379"
 
     def test_small_regular_group(self):
-        assert _chat_deep_link(-123456) == "tg://openmessage?chat_id=123456"
+        assert _chat_deep_link(-123456, 1) == "tg://openmessage?chat_id=123456"
 
     def test_private_chat_returns_none(self):
-        assert _chat_deep_link(999999) is None
+        assert _chat_deep_link(999999, 1) is None
 
     def test_boundary_value(self):
-        assert _chat_deep_link(-1_000_000_000_000) == "tg://openmessage?chat_id=1000000000000"
-        assert _chat_deep_link(-1_000_000_000_001) == "https://t.me/c/1/1"
+        assert _chat_deep_link(-1_000_000_000_000, 1) == "tg://openmessage?chat_id=1000000000000"
+        assert _chat_deep_link(-1_000_000_000_001, 500) == "https://t.me/c/1/500"
 
 
 class TestCounterpartyName:
