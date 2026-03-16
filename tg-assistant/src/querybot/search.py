@@ -826,139 +826,72 @@ class MessageSearch:
 
         return results
 
-    async def bd_attention_context(
+    async def active_chat_context(
         self,
         *,
         owner_id: int,
         days_back: int = 3,
-        open_chat_limit: int = 25,
-        cooling_chat_limit: int = 20,
-        open_thread_depth: int = 10,
-        cooling_thread_depth: int = 5,
-    ) -> Tuple[List[SearchResult], List[SearchResult]]:
-        """Return two result sets for BD relationship triage.
+        active_chat_limit: int = 30,
+        per_chat_depth: int = 8,
+    ) -> List[SearchResult]:
+        """Return recent thread context from chats the owner recently participated in.
 
-        OPEN  — chats where the partner spoke last with no owner reply since,
-                ordered oldest-first (waiting longest = most urgent).
-        COOLING — chats that went quiet between the fresh and cooling window,
-                  ordered most-recently-active first.
-
-        Thread context is included per chat so the LLM can verify whether the
-        owner already replied before flagging a chat as needing attention.
+        Fetches the last ``per_chat_depth`` messages from each chat where the
+        owner sent at least one message within ``days_back`` days.  The owner's
+        own messages are included so the LLM can see what has already been
+        handled.
 
         Args:
             owner_id: Telegram user ID of the owner.
-            days_back: Fresh window in days (default 3).
-            open_chat_limit: Max OPEN chats to surface.
-            cooling_chat_limit: Max COOLING chats to surface.
-            open_thread_depth: Last N messages per OPEN chat.
-            cooling_thread_depth: Last N messages per COOLING chat.
+            days_back: Look-back window in days (default 3).
+            active_chat_limit: Max number of active chats to surface.
+            per_chat_depth: Last N messages per active chat.
 
         Returns:
-            ``(open_results, cooling_results)`` — both are lists of
-            :class:`SearchResult`.
+            Flat list of :class:`SearchResult` ordered by timestamp descending.
         """
         days_back = max(1, int(days_back))
-        open_chat_limit = max(1, int(open_chat_limit))
-        cooling_chat_limit = max(1, int(cooling_chat_limit))
-        open_thread_depth = max(1, int(open_thread_depth))
-        cooling_thread_depth = max(1, int(cooling_thread_depth))
+        active_chat_limit = max(1, int(active_chat_limit))
+        per_chat_depth = max(1, int(per_chat_depth))
 
-        now = datetime.now(timezone.utc)
-        fresh_cutoff = now - timedelta(days=days_back)
-        thread_cutoff = now - timedelta(days=days_back * 4)
-        cooling_cutoff = thread_cutoff
+        fresh_cutoff = datetime.now(timezone.utc) - timedelta(days=days_back)
 
-        open_sql = """
-            WITH fresh_last_msg AS (
-                SELECT DISTINCT ON (m.chat_id)
-                    m.chat_id, m.sender_id, m.timestamp AS last_ts
-                FROM messages m
-                WHERE m.timestamp >= $1
-                ORDER BY m.chat_id, m.timestamp DESC, m.message_id DESC
-            ),
-            open_chats AS (
-                SELECT chat_id, last_ts
-                FROM fresh_last_msg
-                WHERE sender_id IS DISTINCT FROM $2
-                  AND sender_id IS NOT NULL
-                ORDER BY last_ts ASC
+        sql = """
+            WITH owner_active_chats AS (
+                SELECT DISTINCT chat_id
+                FROM messages
+                WHERE sender_id = $1
+                  AND timestamp >= $2
                 LIMIT $3
             ),
             ranked AS (
                 SELECT m.message_id, m.chat_id, c.title, m.sender_name, m.sender_id,
                        m.reply_to_msg_id, m.thread_top_msg_id, m.is_topic_message,
-                       m.timestamp, m.text, oc.last_ts,
+                       m.timestamp, m.text,
                        ROW_NUMBER() OVER (
                            PARTITION BY m.chat_id ORDER BY m.timestamp DESC, m.message_id DESC
                        ) AS rn
                 FROM messages m
-                JOIN open_chats oc ON oc.chat_id = m.chat_id
+                JOIN owner_active_chats oac ON oac.chat_id = m.chat_id
                 JOIN chats c ON c.chat_id = m.chat_id
-                WHERE m.timestamp >= $4
+                WHERE m.timestamp >= $2
             )
             SELECT message_id, chat_id, title, sender_name, sender_id,
                    reply_to_msg_id, thread_top_msg_id, is_topic_message,
                    timestamp, text, 1.0 AS score
             FROM ranked
-            WHERE rn <= $5
-            ORDER BY last_ts ASC, timestamp DESC
-        """
-
-        cooling_sql = """
-            WITH cooling_last_msg AS (
-                SELECT DISTINCT ON (m.chat_id)
-                    m.chat_id, m.timestamp AS last_ts
-                FROM messages m
-                WHERE m.timestamp >= $1
-                  AND m.timestamp < $2
-                ORDER BY m.chat_id, m.timestamp DESC, m.message_id DESC
-            ),
-            cooling_chats AS (
-                SELECT chat_id, last_ts
-                FROM cooling_last_msg
-                ORDER BY last_ts DESC
-                LIMIT $3
-            ),
-            ranked AS (
-                SELECT m.message_id, m.chat_id, c.title, m.sender_name, m.sender_id,
-                       m.reply_to_msg_id, m.thread_top_msg_id, m.is_topic_message,
-                       m.timestamp, m.text, cc.last_ts,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY m.chat_id ORDER BY m.timestamp DESC, m.message_id DESC
-                       ) AS rn
-                FROM messages m
-                JOIN cooling_chats cc ON cc.chat_id = m.chat_id
-                JOIN chats c ON c.chat_id = m.chat_id
-                WHERE m.timestamp >= $1
-            )
-            SELECT message_id, chat_id, title, sender_name, sender_id,
-                   reply_to_msg_id, thread_top_msg_id, is_topic_message,
-                   timestamp, text, 0.5 AS score
-            FROM ranked
             WHERE rn <= $4
-            ORDER BY last_ts DESC, timestamp DESC
+            ORDER BY timestamp DESC
         """
 
-        open_rows, cooling_rows = await asyncio.gather(
-            self._pool.fetch(
-                open_sql,
-                fresh_cutoff,
-                int(owner_id),
-                open_chat_limit,
-                thread_cutoff,
-                open_thread_depth,
-            ),
-            self._pool.fetch(
-                cooling_sql,
-                cooling_cutoff,
-                fresh_cutoff,
-                cooling_chat_limit,
-                cooling_thread_depth,
-            ),
+        rows = await self._pool.fetch(
+            sql,
+            int(owner_id),
+            fresh_cutoff,
+            active_chat_limit,
+            per_chat_depth,
         )
-
-        return self._rows_to_results(open_rows), self._rows_to_results(cooling_rows)
+        return self._rows_to_results(rows)
 
     # ------------------------------------------------------------------
     # Helpers

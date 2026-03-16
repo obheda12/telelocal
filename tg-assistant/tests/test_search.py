@@ -429,121 +429,80 @@ class TestOpenQuestionsNeedingReply:
         assert "r.reply_to_msg_id = q.message_id" in sql
 
 
-class TestBdAttentionContext:
+class TestActiveChatContext:
     @pytest.mark.asyncio
-    async def test_returns_tuple_of_two_result_lists(self):
-        """bd_attention_context returns (open_results, cooling_results)."""
+    async def test_returns_flat_list(self):
+        """active_chat_context returns a flat List[SearchResult]."""
         mock_pool = MagicMock()
         mock_pool.fetch = AsyncMock(return_value=[])
         mock_embedder = MagicMock()
         mock_embedder.dimension = 384
 
         search = MessageSearch(mock_pool, mock_embedder)
-        result = await search.bd_attention_context(owner_id=123)
+        result = await search.active_chat_context(owner_id=123)
 
-        assert isinstance(result, tuple)
-        assert len(result) == 2
-        open_results, cooling_results = result
-        assert isinstance(open_results, list)
-        assert isinstance(cooling_results, list)
+        assert isinstance(result, list)
 
     @pytest.mark.asyncio
-    async def test_runs_two_concurrent_queries(self):
-        """Both OPEN and COOLING queries execute (via asyncio.gather)."""
+    async def test_runs_one_query(self):
+        """active_chat_context executes exactly one pool.fetch call."""
         mock_pool = MagicMock()
         mock_pool.fetch = AsyncMock(return_value=[])
         mock_embedder = MagicMock()
         mock_embedder.dimension = 384
 
         search = MessageSearch(mock_pool, mock_embedder)
-        await search.bd_attention_context(owner_id=123, days_back=3)
+        await search.active_chat_context(owner_id=123, days_back=3)
 
-        assert mock_pool.fetch.call_count == 2
+        assert mock_pool.fetch.call_count == 1
 
     @pytest.mark.asyncio
-    async def test_open_query_filters_owner_and_service_messages(self):
-        """OPEN SQL uses IS DISTINCT FROM owner_id and excludes NULL senders."""
+    async def test_sql_filters_active_chats_by_owner(self):
+        """SQL identifies active chats using sender_id = owner_id."""
         mock_pool = MagicMock()
         mock_pool.fetch = AsyncMock(return_value=[])
         mock_embedder = MagicMock()
         mock_embedder.dimension = 384
 
         search = MessageSearch(mock_pool, mock_embedder)
-        await search.bd_attention_context(owner_id=123, days_back=3)
+        await search.active_chat_context(owner_id=123, days_back=3)
 
-        open_sql = mock_pool.fetch.call_args_list[0][0][0]
-        assert "IS DISTINCT FROM $2" in open_sql
-        assert "sender_id IS NOT NULL" in open_sql
-        assert "DISTINCT ON (m.chat_id)" in open_sql
+        sql = mock_pool.fetch.call_args[0][0]
+        assert "sender_id = $1" in sql
+        assert "owner_active_chats" in sql
 
     @pytest.mark.asyncio
-    async def test_cooling_query_excludes_fresh_window(self):
-        """COOLING SQL restricts to messages NOT in the fresh window."""
+    async def test_sql_includes_all_chat_messages_no_sender_filter(self):
+        """Main query fetches all messages in active chats (no sender filter)."""
         mock_pool = MagicMock()
         mock_pool.fetch = AsyncMock(return_value=[])
         mock_embedder = MagicMock()
         mock_embedder.dimension = 384
 
         search = MessageSearch(mock_pool, mock_embedder)
-        await search.bd_attention_context(owner_id=123, days_back=3)
+        await search.active_chat_context(owner_id=123, days_back=3)
 
-        cooling_sql = mock_pool.fetch.call_args_list[1][0][0]
-        assert "m.timestamp < $2" in cooling_sql
-        assert "m.timestamp >= $1" in cooling_sql
+        sql = mock_pool.fetch.call_args[0][0]
+        # The ranked CTE joins on owner_active_chats but does NOT filter by sender_id
+        assert "JOIN owner_active_chats oac ON oac.chat_id = m.chat_id" in sql
+        # There should be no sender_id filter outside the owner_active_chats CTE
+        sender_filter_count = sql.count("sender_id = $1")
+        assert sender_filter_count == 1  # only in owner_active_chats CTE
 
     @pytest.mark.asyncio
-    async def test_open_thread_depth_passed_as_param(self):
-        """open_thread_depth becomes $5 in the OPEN query."""
+    async def test_per_chat_depth_passed_as_param_4(self):
+        """per_chat_depth is passed as $4."""
         mock_pool = MagicMock()
         mock_pool.fetch = AsyncMock(return_value=[])
         mock_embedder = MagicMock()
         mock_embedder.dimension = 384
 
         search = MessageSearch(mock_pool, mock_embedder)
-        await search.bd_attention_context(
-            owner_id=42,
-            days_back=1,
-            open_thread_depth=7,
-        )
+        await search.active_chat_context(owner_id=42, days_back=1, per_chat_depth=5)
 
-        open_args = mock_pool.fetch.call_args_list[0][0]
-        # open_sql params: fresh_cutoff, owner_id, open_chat_limit, thread_cutoff, open_thread_depth
-        assert open_args[5] == 7
-
-    @pytest.mark.asyncio
-    async def test_cooling_thread_depth_passed_as_param(self):
-        """cooling_thread_depth becomes $4 in the COOLING query."""
-        mock_pool = MagicMock()
-        mock_pool.fetch = AsyncMock(return_value=[])
-        mock_embedder = MagicMock()
-        mock_embedder.dimension = 384
-
-        search = MessageSearch(mock_pool, mock_embedder)
-        await search.bd_attention_context(
-            owner_id=42,
-            days_back=1,
-            cooling_thread_depth=3,
-        )
-
-        cooling_args = mock_pool.fetch.call_args_list[1][0]
-        # cooling_sql params: cooling_cutoff, fresh_cutoff, cooling_chat_limit, cooling_thread_depth
-        assert cooling_args[4] == 3
-
-    @pytest.mark.asyncio
-    async def test_open_score_is_1_cooling_score_is_0_5(self):
-        """OPEN rows use score 1.0 and COOLING rows use score 0.5."""
-        mock_pool = MagicMock()
-        mock_pool.fetch = AsyncMock(return_value=[])
-        mock_embedder = MagicMock()
-        mock_embedder.dimension = 384
-
-        search = MessageSearch(mock_pool, mock_embedder)
-        await search.bd_attention_context(owner_id=123, days_back=3)
-
-        open_sql = mock_pool.fetch.call_args_list[0][0][0]
-        cooling_sql = mock_pool.fetch.call_args_list[1][0][0]
-        assert "1.0 AS score" in open_sql
-        assert "0.5 AS score" in cooling_sql
+        # fetch(sql, owner_id, fresh_cutoff, active_chat_limit, per_chat_depth)
+        fetch_args = mock_pool.fetch.call_args[0]
+        assert fetch_args[4] == 5  # $4 = per_chat_depth (1-indexed after sql)
 
     @pytest.mark.asyncio
     async def test_owner_id_zero_does_not_crash(self):
@@ -554,6 +513,5 @@ class TestBdAttentionContext:
         mock_embedder.dimension = 384
 
         search = MessageSearch(mock_pool, mock_embedder)
-        open_results, cooling_results = await search.bd_attention_context(owner_id=0)
-        assert isinstance(open_results, list)
-        assert isinstance(cooling_results, list)
+        result = await search.active_chat_context(owner_id=0)
+        assert isinstance(result, list)

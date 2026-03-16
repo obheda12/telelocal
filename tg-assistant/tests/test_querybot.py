@@ -2,7 +2,7 @@
 Unit tests for querybot: handlers, message splitting, owner_only filter, LLM.
 """
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -307,7 +307,7 @@ def _make_handler_context(
     mock_search.mentions_needing_attention.return_value = search_results or []
     mock_search.open_questions_needing_reply.return_value = search_results or []
     mock_search.owner_commitments.return_value = search_results or []
-    mock_search.bd_attention_context.return_value = (search_results or [], [])
+    mock_search.active_chat_context.return_value = search_results or []
 
     mock_llm = AsyncMock()
     mock_llm.extract_query_intent.return_value = intent or QueryIntent(
@@ -707,15 +707,20 @@ class TestScaffoldCommandHandlers:
 
         await handle_bd(update, context)
 
-        mock_search.bd_attention_context.assert_called_once_with(
+        mock_search.mentions_needing_attention.assert_called_once_with(
+            owner_id=12345,
+            mention_aliases=ANY,
+            days_back=7,
+            limit=500,
+        )
+        mock_search.active_chat_context.assert_called_once_with(
             owner_id=12345,
             days_back=7,
         )
         mock_llm.query.assert_called_once()
         llm_kwargs = mock_llm.query.call_args.kwargs
-        assert llm_kwargs["context_max_chars"] == 98_000
+        assert llm_kwargs["context_max_chars"] == 120_000
         assert llm_kwargs["max_tokens_override"] == 2500
-        assert llm_kwargs["min_messages_per_group"] == 2
         assert mock_audit.log.call_args[0][1] == "command_bd"
 
     @pytest.mark.asyncio
@@ -767,14 +772,19 @@ class TestScaffoldCommandHandlers:
 
         await handle_bd(update, context)
 
-        mock_search.bd_attention_context.assert_called_once_with(
+        mock_search.mentions_needing_attention.assert_called_once_with(
+            owner_id=12345,
+            mention_aliases=ANY,
+            days_back=3,
+            limit=500,
+        )
+        mock_search.active_chat_context.assert_called_once_with(
             owner_id=12345,
             days_back=3,
         )
         llm_kwargs = mock_llm.query.call_args.kwargs
-        assert llm_kwargs["context_max_chars"] == 98_000
+        assert llm_kwargs["context_max_chars"] == 120_000
         assert llm_kwargs["max_tokens_override"] == 2500
-        assert llm_kwargs["min_messages_per_group"] == 2
         assert mock_audit.log.call_args[0][1] == "command_bd"
 
     @pytest.mark.asyncio
@@ -1035,7 +1045,7 @@ class TestModelRouting:
         await handle_bd(update, context)
 
         llm_kwargs = mock_llm.query.call_args.kwargs
-        assert llm_kwargs["context_max_chars"] == 98_000
+        assert llm_kwargs["context_max_chars"] == 120_000
         assert llm_kwargs["max_tokens_override"] == 2500
         # No model_override — always uses default model
         assert "model_override" not in llm_kwargs

@@ -1211,12 +1211,13 @@ async def handle_commitments(
 async def handle_bd(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Handle ``/bd`` — BD relationship triage: OPEN and COOLING chats.
+    """Handle ``/bd`` — smart mentions triage: NEED REPLY, FYI, CLOSED OUT.
 
     Usage: /bd [1d|3d|1w]  (defaults to 3 days)
 
-    OPEN: chats where the partner spoke last with no reply from the owner.
-    COOLING: chats that went quiet in the cooling window (days_back * 4).
+    Combines explicit mentions/replies with thread context from recently
+    active chats.  The LLM filters heavily — only surfaces clearly relevant
+    items.
     """
     search: MessageSearch = context.bot_data["search"]
     llm: ClaudeAssistant = context.bot_data["llm"]
@@ -1232,49 +1233,62 @@ async def handle_bd(
         )
         return
 
-    context_max_chars = 98_000
+    context_max_chars = 120_000
     max_tokens = 2500
 
     await _send_typing(update, context)
     owner_id = _resolve_owner_user_id(update, context)
-    open_results, cooling_results = await search.bd_attention_context(
-        owner_id=owner_id,
-        days_back=days,
+    owner_aliases = _resolve_owner_mention_aliases(update, context)
+
+    mention_results, thread_results = await asyncio.gather(
+        search.mentions_needing_attention(
+            owner_id=owner_id,
+            mention_aliases=owner_aliases,
+            days_back=days,
+            limit=500,
+        ),
+        search.active_chat_context(
+            owner_id=owner_id,
+            days_back=days,
+        ),
     )
 
-    all_results = open_results + cooling_results
+    # Explicit mentions win on overlap
+    seen = {(r.message_id, r.chat_id): r for r in reversed(mention_results)}
+    for r in thread_results:
+        key = (r.message_id, r.chat_id)
+        if key not in seen:
+            seen[key] = r
+    all_results = list(seen.values())
+
     if not all_results:
         no_results_msg = await _get_sync_status_context(search._pool)
         await update.message.reply_text(no_results_msg)
         return
 
-    open_names = _get_unique_chat_names(open_results)
-    cooling_names = _get_unique_chat_names(cooling_results)
-    cooling_days = days * 4
-
     prompt = (
-        "Triage my BD conversations. I've provided two groups of chats with "
-        "their recent message threads.\n\n"
-        f"OPEN ({len(open_names)} chats — partner's message is most recent, "
-        "no reply from me yet):\n"
-        f"{', '.join(open_names) if open_names else '(none)'}\n\n"
-        f"COOLING ({len(cooling_names)} chats — went quiet in last {cooling_days}d):\n"
-        f"{', '.join(cooling_names) if cooling_names else '(none)'}\n\n"
-        "For each chat I've provided the last several messages as thread context. "
-        "Use these to verify status — if I or a team member already replied, "
-        "skip that chat entirely.\n\n"
-        "Output two sections. Keep each entry to ONE line — no writeups, no action items.\n\n"
-        "<code><b>OPEN</b></code>\n"
-        "• <b>ChatName</b> — what they asked/said and how long it's been waiting\n\n"
-        "<code><b>COOLING</b></code>\n"
-        "• <b>ChatName</b> — last topic and how long it's been quiet\n\n"
-        "Omit a section entirely if empty.\n\n"
-        "Chat name rules: drop 'Monad <> ' / 'Monad x ' / 'Monad Foundation <> ' prefix.\n"
-        "Formatting: <b>bold</b> for chat names. All times in ET. "
-        "NEVER use --- or *** or === separators."
+        "Review these messages from my active conversations. I've provided explicit "
+        "replies/mentions to me, plus thread context from chats I've been recently active in "
+        "(including my own replies, so you can see what's already been handled).\n\n"
+        "Triage into three compact sections. Be selective — if you're not confident something "
+        "needs my attention, skip it entirely. One line per entry.\n\n"
+        "<code><b>NEED REPLY</b></code>\n"
+        "• <b>ChatName</b> — what they need and how long it's been waiting\n"
+        "[Only if I clearly haven't replied yet and genuinely need to act]\n\n"
+        "<code><b>FYI</b></code>\n"
+        "• <b>ChatName</b> — what happened / why it matters\n"
+        "[Important updates — informational, no action needed]\n\n"
+        "<code><b>CLOSED OUT</b></code>\n"
+        "• <b>ChatName</b>, <b>ChatName</b> (comma-separated, one line)\n"
+        "[Things that had an open request and appear resolved. Omit section if empty.]\n\n"
+        "Rules:\n"
+        "- If my reply already addressed something, it belongs in CLOSED OUT, not NEED REPLY.\n"
+        "- Omit any section that's empty.\n"
+        "- Drop 'Monad <> ' / 'Monad x ' / 'Monad Foundation <> ' prefix from chat names.\n"
+        "- <b>bold</b> for chat names. All times in ET.\n"
+        "- NEVER use --- or *** or === separators."
     )
 
-    owner_aliases = _resolve_owner_mention_aliases(update, context)
     answer = await llm.query(
         prompt,
         all_results,
@@ -1282,7 +1296,6 @@ async def handle_bd(
         max_tokens_override=max_tokens,
         owner_user_id=owner_id,
         owner_aliases=owner_aliases,
-        min_messages_per_group=2,
     )
     await _reply_answer(update, context, answer, search_results=all_results)
 
@@ -1291,8 +1304,9 @@ async def handle_bd(
         "command_bd",
         {
             "days_back": days,
-            "open_count": len(open_results),
-            "cooling_count": len(cooling_results),
+            "mention_count": len(mention_results),
+            "thread_count": len(thread_results),
+            "total_count": len(all_results),
         },
         success=True,
     )
