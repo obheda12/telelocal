@@ -91,7 +91,7 @@ def _chat_deep_link(chat_id: int, message_id: int) -> Optional[str]:
         internal_id = abs(chat_id) - 1_000_000_000_000
         return f"https://t.me/c/{internal_id}/{message_id}"
     if chat_id < 0:
-        return f"tg://openmessage?chat_id={abs(chat_id)}"
+        return f"tg://openmessage?chat_id={abs(chat_id)}&msgid={message_id}"
     return None
 
 
