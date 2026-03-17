@@ -36,7 +36,7 @@ from querybot.handlers import (
     owner_only,
 )
 from querybot.llm import ClaudeAssistant
-from querybot.search import QueryIntent, SearchResult
+from querybot.search import MentionBundle, QueryIntent, SearchResult
 from shared.safety import InputValidationResult, SanitizeResult
 
 
@@ -305,6 +305,9 @@ def _make_handler_context(
     mock_search.full_text_search.return_value = fallback_results or []
     mock_search.recent_chat_summary_context.return_value = search_results or []
     mock_search.mentions_needing_attention.return_value = search_results or []
+    mock_search.mentions_with_context.return_value = (
+        [MentionBundle(mention=r) for r in search_results] if search_results else []
+    )
     mock_search.open_questions_needing_reply.return_value = search_results or []
     mock_search.owner_commitments.return_value = search_results or []
 
@@ -601,11 +604,11 @@ class TestHandleMessage:
 
         await handle_message(update, context)
 
-        mock_search.mentions_needing_attention.assert_called_once_with(
+        mock_search.mentions_with_context.assert_called_once_with(
             owner_id=12345,
             mention_aliases=["@owner"],
             days_back=7,
-            limit=500,  # all mentions in timeframe
+            limit=500,
         )
         mock_llm.extract_query_intent.assert_not_called()
         assert mock_audit.log.call_args[0][1] == "query_mentions"
@@ -677,14 +680,13 @@ class TestScaffoldCommandHandlers:
 
         await handle_mentions(update, context)
 
-        mock_search.mentions_needing_attention.assert_called_once()
-        call_kwargs = mock_search.mentions_needing_attention.call_args.kwargs
+        mock_search.mentions_with_context.assert_called_once()
+        call_kwargs = mock_search.mentions_with_context.call_args.kwargs
         assert call_kwargs["limit"] == 500  # all mentions in timeframe
         mock_llm.query.assert_called_once()
         llm_kwargs = mock_llm.query.call_args.kwargs
-        assert llm_kwargs["context_max_chars"] == 134000  # min(200k, 80k+3*18k)
+        assert llm_kwargs["raw_context"] is not None
         assert llm_kwargs["max_tokens_override"] == 5596  # min(8000, 4096+3*500) — always detailed
-        assert llm_kwargs["min_messages_per_group"] == 2
         assert mock_audit.log.call_args[0][1] == "command_mentions"
 
     @pytest.mark.asyncio
@@ -1417,7 +1419,7 @@ class TestSummaryScalingParams:
 
 class TestMentionsBreadthFirst:
     @pytest.mark.asyncio
-    async def test_mentions_passes_min_messages_per_group(self):
+    async def test_mentions_uses_raw_context_with_bundles(self):
         result = SearchResult(
             message_id=1, chat_id=1, chat_title="Ops",
             sender_name="Alice", timestamp="2024-01-15T10:00:00Z",
@@ -1432,7 +1434,9 @@ class TestMentionsBreadthFirst:
         await handle_mentions(update, context)
 
         llm_kwargs = mock_llm.query.call_args.kwargs
-        assert llm_kwargs["min_messages_per_group"] == 2
+        # mentions now uses raw_context (pre-formatted bundles) instead of min_messages_per_group
+        assert llm_kwargs.get("raw_context") is not None
+        assert llm_kwargs.get("min_messages_per_group", 0) == 0
 
     @pytest.mark.asyncio
     async def test_mentions_always_detailed_no_haiku(self):

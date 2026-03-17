@@ -429,6 +429,7 @@ class ClaudeAssistant:
         user_question: str,
         context_results: List[SearchResult],
         *,
+        raw_context: Optional[str] = None,
         context_max_chars: int = 8000,
         max_tokens_override: Optional[int] = None,
         owner_user_id: Optional[int] = None,
@@ -461,12 +462,19 @@ class ClaudeAssistant:
                 max_tokens = max(256, int(max_tokens_override))
             except (TypeError, ValueError):
                 max_tokens = self._max_tokens
-        context = self._format_context(
-            context_results,
-            max_chars=context_max_chars,
-            owner_user_id=owner_user_id,
-            min_messages_per_group=min_messages_per_group,
-        )
+        if raw_context is not None:
+            context = (
+                '<message_context source="synced_telegram_messages" trust_level="untrusted">\n'
+                + raw_context
+                + "\n</message_context>"
+            )
+        else:
+            context = self._format_context(
+                context_results,
+                max_chars=context_max_chars,
+                owner_user_id=owner_user_id,
+                min_messages_per_group=min_messages_per_group,
+            )
         identity_lines: List[str] = []
         if owner_user_id is not None:
             identity_lines.append(f"- owner_telegram_user_id: {owner_user_id}")

@@ -17,7 +17,7 @@ import asyncio
 import logging
 import re
 import time
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -48,6 +48,16 @@ class SearchResult:
     reply_to_msg_id: Optional[int] = None
     thread_top_msg_id: Optional[int] = None
     is_topic_message: bool = False
+
+
+@dataclass
+class MentionBundle:
+    """A mention/reply anchor with surrounding conversation context."""
+
+    mention: SearchResult
+    before: List[SearchResult] = field(default_factory=list)
+    after: List[SearchResult] = field(default_factory=list)
+    owner_replied: bool = False
 
 
 @dataclass
@@ -554,6 +564,135 @@ class MessageSearch:
 
         rows = await self._pool.fetch(sql, *params)
         return self._rows_to_results(rows)
+
+    async def mentions_with_context(
+        self,
+        *,
+        owner_id: int,
+        mention_aliases: Optional[List[str]] = None,
+        days_back: int = 7,
+        limit: int = 80,
+        context_before: int = 3,
+        context_after: int = 5,
+    ) -> List[MentionBundle]:
+        """Fetch mentions with surrounding conversation context.
+
+        Returns :class:`MentionBundle` objects where each anchor mention is
+        paired with neighbouring messages (for full conversational context)
+        and an ``owner_replied`` flag indicating whether the owner has
+        already followed up after the mention.
+
+        Context is scoped to the same thread when ``thread_top_msg_id`` is
+        set, and to the full chat window otherwise.
+        """
+        mentions = await self.mentions_needing_attention(
+            owner_id=owner_id,
+            mention_aliases=mention_aliases,
+            days_back=days_back,
+            limit=limit,
+        )
+        if not mentions:
+            return []
+
+        # Group mentions by chat so we can batch context fetches.
+        chat_mention_map: Dict[int, List[SearchResult]] = defaultdict(list)
+        for m in mentions:
+            chat_mention_map[m.chat_id].append(m)
+
+        def _parse_ts(ts_str: str) -> Optional[datetime]:
+            if not ts_str:
+                return None
+            try:
+                return datetime.fromisoformat(ts_str)
+            except ValueError:
+                return None
+
+        async def _fetch_chat_window(
+            chat_id: int, chat_mentions: List[SearchResult]
+        ) -> List[SearchResult]:
+            times = [
+                t
+                for m in chat_mentions
+                if (t := _parse_ts(m.timestamp)) is not None
+            ]
+            if not times:
+                return []
+            window_start = min(times) - timedelta(hours=2)
+            window_end = max(times) + timedelta(hours=4)
+            rows = await self._pool.fetch(
+                """
+                SELECT m.message_id, m.chat_id, c.title, m.sender_name, m.sender_id,
+                       m.reply_to_msg_id, m.thread_top_msg_id, m.is_topic_message,
+                       m.timestamp, m.text,
+                       1.0 AS score
+                FROM messages m
+                JOIN chats c ON c.chat_id = m.chat_id
+                WHERE m.chat_id = $1
+                  AND m.timestamp >= $2
+                  AND m.timestamp <= $3
+                ORDER BY m.timestamp ASC, m.message_id ASC
+                LIMIT 500
+                """,
+                chat_id,
+                window_start,
+                window_end,
+            )
+            return self._rows_to_results(rows)
+
+        chat_ids_ordered = list(chat_mention_map.keys())
+        chat_windows = await asyncio.gather(
+            *[_fetch_chat_window(cid, chat_mention_map[cid]) for cid in chat_ids_ordered]
+        )
+        chat_all_msgs: Dict[int, List[SearchResult]] = dict(
+            zip(chat_ids_ordered, chat_windows)
+        )
+
+        bundles: List[MentionBundle] = []
+        for mention in mentions:
+            mention_dt = _parse_ts(mention.timestamp)
+            all_msgs = chat_all_msgs.get(mention.chat_id, [])
+
+            # Scope to same thread for forum topics; use full chat window otherwise.
+            if mention.thread_top_msg_id is not None:
+                tid = mention.thread_top_msg_id
+                scope = [
+                    m for m in all_msgs
+                    if m.thread_top_msg_id == tid or m.message_id == tid
+                ]
+            else:
+                scope = all_msgs
+
+            if mention_dt is None:
+                bundles.append(MentionBundle(mention=mention))
+                continue
+
+            before_msgs: List[SearchResult] = []
+            after_msgs: List[SearchResult] = []
+            for msg in scope:
+                if msg.message_id == mention.message_id and msg.chat_id == mention.chat_id:
+                    continue
+                msg_dt = _parse_ts(msg.timestamp)
+                if msg_dt is None:
+                    continue
+                if msg_dt <= mention_dt:
+                    before_msgs.append(msg)
+                else:
+                    after_msgs.append(msg)
+
+            before_trimmed = before_msgs[-context_before:]
+            after_trimmed = after_msgs[:context_after]
+            owner_replied = any(m.sender_id == owner_id for m in after_trimmed)
+
+            bundles.append(
+                MentionBundle(
+                    mention=mention,
+                    before=before_trimmed,
+                    after=after_trimmed,
+                    owner_replied=owner_replied,
+                )
+            )
+
+        return bundles
 
     async def open_questions_needing_reply(
         self,

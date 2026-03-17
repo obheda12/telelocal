@@ -22,7 +22,7 @@ from telegram.ext import ContextTypes
 import asyncpg
 
 from querybot.llm import ClaudeAssistant
-from querybot.search import MessageSearch, SearchResult
+from querybot.search import MentionBundle, MessageSearch, SearchResult
 from shared.audit import AuditLogger
 from shared.safety import ContentSanitizer, InputValidator
 
@@ -535,6 +535,98 @@ def _summary_scaling_params(
     return chats, per_chat, ctx, tokens
 
 
+def _format_mention_bundles(
+    bundles: List[MentionBundle],
+    owner_id: int,
+    *,
+    max_chars: int = 150_000,
+    per_message_chars: int = 400,
+) -> str:
+    """Format MentionBundle list as structured context for the LLM.
+
+    Each bundle is rendered as a labelled block with ``[context]`` lines
+    before the anchor, the ``[MENTION]`` anchor itself, and ``[after]``
+    lines — plus an ``[owner already replied]`` / ``[no owner reply yet]``
+    footer so the LLM can classify Likely Done items correctly.
+    """
+
+    def _esc(text: str) -> str:
+        return ClaudeAssistant._escape_xml(text or "")
+
+    def _fmt(msg: SearchResult, tag: str) -> str:
+        sender = _esc(msg.sender_name or "Unknown")
+        text = _esc(msg.text or "")
+        if per_message_chars > 0 and len(text) > per_message_chars:
+            text = text[: per_message_chars - 3].rstrip() + "..."
+        extras: List[str] = []
+        if msg.sender_id is not None:
+            extras.append(f"sender_id={msg.sender_id}")
+        if msg.sender_id == owner_id:
+            extras.append("owner_message=true")
+        if msg.reply_to_msg_id is not None:
+            extras.append(f"reply_to={msg.reply_to_msg_id}")
+        suffix = f" ({', '.join(extras)})" if extras else ""
+        ts = ClaudeAssistant._to_et(msg.timestamp)
+        return f"{tag} [{ts}] {sender}{suffix}: {text}\n"
+
+    # Group bundles by chat so context is chat-contiguous.
+    chat_groups: Dict[Tuple[int, str], List[MentionBundle]] = {}
+    for b in bundles:
+        key = (b.mention.chat_id, b.mention.chat_title or "Unknown Chat")
+        chat_groups.setdefault(key, []).append(b)
+
+    parts: List[str] = []
+    total = 0
+
+    for (_, chat_title), chat_bundles in chat_groups.items():
+        header = f"=== {_esc(chat_title)} ===\n"
+        if total + len(header) > max_chars:
+            break
+        parts.append(header)
+        total += len(header)
+
+        for bundle in chat_bundles:
+            mention = bundle.mention
+            anchor_ts = ClaudeAssistant._to_et(mention.timestamp)
+            anchor_sender = _esc(mention.sender_name or "")
+            replied_flag = " | OWNER ALREADY REPLIED" if bundle.owner_replied else ""
+            block_hdr = f"  -- Mention/Reply at {anchor_ts} by {anchor_sender}{replied_flag} --\n"
+            if total + len(block_hdr) > max_chars:
+                break
+            parts.append(block_hdr)
+            total += len(block_hdr)
+
+            for msg in bundle.before:
+                line = _fmt(msg, "  [context]")
+                if total + len(line) > max_chars:
+                    break
+                parts.append(line)
+                total += len(line)
+
+            anchor_line = _fmt(mention, "  [MENTION]")
+            if total + len(anchor_line) <= max_chars:
+                parts.append(anchor_line)
+                total += len(anchor_line)
+
+            for msg in bundle.after:
+                line = _fmt(msg, "  [after]  ")
+                if total + len(line) > max_chars:
+                    break
+                parts.append(line)
+                total += len(line)
+
+            footer = (
+                "  [owner already replied — classify as COMPLETED if resolved, REPLY SOON if still active]\n\n"
+                if bundle.owner_replied
+                else "  [no owner reply yet]\n\n"
+            )
+            if total + len(footer) <= max_chars:
+                parts.append(footer)
+                total += len(footer)
+
+    return "".join(parts)
+
+
 def _resolve_owner_mention_aliases(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -945,8 +1037,8 @@ async def handle_help(
         "Briefing commands:\n"
         "  /bd [1d|3d|1w] [quick|detailed]\n"
         "      Chat triage — needs response / watch / quiet (default 3d quick)\n"
-        "  /mentions [3d|1w|2w]\n"
-        "      Mention triage — Act Now / Reply Soon / FYI (default 3d)\n"
+        "  /mentions [1d|3d|1w|2w]\n"
+        "      Mention triage — Act Now / Reply Soon / FYI / Completed (default 1w)\n"
         "  /commitments [1d|3d|1w]\n"
         "      Your open promises — Likely Dropped / In Progress / Completed (default 3d)\n"
         "  /summary [1d|3d|1w] [quick|detailed]\n"
@@ -1021,20 +1113,20 @@ async def handle_mentions(
     llm: ClaudeAssistant = context.bot_data["llm"]
     audit: AuditLogger = context.bot_data["audit"]
 
-    _MENTIONS_ALLOWED_DAYS = {3, 7, 14}
+    _MENTIONS_ALLOWED_DAYS = {1, 3, 7, 14}
     days, _, parse_err = _parse_window_and_detail_args(
         context.args or [],
-        default_days=3,
+        default_days=7,
     )
     detail_mode = "detailed"
     if parse_err:
         await update.message.reply_text(
-            f"{parse_err}\nUsage: /mentions [3d|1w|2w]"
+            f"{parse_err}\nUsage: /mentions [1d|3d|1w|2w]"
         )
         return
     if days not in _MENTIONS_ALLOWED_DAYS:
         await update.message.reply_text(
-            f"Invalid window for /mentions. Use 3d, 1w, or 2w."
+            f"Invalid window for /mentions. Use 1d, 3d, 1w, or 2w."
         )
         return
 
@@ -1045,61 +1137,62 @@ async def handle_mentions(
     limit, context_max_chars, max_tokens = _mentions_scaling_params(
         days, detail_mode,
     )
-    results = await search.mentions_needing_attention(
+    bundles = await search.mentions_with_context(
         owner_id=owner_id,
         mention_aliases=normalized_aliases,
         days_back=days,
         limit=limit,
     )
 
-    if not results:
+    if not bundles:
         await update.message.reply_text(
             f"No mention or reply-to-you items found in the last {days} day(s)."
         )
         return
 
-    if detail_mode == "detailed":
-        item_instruction = (
-            "Use bullet points for each item. Include: chat name, who said it, "
-            "what they need, enough context to act, and timestamp."
-        )
-    else:
-        item_instruction = (
-            "Use bullet points. Each bullet: chat name + one-line context."
-        )
+    formatted_context = _format_mention_bundles(
+        bundles,
+        owner_id,
+        max_chars=context_max_chars,
+    )
+
     prompt = (
         f"Triage my mentions/replies from the last {days} day(s). "
-        "Put what needs my response FIRST — I need to see that immediately.\n\n"
+        "Each item shows [context] messages before the anchor, the [MENTION] itself, "
+        "and [after] messages — use this full context to understand what was needed "
+        "and whether it's been handled.\n\n"
         "Sections (in this order, omit empty ones):\n"
-        "1. <code><b>ACT NOW</b></code> — someone is waiting on my reply or I committed to something.\n"
-        "2. <code><b>REPLY SOON</b></code> — relevant to me but not time-sensitive.\n"
-        "3. <code><b>FYI</b></code> — informational, no action needed.\n\n"
-        f"{item_instruction}\n"
+        "1. <code><b>ACT NOW</b></code> — someone is waiting on my reply, nothing resolved.\n"
+        "2. <code><b>REPLY SOON</b></code> — relevant to me but not immediately urgent.\n"
+        "3. <code><b>FYI</b></code> — informational, no action needed.\n"
+        "4. <code><b>COMPLETED</b></code> — owner already replied and the matter appears resolved; "
+        "include briefly so I can confirm. If the thread is still active despite a reply, use REPLY SOON instead.\n\n"
+        "Use bullet points for each item. Include: chat name, who said it, "
+        "what they need (using surrounding context, not just the mention text), and timestamp. "
+        "If the surrounding context makes the mention's purpose clear, use that — "
+        "do not write 'no context provided' when context messages are present.\n"
         "Order items within each section by urgency. "
         "All times are in ET (Eastern Time). "
-        "Be thorough — list every qualifying item, don't summarize them away.\n\n"
+        "Be thorough — list every qualifying item.\n\n"
         "Chat name rules:\n"
         "- Chat titles are usually 'Monad <> CompanyName' or similar. "
         "Drop the 'Monad <> ' / 'Monad x ' / 'Monad Foundation <> ' prefix — "
-        "just use the counterparty name "
-        "(e.g. 'Composable Security' not 'Monad Foundation <> Composable Security'). "
-        "If the chat name doesn't follow that pattern, use it as-is.\n\n"
+        "just use the counterparty name. If the chat name doesn't follow that pattern, use it as-is.\n\n"
         "Formatting rules:\n"
         "- Section headers MUST use exactly: <code><b>HEADER</b></code>\n"
         "- <b>bold</b> for chat names\n"
         "- NEVER use --- or *** or === as separators"
     )
+    anchor_results = [b.mention for b in bundles]
     answer = await llm.query(
         prompt,
-        results,
-        context_max_chars=context_max_chars,
+        [],
+        raw_context=formatted_context,
         max_tokens_override=max_tokens,
         owner_user_id=owner_id,
         owner_aliases=normalized_aliases,
-        model_override=_QUICK_MODE_MODEL if detail_mode == "quick" else None,
-        min_messages_per_group=2,
     )
-    await _reply_answer(update, context, answer, search_results=results)
+    await _reply_answer(update, context, answer, search_results=anchor_results)
 
     await audit.log(
         "querybot",
@@ -1107,7 +1200,7 @@ async def handle_mentions(
         {
             "days_back": days,
             "detail_mode": detail_mode,
-            "results_count": len(results),
+            "results_count": len(bundles),
             "alias_count": len(normalized_aliases),
         },
         success=True,
@@ -1504,44 +1597,49 @@ async def handle_message(
         limit, context_max_chars, max_tokens = _mentions_scaling_params(
             mention_days, "detailed",
         )
-        mention_results = await search.mentions_needing_attention(
+        mention_bundles = await search.mentions_with_context(
             owner_id=owner_id,
             mention_aliases=aliases,
             days_back=mention_days,
             limit=limit,
         )
-        if not mention_results:
+        if not mention_bundles:
             await update.message.reply_text(
                 f"No mention or reply-to-you items found in the last {mention_days} day(s)."
             )
             return
 
-        item_instruction = (
-            "Use bullet points for each item. Include: chat name, who said it, "
-            "what they need, enough context to act, and timestamp."
+        formatted_context = _format_mention_bundles(
+            mention_bundles,
+            owner_id,
+            max_chars=context_max_chars,
         )
         prompt = (
             f"Triage my mentions/replies from the last {mention_days} day(s). "
-            "Put what needs my response FIRST — I need to see that immediately.\n\n"
+            "Each item shows [context] messages before the anchor, the [MENTION] itself, "
+            "and [after] messages — use this full context to understand what was needed "
+            "and whether it's been handled.\n\n"
             "Sections (in this order, omit empty ones):\n"
-            "1. <b>Act Now</b> — someone is waiting on my reply or I committed to something.\n"
-            "2. <b>Reply Soon</b> — relevant to me but not time-sensitive.\n"
-            "3. <b>FYI</b> — informational, no action needed.\n\n"
-            f"{item_instruction}\n"
-            "Order items within each section by urgency. "
-            "All times are in ET (Eastern Time). "
-            "Be thorough — list every qualifying item, don't summarize them away."
+            "1. <b>ACT NOW</b> — someone is waiting on my reply, nothing resolved.\n"
+            "2. <b>REPLY SOON</b> — relevant to me but not immediately urgent.\n"
+            "3. <b>FYI</b> — informational, no action needed.\n"
+            "4. <b>COMPLETED</b> — owner already replied and the matter appears resolved; "
+            "include briefly so I can confirm. If the thread is still active despite a reply, use REPLY SOON.\n\n"
+            "Use bullet points for each item. Include: chat name, who said it, "
+            "what they need (using surrounding context, not just the mention text), and timestamp. "
+            "If surrounding context makes the purpose clear, use that. "
+            "Order items by urgency. All times are in ET."
         )
+        mention_anchors = [b.mention for b in mention_bundles]
         answer = await llm.query(
             prompt,
-            mention_results,
-            context_max_chars=context_max_chars,
+            [],
+            raw_context=formatted_context,
             max_tokens_override=max_tokens,
             owner_user_id=owner_id,
             owner_aliases=aliases,
-            min_messages_per_group=2,
         )
-        await _reply_answer(update, context, answer, search_results=mention_results)
+        await _reply_answer(update, context, answer, search_results=mention_anchors)
         await audit.log(
             "querybot",
             "query_mentions",
@@ -1549,7 +1647,7 @@ async def handle_message(
                 "question_length": len(question),
                 "days_back": mention_days,
                 "detail_mode": "detailed",
-                "results_count": len(mention_results),
+                "results_count": len(mention_bundles),
                 "alias_count": len(aliases),
             },
             success=True,
