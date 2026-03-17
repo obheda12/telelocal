@@ -492,7 +492,7 @@ class MessageSearch:
                    1.0 AS score
             FROM ranked
             {rn_filter}
-            ORDER BY last_ts DESC, timestamp DESC
+            ORDER BY last_ts DESC, timestamp ASC, message_id ASC
         """
         rows = await self._pool.fetch(sql, *params)
         return self._rows_to_results(rows)

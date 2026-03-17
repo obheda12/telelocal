@@ -480,7 +480,7 @@ def _bd_scaling_params(days: int, detail_mode: str) -> Tuple[int, int, int]:
         ctx = min(200_000, 80_000 + days * 18_000)   # 1d→98k, 3d→134k, 7d→200k
         tokens = min(8_000, 4_096 + days * 500)      # 1d→4596, 3d→5596, 7d→7596
     else:
-        ctx = min(200_000, 80_000 + days * 18_000)   # same context so LLM sees everything
+        ctx = 200_000                                 # max context — don't miss active chats
         tokens = min(6_000, 3_000 + days * 400)      # 1d→3400, 3d→4200, 7d→5800
     return per_chat, ctx, tokens
 

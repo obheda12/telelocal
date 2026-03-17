@@ -775,7 +775,7 @@ class TestScaffoldCommandHandlers:
             days_back=3,
         )
         llm_kwargs = mock_llm.query.call_args.kwargs
-        assert llm_kwargs["context_max_chars"] == 134000   # min(200k, 80k+54k)
+        assert llm_kwargs["context_max_chars"] == 200000   # always max for quick mode
         assert llm_kwargs["max_tokens_override"] == 4200   # min(6000, 3000+1200) — quick default
         assert llm_kwargs["min_messages_per_group"] == 2
         assert mock_audit.log.call_args[0][1] == "command_bd"
@@ -1197,13 +1197,13 @@ class TestBdScalingParams:
     def test_quick_1d(self):
         per_chat, ctx, tokens = _bd_scaling_params(1, "quick")
         assert per_chat == 110   # min(500, 50+60)
-        assert ctx == 98000      # min(200000, 80000+18000)
+        assert ctx == 200000     # always max for quick mode
         assert tokens == 3400    # min(6000, 3000+400)
 
     def test_quick_3d(self):
         per_chat, ctx, tokens = _bd_scaling_params(3, "quick")
         assert per_chat == 230   # min(500, 50+180)
-        assert ctx == 134000     # min(200000, 80000+54000)
+        assert ctx == 200000     # always max for quick mode
         assert tokens == 4200    # min(6000, 3000+1200)
 
     def test_quick_7d(self):
