@@ -1340,48 +1340,70 @@ async def handle_bd(
         await update.message.reply_text(no_results_msg)
         return
 
-    # NEEDS RESPONSE always gets full detail — it's the most important section.
-    needs_response_instruction = (
-        "NEEDS RESPONSE section:\n"
-        "These are teams/people that need something from me — a reply, a decision, "
-        "a review, a deliverable, a connection, anything. Not just questions.\n"
+    # REPLY NEEDED always gets full detail — most actionable section.
+    reply_needed_instruction = (
+        "REPLY NEEDED section:\n"
+        "Only include chats where I am directly and personally on the hook — "
+        "specifically: someone replied to one of my messages, directly mentioned me by name, "
+        "or sent a message clearly addressed to me. "
+        "Do NOT include general project activity, team updates, or conversations where "
+        "others are handling things — those belong in NEEDS COVERAGE or ACTIVE.\n"
         "Number each team. For each one, give a detailed writeup — who's involved, "
-        "what they need, the full conversation context so I understand the situation, "
-        "key specifics where relevant, and how long it's been pending. "
+        "what they need from me specifically, the full conversation context so I understand "
+        "the situation, key specifics where relevant, and how long it's been pending. "
         "Then end each team with <b>Action Items:</b> followed by a numbered list "
-        "of the specific things I need to do for them. A single team can have "
+        "of the specific things I personally need to do. A single team can have "
         "multiple action items if the conversation warrants it.\n"
-        "This section needs enough depth that I can act without going back to read the chat."
+        "This section needs enough depth that I can act without going back to read the chat.\n"
+        "If nothing clearly requires a personal reply, output just: <i>None.</i>"
     )
     if detail_mode == "detailed":
-        updates_instruction = (
-            "UPDATES section:\n"
-            "Use bullets. Status + what changed + enough context to understand why it matters."
+        needs_coverage_instruction = (
+            "NEEDS COVERAGE section:\n"
+            "Active conversations where something is stalled, unanswered, or clearly needs "
+            "someone to step in — but it's not specifically directed at me. "
+            "Someone from the team should engage, but I don't necessarily need to personally reply.\n"
+            "Use bullets. For each: what's stalled/open, who's involved, what kind of support "
+            "is needed, and how long it's been waiting."
+        )
+        active_instruction = (
+            "ACTIVE section:\n"
+            "Chats that are moving — already receiving engagement, responses are flowing, "
+            "no coverage gap. I can safely skip these unless something catches my eye.\n"
+            "Use bullets. One line per chat: status + what's happening. Keep it brief."
         )
     else:
-        updates_instruction = (
-            "UPDATES section:\n"
-            "Use bullets. For each chat with a meaningful update: status + what changed + "
-            "one line of context on why it matters. Skip routine check-ins, pleasantries, "
-            "and chats with no substantive new information."
+        needs_coverage_instruction = (
+            "NEEDS COVERAGE section:\n"
+            "Active conversations where something is stalled or unanswered and no one appears "
+            "to be handling it — not directed at me personally, but the project needs someone.\n"
+            "Use bullets. One line per chat: what's open + what's needed. "
+            "Skip anything that's actually moving or already being handled."
+        )
+        active_instruction = (
+            "ACTIVE section:\n"
+            "Chats already receiving engagement — conversation is flowing, no gap.\n"
+            "Use bullets. One brief line per chat. Skip routine check-ins and pleasantries."
         )
 
     prompt = (
         f"Give me a {detail_mode} briefing of my {chat_count} freshest chats "
         f"from the last {days} day(s).\n\n"
-        "Start with a one-line triage count (e.g. '5 need response · 8 updates · 12 quiet').\n\n"
-        "SIGNAL IS CRITICAL — focus on what genuinely matters. Surface chats that need "
-        "my attention or have meaningful updates. Skip chats with only routine messages, "
-        "pleasantries, or no actionable content.\n\n"
+        "Start with a one-line triage count (e.g. '2 reply needed · 4 need coverage · 9 active').\n\n"
+        "SIGNAL IS CRITICAL — focus on what genuinely matters. Be conservative about what "
+        "goes in REPLY NEEDED: only add a chat if someone is clearly waiting on me personally. "
+        "When in doubt, put it in NEEDS COVERAGE instead.\n\n"
+        "OWNER IDENTITY: Messages tagged [owner_message] are mine. Use that plus my name/aliases "
+        "to distinguish direct asks (reply to my message, mention of me by name) from general "
+        "project activity that happens to be in a shared chat.\n\n"
         "BLAST DETECTION: If you see the same or very similar message sent across "
         "multiple chats (e.g. an event invite, announcement, or news blast), "
         "don't list each chat individually. Instead, collapse into one brief note "
-        "like 'Monad sent [topic] to N chats' in the UPDATES section. "
+        "like 'Monad sent [topic] to N chats' in the ACTIVE section. "
         "These are broadcast messages, not conversations needing a response.\n\n"
-        f"{needs_response_instruction}\n\n"
-        f"{updates_instruction}\n\n"
-        "QUIET section:\n"
-        "Collapse into a single line — just list the chat names.\n\n"
+        f"{reply_needed_instruction}\n\n"
+        f"{needs_coverage_instruction}\n\n"
+        f"{active_instruction}\n\n"
         "Chat name rules:\n"
         "- Chat titles are usually 'Monad <> CompanyName' or similar. "
         "Drop the 'Monad <> ' / 'Monad x ' prefix — just use the counterparty name "
