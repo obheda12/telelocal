@@ -1483,46 +1483,42 @@ async def handle_summary(
         return
 
     if detail_mode == "detailed":
-        depth_instruction = (
-            "Within each category, number the chats. For each chat give:\n"
-            "- <b>Bold team name</b> (drop 'Monad <> ' / 'Monad x ' prefix, just the counterparty)\n"
-            "- Full context: who said what, key developments, specifics, "
-            "relevant quotes, and implications\n"
-            "- Include timestamps when they add context\n"
-            "- The goal is comprehensive — I should understand exactly what "
-            "happened without reading the original chats"
+        key_points_instruction = (
+            "KEY POINTS: Up to 15 bullets. Each bullet is one specific, notable development — "
+            "a deal advancing, a launch, a partnership forming, a blocker, a meaningful signal. "
+            "Name the counterparty in <b>bold</b> (drop 'Monad <> ' / 'Monad x ' prefix). "
+            "Include enough context that the reader understands significance without reading the chat. "
+            "Include timestamps when recency or staleness matters."
         )
     else:
-        depth_instruction = (
-            "Within each category, number the chats. For each chat give:\n"
-            "- <b>Bold team name</b> (drop 'Monad <> ' / 'Monad x ' prefix, just the counterparty)\n"
-            "- 2-3 lines: key development, who's involved, what changed and why it matters\n"
-            "- Include timestamps when staleness or urgency matters\n"
-            "- Include every chat with meaningful activity — don't filter out borderline cases"
+        key_points_instruction = (
+            "KEY POINTS: Up to 10 bullets. Each bullet is one specific, notable development — "
+            "a deal advancing, a launch, a partnership forming, a blocker, a meaningful signal. "
+            "Name the counterparty in <b>bold</b> (drop 'Monad <> ' / 'Monad x ' prefix). "
+            "One tight sentence per bullet — just what happened and why it matters."
         )
 
     prompt = (
-        f"Summarize what happened across my chats in the last {days} day(s). "
-        "This is for a BD person managing many partner and team chats.\n\n"
-        "Group chats into categories based on what actually happened in the messages. "
-        "Choose categories dynamically based on the content — examples might include: "
-        "Deals & Partnerships, Launches & Milestones, Integrations & Technical, "
-        "Inbound & New Opportunities, People & Team Changes, Marketing & Amplification, "
-        "Stalled / Needs Unblocking — but use whatever categories fit the actual content. "
-        "Skip quiet chats entirely — don't mention them.\n\n"
-        "BLAST DETECTION: If the same or very similar message appears across "
-        "multiple chats (e.g. an event invite, announcement, big news sent to "
-        "all partners), collapse into a single line noting what was sent and "
-        "to how many chats — don't repeat it per chat.\n\n"
-        f"{depth_instruction}\n\n"
-        "Format for Telegram readability:\n"
-        "- Category headers: <code><b>ALL CAPS</b></code> — no emojis in headers\n"
-        "- Keep each chat entry short enough to scan on a phone\n"
-        "- All times are in ET (Eastern Time). Use ET when displaying any time.\n"
+        f"You are writing a newsletter-style ecosystem digest covering the last {days} day(s) "
+        "across all partner and team chats. Think of it as the briefing someone reads once "
+        "to stay current — not a per-chat report, but a synthesized picture of what's happening.\n\n"
+        "BLAST DETECTION: If the same or very similar message appears across multiple chats "
+        "(e.g. an event invite, announcement, or news blast), collapse it into a single mention "
+        "— don't repeat it per chat.\n\n"
+        "Structure your response in exactly two sections, separated by ===SECTION===:\n\n"
+        "Section 1 — DIGEST\n"
+        f"A 3-5 sentence narrative of what's been happening in the ecosystem over the past {days} day(s). "
+        "Synthesize across all chats — major themes, momentum, notable deals, key signals. "
+        "Write it like the opening of a good newsletter: punchy, informative, no fluff. "
+        "Don't list chats — tell the story of what's happening.\n\n"
+        "Section 2 — KEY POINTS\n"
+        f"{key_points_instruction}\n\n"
+        "Formatting:\n"
+        "- Section headers: <code><b>ALL CAPS</b></code>\n"
+        "- <b>bold</b> for counterparty names in bullets\n"
+        "- All times in ET (Eastern Time)\n"
         "- NEVER use --- or *** or === as separators\n\n"
-        "Be thorough across all chats — the goal is to never fall behind on anything.\n\n"
-        "IMPORTANT: Separate each category with the exact marker ===SECTION=== on its own line. "
-        "Each category will be sent as its own message."
+        "IMPORTANT: Separate the two sections with the exact marker ===SECTION=== on its own line."
     )
     owner_id = _resolve_owner_user_id(update, context)
     owner_aliases = _resolve_owner_mention_aliases(update, context)
