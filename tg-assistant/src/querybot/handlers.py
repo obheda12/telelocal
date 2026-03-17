@@ -1482,43 +1482,44 @@ async def handle_summary(
         await update.message.reply_text(no_results_msg)
         return
 
+    day_label = f"{days} DAY" if days == 1 else f"{days} DAYS"
     if detail_mode == "detailed":
-        key_points_instruction = (
-            "KEY POINTS: Up to 15 bullets. Each bullet is one specific, notable development — "
-            "a deal advancing, a launch, a partnership forming, a blocker, a meaningful signal. "
-            "Name the counterparty in <b>bold</b> (drop 'Monad <> ' / 'Monad x ' prefix). "
-            "Include enough context that the reader understands significance without reading the chat. "
-            "Include timestamps when recency or staleness matters."
+        depth_instruction = (
+            "Cover the full breadth of the window — let the volume and significance of activity "
+            "determine the length. Go deeper on meaningful developments: name counterparties, "
+            "describe what moved, what was decided, what's stalled. "
+            "Group related themes into short paragraphs with a blank line between them. "
+            "Include timestamps when recency or staleness is meaningful. "
+            "Every sentence should carry information — no filler."
         )
     else:
-        key_points_instruction = (
-            "KEY POINTS: Up to 10 bullets. Each bullet is one specific, notable development — "
-            "a deal advancing, a launch, a partnership forming, a blocker, a meaningful signal. "
-            "Name the counterparty in <b>bold</b> (drop 'Monad <> ' / 'Monad x ' prefix). "
-            "One tight sentence per bullet — just what happened and why it matters."
+        depth_instruction = (
+            "Cover the breadth of the window — let the actual activity determine the length. "
+            "A quiet period warrants a short digest; a busy one warrants more. "
+            "Hit every meaningful theme: deals, launches, blockers, key signals. "
+            "Use a blank line between distinct themes when it aids readability. "
+            "Stay punchy — if a sentence doesn't add information, cut it."
         )
 
     prompt = (
         f"You are writing a newsletter-style ecosystem digest covering the last {days} day(s) "
-        "across all partner and team chats. Think of it as the briefing someone reads once "
-        "to stay current — not a per-chat report, but a synthesized picture of what's happening.\n\n"
+        "across all partner and team chats. This is a snapshot someone reads once to stay current.\n\n"
+        f"Start with the header: <code><b>DIGEST [{day_label}]</b></code>\n\n"
+        "Then write a flowing narrative digest — not a per-chat report, not a bullet list. "
+        "Synthesize across all chats into a coherent picture of what's transpiring: "
+        "themes, momentum, key relationships, notable deals, blockers, signals. "
+        "Name counterparties in <b>bold</b> (drop 'Monad <> ' / 'Monad x ' prefix) "
+        "when they're central to a point.\n\n"
+        f"{depth_instruction}\n\n"
         "BLAST DETECTION: If the same or very similar message appears across multiple chats "
-        "(e.g. an event invite, announcement, or news blast), collapse it into a single mention "
+        "(e.g. an event invite, announcement, or news blast), collapse it into one mention "
         "— don't repeat it per chat.\n\n"
-        "Structure your response in exactly two sections, separated by ===SECTION===:\n\n"
-        "Section 1 — DIGEST\n"
-        f"A 3-5 sentence narrative of what's been happening in the ecosystem over the past {days} day(s). "
-        "Synthesize across all chats — major themes, momentum, notable deals, key signals. "
-        "Write it like the opening of a good newsletter: punchy, informative, no fluff. "
-        "Don't list chats — tell the story of what's happening.\n\n"
-        "Section 2 — KEY POINTS\n"
-        f"{key_points_instruction}\n\n"
         "Formatting:\n"
-        "- Section headers: <code><b>ALL CAPS</b></code>\n"
-        "- <b>bold</b> for counterparty names in bullets\n"
+        "- Header: <code><b>DIGEST [{day_label}]</b></code>\n"
+        "- <b>bold</b> for counterparty names\n"
+        "- Blank lines between thematic paragraphs\n"
         "- All times in ET (Eastern Time)\n"
-        "- NEVER use --- or *** or === as separators\n\n"
-        "IMPORTANT: Separate the two sections with the exact marker ===SECTION=== on its own line."
+        "- NEVER use --- or *** or === as separators"
     )
     owner_id = _resolve_owner_user_id(update, context)
     owner_aliases = _resolve_owner_mention_aliases(update, context)
