@@ -64,7 +64,7 @@ class MentionBundle:
 class QueryIntent:
     """Structured search parameters extracted from a user's question."""
 
-    search_terms: Optional[str] = None
+    search_queries: List[str] = field(default_factory=list)  # 0–3 short topic keyword strings
     chat_ids: Optional[List[int]] = None
     sender_name: Optional[str] = None
     days_back: Optional[int] = None
@@ -429,6 +429,46 @@ class MessageSearch:
 
         rows = await self._pool.fetch(sql, *params)
         return self._rows_to_results(rows)
+
+    async def multi_query_filtered_search(
+        self,
+        search_queries: List[str],
+        chat_ids: Optional[List[int]] = None,
+        sender_name: Optional[str] = None,
+        days_back: Optional[int] = None,
+        limit: int = 40,
+    ) -> List[SearchResult]:
+        """Run multiple keyword searches in parallel and merge by message identity.
+
+        Each query in *search_queries* is run as a separate filtered_search call.
+        Results are deduplicated by (message_id, chat_id) keeping the highest score.
+        Returns up to *limit* results sorted by score descending.
+        """
+        if not search_queries:
+            return []
+        per_query_limit = max(limit, 20)
+        tasks = [
+            self.filtered_search(
+                search_terms=q,
+                chat_ids=chat_ids,
+                sender_name=sender_name,
+                days_back=days_back,
+                limit=per_query_limit,
+            )
+            for q in search_queries
+        ]
+        all_batches = await asyncio.gather(*tasks)
+
+        # Deduplicate by (message_id, chat_id), keep highest score
+        seen: Dict[Tuple[int, int], SearchResult] = {}
+        for batch in all_batches:
+            for result in batch:
+                key = (result.message_id, result.chat_id)
+                if key not in seen or result.score > seen[key].score:
+                    seen[key] = result
+
+        merged = sorted(seen.values(), key=lambda r: r.score, reverse=True)
+        return merged[:limit]
 
     async def recent_chat_summary_context(
         self,

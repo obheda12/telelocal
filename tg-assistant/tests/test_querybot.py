@@ -302,6 +302,7 @@ def _make_handler_context(
         {"chat_id": 1, "title": "Engineering <> Acme", "chat_type": "group"},
     ]
     mock_search.filtered_search.return_value = search_results or []
+    mock_search.multi_query_filtered_search.return_value = search_results or []
     mock_search.full_text_search.return_value = fallback_results or []
     mock_search.recent_chat_summary_context.return_value = search_results or []
     mock_search.mentions_needing_attention.return_value = search_results or []
@@ -313,7 +314,7 @@ def _make_handler_context(
 
     mock_llm = AsyncMock()
     mock_llm.extract_query_intent.return_value = intent or QueryIntent(
-        search_terms="happened"
+        search_queries=["happened"]
     )
     mock_llm.query.return_value = llm_answer
 
@@ -353,7 +354,7 @@ class TestHandleMessage:
         """Should reply with 'no results' when search returns nothing."""
         update, context, mock_search, mock_llm, _ = _make_handler_context(
             search_results=[],
-            intent=QueryIntent(search_terms="something"),
+            intent=QueryIntent(search_queries=["something"]),
         )
         # Simulate a fully-synced DB (enough data → standard no-results message)
         mock_search._pool.fetchval = AsyncMock(side_effect=[5000, 20])
@@ -362,7 +363,7 @@ class TestHandleMessage:
 
         mock_search.get_chat_list.assert_called_once()
         mock_llm.extract_query_intent.assert_called_once()
-        mock_search.filtered_search.assert_called_once()
+        mock_search.multi_query_filtered_search.assert_called()
         # Should not call LLM query when there are no results
         mock_llm.query.assert_not_called()
         reply_text = update.message.reply_text.call_args[0][0]
@@ -383,7 +384,7 @@ class TestHandleMessage:
         update, context, mock_search, mock_llm, mock_audit = _make_handler_context(
             search_results=[result],
             llm_answer="Alice said hello.",
-            intent=QueryIntent(search_terms="hello", chat_ids=[1]),
+            intent=QueryIntent(search_queries=["hello"], chat_ids=[1]),
         )
         update.message.text = "What did Alice say in engineering?"
 
@@ -394,13 +395,13 @@ class TestHandleMessage:
         call_args = mock_llm.extract_query_intent.call_args[0]
         assert call_args[0] == "What did Alice say in engineering?"
 
-        # Filtered search should receive intent parameters
-        mock_search.filtered_search.assert_called_once_with(
-            search_terms="hello",
+        # Multi-query search should receive intent parameters
+        mock_search.multi_query_filtered_search.assert_called_once_with(
+            search_queries=["hello"],
             chat_ids=[1],
             sender_name=None,
             days_back=None,
-            limit=20,
+            limit=40,
         )
 
         mock_llm.query.assert_called_once()
@@ -412,7 +413,7 @@ class TestHandleMessage:
 
     @pytest.mark.asyncio
     async def test_fallback_to_unfiltered_fts(self):
-        """Should fall back to unfiltered FTS when filtered search returns nothing."""
+        """Should fall back to unfiltered multi-query when filtered search returns nothing."""
         result = SearchResult(
             message_id=1,
             chat_id=2,
@@ -424,14 +425,15 @@ class TestHandleMessage:
         )
         update, context, mock_search, mock_llm, _ = _make_handler_context(
             search_results=[],  # filtered search returns nothing
-            fallback_results=[result],  # but unfiltered FTS finds something
-            intent=QueryIntent(search_terms="meeting", chat_ids=[99]),  # wrong chat
+            intent=QueryIntent(search_queries=["meeting"], chat_ids=[99]),  # wrong chat
         )
+        # First call (filtered) returns nothing; fallback (no filters) returns result
+        mock_search.multi_query_filtered_search.side_effect = [[], [result]]
 
         await handle_message(update, context)
 
-        # Should have called unfiltered FTS as fallback
-        mock_search.full_text_search.assert_called_once()
+        # multi_query_filtered_search called twice: filtered first, then fallback
+        assert mock_search.multi_query_filtered_search.call_count == 2
         mock_llm.query.assert_called_once()
 
     @pytest.mark.asyncio
@@ -448,12 +450,12 @@ class TestHandleMessage:
         )
         update, context, mock_search, mock_llm, _ = _make_handler_context(
             search_results=[result],
-            intent=QueryIntent(search_terms=None, chat_ids=[1], days_back=1),
+            intent=QueryIntent(search_queries=[], chat_ids=[1], days_back=1),
         )
 
         await handle_message(update, context)
 
-        # No search terms → browse → limit should be 50
+        # No search_queries → browse mode → filtered_search with limit=50
         call_kwargs = mock_search.filtered_search.call_args[1]
         assert call_kwargs["limit"] == 50
 
@@ -471,14 +473,14 @@ class TestHandleMessage:
         )
         update, context, mock_search, mock_llm, mock_audit = _make_handler_context(
             search_results=[result],
-            intent=QueryIntent(search_terms="topic", chat_ids=[1], days_back=7),
+            intent=QueryIntent(search_queries=["topic"], chat_ids=[1], days_back=7),
         )
 
         await handle_message(update, context)
 
         audit_details = mock_audit.log.call_args[0][2]
         assert audit_details["intent_chat_ids"] == [1]
-        assert audit_details["intent_has_search_terms"] is True
+        assert audit_details["intent_query_count"] == 1
         assert audit_details["intent_days_back"] == 7
 
     @pytest.mark.asyncio
@@ -570,7 +572,7 @@ class TestHandleMessage:
         )
         update, context, mock_search, mock_llm, _ = _make_handler_context(
             search_results=[result],
-            intent=QueryIntent(search_terms="synopsis"),  # should be ignored by breadth mode
+            intent=QueryIntent(search_queries=["synopsis"]),  # should be ignored by breadth mode
         )
         update.message.text = "tell me a quick synopsis of the 50 freshest chats"
 
@@ -882,9 +884,9 @@ class TestClaudeAssistantUsageStats:
 
 class TestQueryIntent:
     def test_default_intent(self):
-        """Default intent should have all None fields."""
+        """Default intent should have empty search_queries and None other fields."""
         intent = QueryIntent()
-        assert intent.search_terms is None
+        assert intent.search_queries == []
         assert intent.chat_ids is None
         assert intent.sender_name is None
         assert intent.days_back is None
@@ -892,12 +894,12 @@ class TestQueryIntent:
     def test_intent_with_all_fields(self):
         """Should store all search parameters."""
         intent = QueryIntent(
-            search_terms="deployment",
+            search_queries=["deployment"],
             chat_ids=[1, 2],
             sender_name="Alice",
             days_back=7,
         )
-        assert intent.search_terms == "deployment"
+        assert intent.search_queries == ["deployment"]
         assert intent.chat_ids == [1, 2]
         assert intent.sender_name == "Alice"
         assert intent.days_back == 7
@@ -944,7 +946,7 @@ class TestSyncStatusContext:
         """handle_message should use sync-aware message when search returns nothing."""
         update, context, mock_search, mock_llm, _ = _make_handler_context(
             search_results=[],
-            intent=QueryIntent(search_terms="something"),
+            intent=QueryIntent(search_queries=["something"]),
         )
         # Mock the pool to return 0 messages (initial sync)
         mock_search._pool.fetchval = AsyncMock(side_effect=[0, 0])
@@ -1007,7 +1009,7 @@ class TestTypingIndicators:
         )
         update, context, mock_search, mock_llm, _ = _make_handler_context(
             search_results=[result], llm_answer="Answer",
-            intent=QueryIntent(search_terms="hello", chat_ids=[1]),
+            intent=QueryIntent(search_queries=["hello"], chat_ids=[1]),
         )
         update.message.text = "What did User say about hello?"
 
@@ -1087,7 +1089,7 @@ class TestModelRouting:
         )
         update, context, mock_search, mock_llm, _ = _make_handler_context(
             search_results=[result], llm_answer="Alice mentioned deployment.",
-            intent=QueryIntent(search_terms="deployment", chat_ids=[1]),
+            intent=QueryIntent(search_queries=["deployment"], chat_ids=[1]),
         )
         update.message.text = "What did Alice say about deployment?"
 
@@ -1175,7 +1177,7 @@ class TestFastPathIntentExtraction:
         )
         update, context, mock_search, mock_llm, _ = _make_handler_context(
             search_results=[result], llm_answer="Summary of recent events.",
-            intent=QueryIntent(search_terms="ignored"),
+            intent=QueryIntent(search_queries=[]),
         )
         update.message.text = "what's new"
 

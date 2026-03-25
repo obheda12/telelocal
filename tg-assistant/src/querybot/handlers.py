@@ -1784,25 +1784,35 @@ async def handle_message(
             days_back=days_back,
         )
     else:
-        # Use higher limit for browse queries (no search terms = summarize)
-        browse_limit = 50 if not intent.search_terms else 20
-        results = await search.filtered_search(
-            search_terms=intent.search_terms,
-            chat_ids=intent.chat_ids,
-            sender_name=intent.sender_name,
-            days_back=intent.days_back,
-            limit=browse_limit,
-        )
+        if intent.search_queries:
+            results = await search.multi_query_filtered_search(
+                search_queries=intent.search_queries,
+                chat_ids=intent.chat_ids,
+                sender_name=intent.sender_name,
+                days_back=intent.days_back,
+                limit=40,
+            )
+        else:
+            # Browse mode (no topic filters): use filtered_search with timestamp order
+            results = await search.filtered_search(
+                search_terms=None,
+                chat_ids=intent.chat_ids,
+                sender_name=intent.sender_name,
+                days_back=intent.days_back,
+                limit=50,
+            )
 
-    # 3. Fallback: if filtered search found nothing but had filters,
-    #    try unfiltered FTS with the original question
-    if (
-        not results
-        and not recent_summary_mode
-        and (intent.chat_ids or intent.sender_name or intent.days_back)
-    ):
-        logger.info("Filtered search empty, falling back to unfiltered FTS")
-        results = await search.full_text_search(question)
+    # 3. Fallback: if search came up empty, try without filters
+    if not results and not recent_summary_mode:
+        if intent.search_queries:
+            logger.info("Filtered search empty, falling back to unfiltered multi-query")
+            results = await search.multi_query_filtered_search(
+                search_queries=intent.search_queries,
+                limit=40,
+            )
+        elif intent.chat_ids or intent.sender_name or intent.days_back:
+            logger.info("Filtered browse empty, falling back to unfiltered FTS")
+            results = await search.full_text_search(question)
 
     if not results:
         no_results_msg = await _get_sync_status_context(search._pool)
@@ -1833,7 +1843,8 @@ async def handle_message(
         summary_days = intent.days_back if intent.days_back is not None else 7
         context_max_chars = min(80_000, 30_000 + summary_days * 7_000)
     else:
-        context_max_chars = 8000
+        # For analytical queries (multi-topic) give Claude more context budget
+        context_max_chars = 16_000 if len(intent.search_queries) > 1 else 10_000
     owner_id = _resolve_owner_user_id(update, context)
     owner_aliases = _resolve_owner_mention_aliases(update, context)
     answer = await llm.query(
@@ -1857,7 +1868,7 @@ async def handle_message(
             "results_count": len(results),
             "answer_length": len(answer),
             "intent_chat_ids": intent.chat_ids,
-            "intent_has_search_terms": intent.search_terms is not None,
+            "intent_query_count": len(intent.search_queries),
             "intent_days_back": intent.days_back,
             "injection_warnings_count": injection_warnings_count,
             "context_truncated": context_truncated,

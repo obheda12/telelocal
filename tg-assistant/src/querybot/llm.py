@@ -50,23 +50,28 @@ Available chats (format: ID | Title | Type):
 {chat_list}
 
 Given the user's question, return ONLY a JSON object with these fields:
-- "search_terms": keywords to search message text (null if the user wants to \
-browse/summarize all messages in a chat or time range)
-- "chat_ids": array of integer chat IDs from the list above that match the \
-user's request (null if not targeting specific chats)
+- "search_queries": array of 1–3 SHORT TOPIC KEYWORD STRINGS (1–3 words each) that
+  identify the SUBJECT MATTER to search for in message text.
+  - Strip all action/meta words: compile, list, find, get, show, who, people,
+    messages, someone, all, any, etc. Focus on WHAT the messages are ABOUT.
+  - Use multiple entries for compound topics:
+    "people I'm meeting at the conference" → ["conference meeting", "conference"]
+    "project deadline discussion" → ["project deadline"]
+    "flight booking for Tokyo trip" → ["flight Tokyo", "Tokyo trip"]
+  - Set to [] (empty array) only if the user wants to browse all messages without
+    filtering by topic (e.g. "summarize acme chat", "what's new in #general")
+- "chat_ids": array of integer chat IDs from the list above matching the request \
+(null if not specific)
 - "sender_name": sender first or last name to filter by (null if not specific)
 - "days_back": integer number of days to look back (null for all time)
 
 Rules:
 - Match chat names liberally: if the user says "acme", match any chat with \
-"Acme" in the title. Chat names often follow the pattern "TeamName <> CompanyName".
-- For time: "today"=1, "yesterday"=2, "last week"=7, "last month"=30, \
-"recently"=7, "this week"=7
-- search_terms should contain ONLY the topic keywords — exclude chat names, \
-sender names, and time references
-- If the question is a general summary request for a specific chat (e.g. \
-"summarize the acme chat"), set search_terms to null and chat_ids to the \
-matching chat(s)
+"Acme" in title.
+- Time: "today"=1, "yesterday"=2, "last week"=7, "last month"=30, "recently"=7
+- search_queries entries must NOT contain chat names, sender names, or time references
+- If the question is a general summary for a specific chat, set search_queries=[] \
+and chat_ids to matching chat(s)
 - Return valid JSON only. No markdown fences, no explanation."""
 
 
@@ -206,19 +211,24 @@ class ClaudeAssistant:
             if days_back is not None:
                 days_back = min(180, max(1, int(days_back)))
 
-            search_terms = data.get("search_terms")
-            if isinstance(search_terms, list):
-                search_terms = " ".join(str(t) for t in search_terms)
+            search_queries_raw = data.get("search_queries")
+            if isinstance(search_queries_raw, str):
+                # Backward compat if model still returns a string
+                search_queries = [search_queries_raw.strip()] if search_queries_raw.strip() else []
+            elif isinstance(search_queries_raw, list):
+                search_queries = [str(q).strip() for q in search_queries_raw if str(q).strip()][:3]
+            else:
+                search_queries = []
 
             intent = QueryIntent(
-                search_terms=search_terms or None,
+                search_queries=search_queries,
                 chat_ids=chat_ids,
                 sender_name=data.get("sender_name") or None,
                 days_back=days_back,
             )
             logger.info(
-                "Extracted intent: has_terms=%s, chat_count=%s, sender=%s, days=%s",
-                intent.search_terms is not None,
+                "Extracted intent: queries=%s, chat_count=%s, sender=%s, days=%s",
+                search_queries,
                 len(intent.chat_ids) if intent.chat_ids else 0,
                 intent.sender_name is not None,
                 intent.days_back,
@@ -240,7 +250,7 @@ class ClaudeAssistant:
                 "Raw response: %s",
                 exc, raw_resp,
             )
-            return QueryIntent(search_terms=user_question)
+            return QueryIntent(search_queries=[user_question])
 
     # ------------------------------------------------------------------
     # Context formatting (data minimisation)

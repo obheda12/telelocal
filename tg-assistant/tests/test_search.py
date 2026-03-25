@@ -407,6 +407,92 @@ class TestMentionsNeedingAttention:
         assert "ILIKE" in sql
 
 
+class TestMultiQueryFilteredSearch:
+    @pytest.mark.asyncio
+    async def test_empty_queries_returns_empty(self):
+        """Empty search_queries should return [] without any DB calls."""
+        mock_pool = MagicMock()
+        mock_embedder = MagicMock()
+        mock_embedder.dimension = 384
+
+        search = MessageSearch(mock_pool, mock_embedder)
+        results = await search.multi_query_filtered_search(search_queries=[])
+        assert results == []
+
+    @pytest.mark.asyncio
+    async def test_deduplication_keeps_highest_score(self):
+        """Results returned by multiple queries should be deduplicated by (message_id, chat_id)."""
+        mock_pool = MagicMock()
+        mock_embedder = MagicMock()
+        mock_embedder.dimension = 384
+
+        search = MessageSearch(mock_pool, mock_embedder)
+
+        # Both queries return message 1 (overlap), query2 with higher score
+        q1_results = [_make_result(1, score=0.5), _make_result(2, score=0.4)]
+        q2_results = [_make_result(1, score=0.9), _make_result(3, score=0.3)]
+
+        with patch.object(search, "filtered_search", new_callable=AsyncMock) as mock_fs:
+            mock_fs.side_effect = [q1_results, q2_results]
+            results = await search.multi_query_filtered_search(
+                search_queries=["conference", "meeting"],
+                limit=10,
+            )
+
+        # message_id=1 appears in both; keep score=0.9 (highest)
+        ids = [r.message_id for r in results]
+        assert ids.count(1) == 1
+        msg1 = next(r for r in results if r.message_id == 1)
+        assert msg1.score == 0.9
+        # All 3 unique messages present
+        assert sorted(ids) == [1, 2, 3]
+
+    @pytest.mark.asyncio
+    async def test_parallel_dispatch_calls_each_query(self):
+        """Each search_query should be dispatched as a separate filtered_search call."""
+        mock_pool = MagicMock()
+        mock_embedder = MagicMock()
+        mock_embedder.dimension = 384
+
+        search = MessageSearch(mock_pool, mock_embedder)
+
+        with patch.object(search, "filtered_search", new_callable=AsyncMock) as mock_fs:
+            mock_fs.return_value = []
+            await search.multi_query_filtered_search(
+                search_queries=["alpha", "beta", "gamma"],
+                chat_ids=[42],
+                days_back=7,
+                limit=20,
+            )
+
+        assert mock_fs.call_count == 3
+        called_terms = {call.kwargs["search_terms"] for call in mock_fs.call_args_list}
+        assert called_terms == {"alpha", "beta", "gamma"}
+        # All calls should pass through the same filters
+        for call in mock_fs.call_args_list:
+            assert call.kwargs["chat_ids"] == [42]
+            assert call.kwargs["days_back"] == 7
+
+    @pytest.mark.asyncio
+    async def test_limit_respected(self):
+        """Should return at most limit results."""
+        mock_pool = MagicMock()
+        mock_embedder = MagicMock()
+        mock_embedder.dimension = 384
+
+        search = MessageSearch(mock_pool, mock_embedder)
+        many_results = [_make_result(i, score=1.0 / (i + 1)) for i in range(30)]
+
+        with patch.object(search, "filtered_search", new_callable=AsyncMock) as mock_fs:
+            mock_fs.return_value = many_results
+            results = await search.multi_query_filtered_search(
+                search_queries=["one", "two"],
+                limit=5,
+            )
+
+        assert len(results) == 5
+
+
 class TestOpenQuestionsNeedingReply:
     @pytest.mark.asyncio
     async def test_open_questions_query_uses_reply_gap_heuristic(self):
